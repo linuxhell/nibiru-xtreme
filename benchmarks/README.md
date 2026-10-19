@@ -64,3 +64,27 @@ Isso permite examinar a velocidade nos últimos segundos e identificar uma demor
 de finalização, sem gravar um evento para cada pacote ou bloco.
 
 O teste completo deve ser complementado por testes controlados locais, pois CDN, rota e horário podem mudar entre execuções.
+
+## Versão 0.1.1 e comparação de transporte
+
+O padrão continua negociando HTTP/1.1 ou HTTP/2. No HTTP/2, a janela de conexão é
+16 MiB e a janela por stream é 4 MiB. Requisições de até 32 MiB são recebidas em
+buffers de escrita de 4 MiB; perto do fim, o agendamento volta a ranges de até
+4 MiB para distribuir o trabalho restante entre os workers.
+
+O evento `http.response` registra a versão HTTP realmente negociada, sem query
+string ou credenciais. `http.segmented_metrics` registra quantidade de ranges,
+protocolo e tempos acumulados de espera por cabeçalhos, corpo e escrita.
+Esses tempos são somas de workers simultâneos: **não devem ser somados como tempo
+total do download**. O tempo de escrita inclui espera no pool de tarefas de I/O.
+
+O resumo inclui versão do motor, MB/s decimais e MiB/s, além dos hashes.
+Para uma comparação específica em HTTP/1.1, use a mesma versão, URL e máquina:
+
+```powershell
+powershell -NoExit -ExecutionPolicy Bypass -File .\windows11.ps1 -Http1Only
+```
+
+Esse modo é opcional; o iniciador `iniciar-teste.cmd` usa a negociação automática.
+Os resultados locais e os comandos de reprodução estão em
+[`performance-2026-10-19.md`](performance-2026-10-19.md).

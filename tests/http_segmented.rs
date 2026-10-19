@@ -135,6 +135,15 @@ async fn download_case(segmented: bool) {
     let detail = completed["detail"].as_str().unwrap();
     assert!(detail.contains("transfer_ms="));
     assert!(detail.contains("finalize_ms="));
+    if segmented {
+        let metrics = records
+            .iter()
+            .find(|record| record["event"] == "http.segmented_metrics")
+            .unwrap();
+        let detail = metrics["detail"].as_str().unwrap();
+        assert!(detail.contains("http1_ranges=3 "));
+        assert!(detail.contains("http2_ranges=0 "));
+    }
     assert!(
         !records
             .iter()
@@ -174,6 +183,7 @@ async fn download_case(segmented: bool) {
                 .arg(script)
                 .arg("-Url")
                 .arg(format!("http://{address}/payload.bin"))
+                .arg("-Http1Only")
                 .output()
                 .unwrap()
         })
@@ -196,6 +206,7 @@ async fn download_case(segmented: bool) {
         )
         .unwrap();
         assert_eq!(summary["size_bytes"], data.len() as u64);
+        assert_eq!(summary["http_mode"], "http1-only");
         assert_eq!(summary["sha256"].as_str().unwrap().len(), 64);
         assert_eq!(summary["binary_sha256"].as_str().unwrap().len(), 64);
         let script_log = tokio::fs::read_to_string(root.join("nibiru-download.jsonl"))

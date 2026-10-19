@@ -28,6 +28,8 @@ enum Command {
         out: PathBuf,
         #[arg(long)]
         log: Option<PathBuf>,
+        #[arg(long)]
+        http1_only: bool,
     },
     Serve {
         #[arg(long, default_value_t = 6800)]
@@ -51,9 +53,18 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     match cli.command {
-        Some(Command::Download { url, out, log }) => {
+        Some(Command::Download {
+            url,
+            out,
+            log,
+            http1_only,
+        }) => {
             let log = Arc::new(LogSink::new(log.as_deref())?);
-            let engine = Engine::new(log)?;
+            let engine = if http1_only {
+                Engine::with_http1_only(log)?
+            } else {
+                Engine::new(log)?
+            };
             let cancelled = Arc::new(AtomicBool::new(false));
             engine
                 .download(

@@ -27,7 +27,75 @@ use crate::{logging::LogSink, storage};
 
 const MIN_SEGMENTED_SIZE: u64 = 8 * 1024 * 1024;
 const RANGE_CHUNK_SIZE: u64 = 4 * 1024 * 1024;
+const MAX_HTTP_RANGE_SIZE: u64 = 32 * 1024 * 1024;
 const MAX_HTTP_WORKERS: usize = 16;
+const HTTP2_CONNECTION_WINDOW: u32 = 16 * 1024 * 1024;
+
+fn claim_range(next: &AtomicU64, total: u64, workers: usize) -> Option<(u64, u64)> {
+    loop {
+        let start = next.load(Ordering::Acquire);
+        if start >= total {
+            return None;
+        }
+        let remaining = total - start;
+        let size = if remaining > MAX_HTTP_RANGE_SIZE * workers as u64 {
+            MAX_HTTP_RANGE_SIZE
+        } else {
+            RANGE_CHUNK_SIZE
+        };
+        let end_exclusive = start + remaining.min(size);
+        if next
+            .compare_exchange_weak(start, end_exclusive, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return Some((start, end_exclusive - 1));
+        }
+    }
+}
+
+async fn write_range_block(
+    file: Arc<std::fs::File>,
+    offset: u64,
+    buffer: Vec<u8>,
+    completed: &AtomicU64,
+) -> Result<u64> {
+    let len = buffer.len() as u64;
+    let started = Instant::now();
+    storage::write_at(file, offset, buffer).await?;
+    completed.fetch_add(len, Ordering::AcqRel);
+    Ok(started.elapsed().as_micros() as u64)
+}
+
+#[cfg(test)]
+#[path = "engine/h2_tests.rs"]
+mod h2_tests;
+
+#[derive(Default)]
+struct RangeMetrics {
+    ranges: AtomicU64,
+    http1_ranges: AtomicU64,
+    http2_ranges: AtomicU64,
+    header_wait_us: AtomicU64,
+    body_wait_us: AtomicU64,
+    storage_wait_us: AtomicU64,
+}
+
+impl RangeMetrics {
+    fn report(&self, log: &LogSink) {
+        log.info(
+            "http.segmented_metrics",
+            &format!(
+                "ranges={} http1_ranges={} http2_ranges={} header_wait_us_sum={} body_wait_us_sum={} storage_wait_us_sum={} timing_scope=worker_sum",
+                self.ranges.load(Ordering::Relaxed),
+                self.http1_ranges.load(Ordering::Relaxed),
+                self.http2_ranges.load(Ordering::Relaxed),
+                self.header_wait_us.load(Ordering::Relaxed),
+                self.body_wait_us.load(Ordering::Relaxed),
+                self.storage_wait_us.load(Ordering::Relaxed),
+            ),
+        );
+    }
+}
 
 struct TransferLog {
     mode: &'static str,
@@ -102,14 +170,32 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(log: Arc<LogSink>) -> Result<Self> {
-        let client = Client::builder()
-            .user_agent(concat!("Nibiru-Xtreme/", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(Duration::from_secs(10))
-            .redirect(Policy::limited(10))
-            .https_only(false)
+        Self::build(log, false)
+    }
+
+    pub fn with_http1_only(log: Arc<LogSink>) -> Result<Self> {
+        Self::build(log, true)
+    }
+
+    fn build(log: Arc<LogSink>, http1_only: bool) -> Result<Self> {
+        let client = Self::client_builder(http1_only)
             .build()
             .context("failed to build HTTP client")?;
         Ok(Self { client, log })
+    }
+
+    fn client_builder(http1_only: bool) -> reqwest::ClientBuilder {
+        let mut builder = Client::builder()
+            .user_agent(concat!("Nibiru-Xtreme/", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(Duration::from_secs(10))
+            .http2_initial_connection_window_size(HTTP2_CONNECTION_WINDOW)
+            .http2_initial_stream_window_size(RANGE_CHUNK_SIZE as u32)
+            .redirect(Policy::limited(10))
+            .https_only(false);
+        if http1_only {
+            builder = builder.http1_only();
+        }
+        builder
     }
 
     pub async fn download<F>(
@@ -197,6 +283,15 @@ impl Engine {
 
         let started = Instant::now();
         let response = builder.send().await.context("HTTP request failed")?;
+        self.log.info(
+            "http.response",
+            &format!(
+                "mode=single version={:?} status={} url={}",
+                response.version(),
+                response.status(),
+                redact_url(response.url())
+            ),
+        );
         let status = response.status();
 
         if !status.is_success() {
@@ -330,12 +425,13 @@ impl Engine {
 
         let next_offset = Arc::new(AtomicU64::new(0));
         let completed = Arc::new(AtomicU64::new(0));
+        let metrics = Arc::new(RangeMetrics::default());
         let mut set = JoinSet::new();
 
         self.log.info(
             "http.segmented_started",
             &format!(
-                "url={} destination={} total={} workers={} chunk_size={}",
+                "url={} destination={} total={} workers={} chunk_size={} max_range_size={MAX_HTTP_RANGE_SIZE}",
                 redact_url(&parsed),
                 destination.display(),
                 total,
@@ -351,25 +447,48 @@ impl Engine {
             let next_offset = next_offset.clone();
             let completed = completed.clone();
             let cancelled = cancelled.clone();
+            let metrics = metrics.clone();
+            let log = self.log.clone();
             set.spawn(async move {
                 loop {
                     if cancelled.load(Ordering::Acquire) {
                         return Err(anyhow!("cancelled"));
                     }
-                    let start = next_offset.fetch_add(RANGE_CHUNK_SIZE, Ordering::AcqRel);
-                    if start >= total {
+                    let Some((start, end)) = claim_range(&next_offset, total, workers) else {
                         break;
-                    }
-                    let end = start
-                        .saturating_add(RANGE_CHUNK_SIZE - 1)
-                        .min(total.saturating_sub(1));
+                    };
 
+                    let requesting = Instant::now();
                     let response = client
                         .get(url.clone())
                         .header(RANGE, format!("bytes={start}-{end}"))
                         .send()
                         .await
                         .with_context(|| format!("range worker {worker_id} request failed"))?;
+                    metrics
+                        .header_wait_us
+                        .fetch_add(requesting.elapsed().as_micros() as u64, Ordering::Relaxed);
+                    metrics.ranges.fetch_add(1, Ordering::Relaxed);
+                    match response.version() {
+                        reqwest::Version::HTTP_10 | reqwest::Version::HTTP_11 => {
+                            metrics.http1_ranges.fetch_add(1, Ordering::Relaxed);
+                        }
+                        reqwest::Version::HTTP_2 => {
+                            metrics.http2_ranges.fetch_add(1, Ordering::Relaxed);
+                        }
+                        _ => {}
+                    }
+                    if start == 0 {
+                        log.info(
+                            "http.response",
+                            &format!(
+                                "mode=segmented version={:?} status={} url={}",
+                                response.version(),
+                                response.status(),
+                                redact_url(response.url())
+                            ),
+                        );
+                    }
 
                     if response.status() != StatusCode::PARTIAL_CONTENT {
                         bail!(
@@ -384,20 +503,67 @@ impl Engine {
                         total,
                     )?;
 
-                    let bytes = response
-                        .bytes()
-                        .await
-                        .with_context(|| format!("range worker {worker_id} body failed"))?;
                     let expected = end.saturating_sub(start).saturating_add(1);
-                    if bytes.len() as u64 != expected {
+                    let mut body = response.bytes_stream();
+                    let mut received = 0_u64;
+                    let mut written = 0_u64;
+                    let mut body_wait_us = 0_u64;
+                    let mut storage_wait_us = 0_u64;
+                    let mut buffer = Vec::with_capacity(RANGE_CHUNK_SIZE as usize);
+                    loop {
+                        let receiving = Instant::now();
+                        let chunk = body.next().await;
+                        body_wait_us += receiving.elapsed().as_micros() as u64;
+                        let Some(chunk) = chunk else {
+                            break;
+                        };
+                        if cancelled.load(Ordering::Acquire) {
+                            bail!("cancelled");
+                        }
+                        let chunk = chunk
+                            .with_context(|| format!("range worker {worker_id} body failed"))?;
+                        if chunk.len() as u64 > expected.saturating_sub(received) {
+                            bail!(
+                                "range worker {worker_id} body exceeds expected length {expected}"
+                            );
+                        }
+                        received += chunk.len() as u64;
+                        let mut part = chunk.as_ref();
+                        while !part.is_empty() {
+                            let take = part.len().min(RANGE_CHUNK_SIZE as usize - buffer.len());
+                            buffer.extend_from_slice(&part[..take]);
+                            part = &part[take..];
+                            if buffer.len() == RANGE_CHUNK_SIZE as usize {
+                                let block = std::mem::take(&mut buffer);
+                                storage_wait_us += write_range_block(
+                                    file.clone(),
+                                    start + written,
+                                    block,
+                                    &completed,
+                                )
+                                .await?;
+                                written += RANGE_CHUNK_SIZE;
+                                buffer = Vec::with_capacity(RANGE_CHUNK_SIZE as usize);
+                            }
+                        }
+                    }
+                    if received != expected {
                         bail!(
                             "range worker {worker_id} length mismatch expected={expected} got={}",
-                            bytes.len()
+                            received
                         );
                     }
-
-                    storage::write_at(file.clone(), start, bytes.to_vec()).await?;
-                    completed.fetch_add(expected, Ordering::AcqRel);
+                    if !buffer.is_empty() {
+                        storage_wait_us +=
+                            write_range_block(file.clone(), start + written, buffer, &completed)
+                                .await?;
+                    }
+                    metrics
+                        .body_wait_us
+                        .fetch_add(body_wait_us, Ordering::Relaxed);
+                    metrics
+                        .storage_wait_us
+                        .fetch_add(storage_wait_us, Ordering::Relaxed);
                 }
                 Ok::<(), anyhow::Error>(())
             });
@@ -460,6 +626,7 @@ impl Engine {
             bail!("segmented download incomplete expected={total} got={done}");
         }
 
+        metrics.report(&self.log);
         telemetry.record(&self.log, done, Some(total), 0, true);
         let transfer_ms = started.elapsed().as_millis();
         self.log.info(
@@ -608,8 +775,51 @@ pub fn safe_output_name(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{safe_output_name, suggested_worker_count, validate_content_range};
+    use super::{
+        MAX_HTTP_RANGE_SIZE, RANGE_CHUNK_SIZE, claim_range, safe_output_name,
+        suggested_worker_count, validate_content_range,
+    };
     use reqwest::header::HeaderValue;
+    use std::sync::{Arc, atomic::AtomicU64};
+
+    #[test]
+    fn concurrent_range_claims_cover_file_once_and_shrink_at_tail() {
+        let total = 4 * 1024 * 1024 * 1024 + 321;
+        let workers = 16;
+        let next = Arc::new(AtomicU64::new(0));
+        let tasks: Vec<_> = (0..workers)
+            .map(|_| {
+                let next = next.clone();
+                std::thread::spawn(move || {
+                    let mut ranges = Vec::new();
+                    while let Some(range) = claim_range(&next, total, workers) {
+                        ranges.push(range);
+                    }
+                    ranges
+                })
+            })
+            .collect();
+        let mut ranges: Vec<_> = tasks
+            .into_iter()
+            .flat_map(|task| task.join().unwrap())
+            .collect();
+        ranges.sort_unstable();
+        let mut position = 0;
+        let mut large = false;
+        for (start, end) in ranges {
+            assert_eq!(start, position);
+            assert!(end >= start && end < total);
+            let len = end - start + 1;
+            assert!(len <= MAX_HTTP_RANGE_SIZE);
+            if total - start <= MAX_HTTP_RANGE_SIZE * workers as u64 {
+                assert!(len <= RANGE_CHUNK_SIZE);
+            }
+            large |= len == MAX_HTTP_RANGE_SIZE;
+            position = end + 1;
+        }
+        assert_eq!(position, total);
+        assert!(large);
+    }
 
     #[test]
     fn rejects_traversal_names() {
