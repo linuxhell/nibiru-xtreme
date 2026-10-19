@@ -34,7 +34,7 @@ Write-Host "Output : $Output"
 Write-Host "URL    : signed Microsoft URL (not printed to avoid leaking query tokens)"
 
 $started = Get-Date
-& $Nibiru download $Url --out $Output
+& $Nibiru download $Url --out $Output --log (Join-Path $PSScriptRoot "nibiru-download.jsonl")
 if ($LASTEXITCODE -ne 0) {
     throw "Nibiru exited with code $LASTEXITCODE"
 }
