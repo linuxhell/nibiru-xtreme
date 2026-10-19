@@ -1,9 +1,5 @@
 use anyhow::{Result, anyhow};
-use std::{
-    fs::File,
-    io,
-    sync::Arc,
-};
+use std::{fs::File, io, sync::Arc};
 
 pub async fn write_at(file: Arc<File>, offset: u64, data: Vec<u8>) -> Result<()> {
     tokio::task::spawn_blocking(move || write_all_at(&file, offset, &data))
@@ -19,7 +15,10 @@ fn write_all_at(file: &File, mut offset: u64, mut data: &[u8]) -> io::Result<()>
     while !data.is_empty() {
         let written = file.write_at(data, offset)?;
         if written == 0 {
-            return Err(io::Error::new(io::ErrorKind::WriteZero, "zero-byte positional write"));
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "zero-byte positional write",
+            ));
         }
         offset = offset.saturating_add(written as u64);
         data = &data[written..];
