@@ -42,7 +42,10 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    if args.iter().any(|v| v == "--enable-rpc=true" || v == "--enable-rpc") {
+    if args
+        .iter()
+        .any(|v| v == "--enable-rpc=true" || v == "--enable-rpc")
+    {
         return run_aria2_compatible_rpc(&args).await;
     }
 
