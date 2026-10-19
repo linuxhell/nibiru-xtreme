@@ -2,25 +2,32 @@ use anyhow::{Context, Result, anyhow, bail};
 use futures_util::StreamExt;
 use reqwest::{
     Client, StatusCode,
-    header::{ACCEPT_RANGES, CONTENT_LENGTH, RANGE},
+    header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, RANGE},
     redirect::Policy,
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    fs::OpenOptions as StdOpenOptions,
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
 use tokio::{
     fs::{self, OpenOptions},
     io::AsyncWriteExt,
+    task::JoinSet,
+    time,
 };
 use url::Url;
 
-use crate::logging::LogSink;
+use crate::{logging::LogSink, storage};
+
+const MIN_SEGMENTED_SIZE: u64 = 8 * 1024 * 1024;
+const RANGE_CHUNK_SIZE: u64 = 4 * 1024 * 1024;
+const MAX_HTTP_WORKERS: usize = 16;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -78,6 +85,51 @@ impl Engine {
             .map(|m| m.len())
             .unwrap_or(0);
 
+        if existing == 0 {
+            if let Ok((Some(total), ranges)) = self.probe(&request.url).await {
+                if ranges && total >= MIN_SEGMENTED_SIZE {
+                    match self
+                        .download_segmented(
+                            parsed.clone(),
+                            &request.destination,
+                            total,
+                            cancelled.clone(),
+                            &mut on_progress,
+                        )
+                        .await
+                    {
+                        Ok(()) => return Ok(()),
+                        Err(error) if !cancelled.load(Ordering::Acquire) => {
+                            self.log.warn(
+                                "http.segmented_fallback",
+                                &format!("url={} reason={error}", redact_url(&parsed)),
+                            );
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
+        }
+
+        self.download_single(parsed, request.destination, cancelled, &mut on_progress)
+            .await
+    }
+
+    async fn download_single<F>(
+        &self,
+        parsed: Url,
+        destination: PathBuf,
+        cancelled: Arc<AtomicBool>,
+        on_progress: &mut F,
+    ) -> Result<()>
+    where
+        F: FnMut(Progress) + Send,
+    {
+        let existing = fs::metadata(&destination)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
+
         let mut builder = self.client.get(parsed.clone());
         if existing > 0 {
             builder = builder.header(RANGE, format!("bytes={existing}-"));
@@ -86,9 +138,9 @@ impl Engine {
         self.log.info(
             "http.request_started",
             &format!(
-                "url={} destination={} resume_from={existing}",
+                "url={} destination={} resume_from={existing} mode=single",
                 redact_url(&parsed),
-                request.destination.display()
+                destination.display()
             ),
         );
 
@@ -108,14 +160,14 @@ impl Engine {
             OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open(&request.destination)
+                .open(&destination)
                 .await?
         } else {
             OpenOptions::new()
                 .create(true)
                 .write(true)
                 .truncate(true)
-                .open(&request.destination)
+                .open(&destination)
                 .await?
         };
 
@@ -130,8 +182,8 @@ impl Engine {
                 self.log.warn(
                     "http.download_paused",
                     &format!(
-                        "destination={} downloaded={downloaded}",
-                        request.destination.display()
+                        "destination={} downloaded={downloaded} mode=single",
+                        destination.display()
                     ),
                 );
                 return Err(anyhow!("cancelled"));
@@ -169,12 +221,191 @@ impl Engine {
         self.log.info(
             "http.download_completed",
             &format!(
-                "destination={} bytes={} elapsed_ms={} resumed={} accept_ranges={}",
-                request.destination.display(),
+                "destination={} bytes={} elapsed_ms={} resumed={} mode=single",
+                destination.display(),
                 downloaded,
                 started.elapsed().as_millis(),
-                resumed,
-                if resumed { "bytes" } else { "unknown" }
+                resumed
+            ),
+        );
+        Ok(())
+    }
+
+    async fn download_segmented<F>(
+        &self,
+        parsed: Url,
+        destination: &Path,
+        total: u64,
+        cancelled: Arc<AtomicBool>,
+        on_progress: &mut F,
+    ) -> Result<()>
+    where
+        F: FnMut(Progress) + Send,
+    {
+        let workers = suggested_worker_count(total);
+        let part_path = temporary_part_path(destination);
+        let _ = fs::remove_file(&part_path).await;
+
+        let file = StdOpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(true)
+            .open(&part_path)?;
+        file.set_len(total)?;
+        let file = Arc::new(file);
+
+        let next_offset = Arc::new(AtomicU64::new(0));
+        let completed = Arc::new(AtomicU64::new(0));
+        let mut set = JoinSet::new();
+
+        self.log.info(
+            "http.segmented_started",
+            &format!(
+                "url={} destination={} total={} workers={} chunk_size={}",
+                redact_url(&parsed),
+                destination.display(),
+                total,
+                workers,
+                RANGE_CHUNK_SIZE
+            ),
+        );
+
+        for worker_id in 0..workers {
+            let client = self.client.clone();
+            let url = parsed.clone();
+            let file = file.clone();
+            let next_offset = next_offset.clone();
+            let completed = completed.clone();
+            let cancelled = cancelled.clone();
+            set.spawn(async move {
+                loop {
+                    if cancelled.load(Ordering::Acquire) {
+                        return Err(anyhow!("cancelled"));
+                    }
+                    let start = next_offset.fetch_add(RANGE_CHUNK_SIZE, Ordering::AcqRel);
+                    if start >= total {
+                        break;
+                    }
+                    let end = start
+                        .saturating_add(RANGE_CHUNK_SIZE - 1)
+                        .min(total.saturating_sub(1));
+
+                    let response = client
+                        .get(url.clone())
+                        .header(RANGE, format!("bytes={start}-{end}"))
+                        .send()
+                        .await
+                        .with_context(|| format!("range worker {worker_id} request failed"))?;
+
+                    if response.status() != StatusCode::PARTIAL_CONTENT {
+                        bail!(
+                            "range worker {worker_id} expected 206, got {}",
+                            response.status()
+                        );
+                    }
+                    validate_content_range(
+                        response.headers().get(CONTENT_RANGE),
+                        start,
+                        end,
+                        total,
+                    )?;
+
+                    let bytes = response
+                        .bytes()
+                        .await
+                        .with_context(|| format!("range worker {worker_id} body failed"))?;
+                    let expected = end.saturating_sub(start).saturating_add(1);
+                    if bytes.len() as u64 != expected {
+                        bail!(
+                            "range worker {worker_id} length mismatch expected={expected} got={}",
+                            bytes.len()
+                        );
+                    }
+
+                    storage::write_at(file.clone(), start, bytes.to_vec()).await?;
+                    completed.fetch_add(expected, Ordering::AcqRel);
+                }
+                Ok::<(), anyhow::Error>(())
+            });
+        }
+
+        let started = Instant::now();
+        let mut last_at = Instant::now();
+        let mut last_bytes = 0_u64;
+        let mut ticker = time::interval(Duration::from_millis(250));
+
+        while !set.is_empty() {
+            tokio::select! {
+                _ = ticker.tick() => {
+                    if cancelled.load(Ordering::Acquire) {
+                        set.abort_all();
+                        let _ = fs::remove_file(&part_path).await;
+                        return Err(anyhow!("cancelled"));
+                    }
+                    let now = Instant::now();
+                    let done = completed.load(Ordering::Acquire).min(total);
+                    let elapsed = now.duration_since(last_at).as_secs_f64().max(0.001);
+                    let speed = (done.saturating_sub(last_bytes) as f64 / elapsed) as u64;
+                    on_progress(Progress {
+                        downloaded: done,
+                        total: Some(total),
+                        speed_bytes_per_second: speed,
+                    });
+                    last_at = now;
+                    last_bytes = done;
+                }
+                joined = set.join_next() => {
+                    match joined {
+                        Some(Ok(Ok(()))) => {}
+                        Some(Ok(Err(error))) => {
+                            set.abort_all();
+                            while set.join_next().await.is_some() {}
+                            drop(file);
+                            let _ = fs::remove_file(&part_path).await;
+                            return Err(error);
+                        }
+                        Some(Err(error)) => {
+                            set.abort_all();
+                            while set.join_next().await.is_some() {}
+                            drop(file);
+                            let _ = fs::remove_file(&part_path).await;
+                            return Err(anyhow!("range worker panicked: {error}"));
+                        }
+                        None => break,
+                    }
+                }
+            }
+        }
+
+        let done = completed.load(Ordering::Acquire);
+        if done != total {
+            drop(file);
+            let _ = fs::remove_file(&part_path).await;
+            bail!("segmented download incomplete expected={total} got={done}");
+        }
+
+        file.sync_all()?;
+        drop(file);
+
+        if fs::try_exists(destination).await? {
+            fs::remove_file(destination).await?;
+        }
+        fs::rename(&part_path, destination).await?;
+
+        let elapsed = started.elapsed().as_secs_f64().max(0.001);
+        on_progress(Progress {
+            downloaded: total,
+            total: Some(total),
+            speed_bytes_per_second: (total as f64 / elapsed) as u64,
+        });
+        self.log.info(
+            "http.download_completed",
+            &format!(
+                "destination={} bytes={} elapsed_ms={} mode=segmented workers={workers}",
+                destination.display(),
+                total,
+                started.elapsed().as_millis()
             ),
         );
         Ok(())
@@ -185,19 +416,92 @@ impl Engine {
         if !matches!(parsed.scheme(), "http" | "https") {
             bail!("unsupported protocol");
         }
-        let response = self.client.head(parsed).send().await?;
-        let total = response
+
+        let head = self.client.head(parsed.clone()).send().await?;
+        let total = head
             .headers()
             .get(CONTENT_LENGTH)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse::<u64>().ok());
-        let ranges = response
+        let advertised_ranges = head
             .headers()
             .get(ACCEPT_RANGES)
             .and_then(|v| v.to_str().ok())
             .is_some_and(|v| v.eq_ignore_ascii_case("bytes"));
-        Ok((total, ranges))
+
+        if total.is_none() {
+            return Ok((None, false));
+        }
+
+        if advertised_ranges {
+            let probe = self
+                .client
+                .get(parsed)
+                .header(RANGE, "bytes=0-0")
+                .send()
+                .await?;
+            if probe.status() == StatusCode::PARTIAL_CONTENT
+                && validate_content_range(
+                    probe.headers().get(CONTENT_RANGE),
+                    0,
+                    0,
+                    total.unwrap_or_default(),
+                )
+                .is_ok()
+            {
+                return Ok((total, true));
+            }
+        }
+        Ok((total, false))
     }
+}
+
+fn validate_content_range(
+    value: Option<&reqwest::header::HeaderValue>,
+    expected_start: u64,
+    expected_end: u64,
+    expected_total: u64,
+) -> Result<()> {
+    let raw = value
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| anyhow!("missing Content-Range"))?;
+    let rest = raw
+        .strip_prefix("bytes ")
+        .ok_or_else(|| anyhow!("invalid Content-Range unit"))?;
+    let (range, total) = rest
+        .split_once('/')
+        .ok_or_else(|| anyhow!("invalid Content-Range format"))?;
+    let (start, end) = range
+        .split_once('-')
+        .ok_or_else(|| anyhow!("invalid Content-Range range"))?;
+    let start = start.parse::<u64>()?;
+    let end = end.parse::<u64>()?;
+    let total = total.parse::<u64>()?;
+    if start != expected_start || end != expected_end || total != expected_total {
+        bail!(
+            "unexpected Content-Range expected={expected_start}-{expected_end}/{expected_total} got={raw}"
+        );
+    }
+    Ok(())
+}
+
+fn suggested_worker_count(total: u64) -> usize {
+    let workers = match total {
+        0..=33_554_432 => 2,
+        33_554_433..=134_217_728 => 4,
+        134_217_729..=536_870_912 => 8,
+        536_870_913..=2_147_483_648 => 12,
+        _ => 16,
+    };
+    workers.min(MAX_HTTP_WORKERS)
+}
+
+fn temporary_part_path(destination: &Path) -> PathBuf {
+    let name = destination
+        .file_name()
+        .and_then(|v| v.to_str())
+        .unwrap_or("download");
+    destination.with_file_name(format!(".{name}.nibiru.part"))
 }
 
 fn redact_url(url: &Url) -> String {
@@ -221,7 +525,8 @@ pub fn safe_output_name(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::safe_output_name;
+    use super::{safe_output_name, suggested_worker_count, validate_content_range};
+    use reqwest::header::HeaderValue;
 
     #[test]
     fn rejects_traversal_names() {
@@ -229,5 +534,21 @@ mod tests {
         assert!(!safe_output_name("../file.iso"));
         assert!(!safe_output_name("dir/file.iso"));
         assert!(!safe_output_name("dir\\file.iso"));
+    }
+
+    #[test]
+    fn scales_workers_with_file_size() {
+        assert_eq!(suggested_worker_count(8 * 1024 * 1024), 2);
+        assert_eq!(suggested_worker_count(64 * 1024 * 1024), 4);
+        assert_eq!(suggested_worker_count(256 * 1024 * 1024), 8);
+        assert_eq!(suggested_worker_count(1024 * 1024 * 1024), 12);
+        assert_eq!(suggested_worker_count(4 * 1024 * 1024 * 1024), 16);
+    }
+
+    #[test]
+    fn validates_content_range_exactly() {
+        let value = HeaderValue::from_static("bytes 0-1023/4096");
+        assert!(validate_content_range(Some(&value), 0, 1023, 4096).is_ok());
+        assert!(validate_content_range(Some(&value), 0, 1022, 4096).is_err());
     }
 }
