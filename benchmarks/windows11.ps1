@@ -2,12 +2,16 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Url,
 
-    [string]$Output = "$PSScriptRoot\windows11-test.iso",
+    [string]$Output = "",
 
     [string]$Nibiru = ""
 )
 
 $ErrorActionPreference = "Stop"
+
+if ([string]::IsNullOrWhiteSpace($Output)) {
+    $Output = Join-Path $PSScriptRoot "windows11-test.iso"
+}
 
 if ([string]::IsNullOrWhiteSpace($Nibiru)) {
     $Nibiru = Join-Path $PSScriptRoot "nibiru-xtreme.exe"
