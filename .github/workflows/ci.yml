@@ -37,7 +37,7 @@ jobs:
           ./target/release/nibiru-xtreme.exe --version
           if ($LASTEXITCODE -ne 0) { throw "Binary smoke test failed" }
           New-Item -ItemType Directory -Force dist/nibiru-windows-x64 | Out-Null
-          Copy-Item target/release/nibiru-xtreme.exe, benchmarks/windows11.ps1, benchmarks/iniciar-teste.cmd, benchmarks/README.md, LICENSE dist/nibiru-windows-x64/
+          Copy-Item target/release/nibiru-xtreme.exe, benchmarks/windows11.ps1, benchmarks/iniciar-teste.cmd, benchmarks/README.md, benchmarks/performance-2026-10-19.md, LICENSE dist/nibiru-windows-x64/
           $hash = (Get-FileHash dist/nibiru-windows-x64/nibiru-xtreme.exe -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  nibiru-xtreme.exe" | Set-Content -Encoding ascii dist/nibiru-windows-x64/SHA256SUMS.txt
       - name: Upload Windows x64
