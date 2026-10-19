@@ -88,7 +88,10 @@ impl RpcServer {
         let headers = std::str::from_utf8(&buffer[..header_end])?;
         let content_length = headers
             .lines()
-            .find_map(|line| line.strip_prefix("Content-Length:").or_else(|| line.strip_prefix("content-length:")))
+            .find_map(|line| {
+                line.strip_prefix("Content-Length:")
+                    .or_else(|| line.strip_prefix("content-length:"))
+            })
             .and_then(|v| v.trim().parse::<usize>().ok())
             .unwrap_or(0);
         if content_length > 1024 * 1024 {
@@ -131,7 +134,9 @@ impl RpcServer {
         let result = self.dispatch(method, params).await;
         let payload = match result {
             Ok(value) => json!({"jsonrpc":"2.0","id":id,"result":value}),
-            Err(error) => json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":error.to_string()}}),
+            Err(error) => {
+                json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":error.to_string()}})
+            }
         };
         self.write_json(&mut stream, payload).await
     }
@@ -215,17 +220,25 @@ impl RpcServer {
             let gid_progress = gid.clone();
             let tasks_progress = tasks.clone();
             let result = engine
-                .download(request.clone(), cancel.clone(), move |Progress { downloaded, total, speed_bytes_per_second }| {
-                    let tasks = tasks_progress.clone();
-                    let gid = gid_progress.clone();
-                    tokio::spawn(async move {
-                        if let Some(task) = tasks.write().await.get_mut(&gid) {
-                            task.completed = downloaded;
-                            task.total = total.unwrap_or_default();
-                            task.speed = speed_bytes_per_second;
-                        }
-                    });
-                })
+                .download(
+                    request.clone(),
+                    cancel.clone(),
+                    move |Progress {
+                              downloaded,
+                              total,
+                              speed_bytes_per_second,
+                          }| {
+                        let tasks = tasks_progress.clone();
+                        let gid = gid_progress.clone();
+                        tokio::spawn(async move {
+                            if let Some(task) = tasks.write().await.get_mut(&gid) {
+                                task.completed = downloaded;
+                                task.total = total.unwrap_or_default();
+                                task.speed = speed_bytes_per_second;
+                            }
+                        });
+                    },
+                )
                 .await;
             let mut guard = tasks.write().await;
             if let Some(task) = guard.get_mut(&gid) {
@@ -253,7 +266,10 @@ impl RpcServer {
     }
 
     async fn tell_status(&self, params: Vec<Value>) -> Result<Value> {
-        let gid = params.first().and_then(Value::as_str).ok_or_else(|| anyhow!("missing gid"))?;
+        let gid = params
+            .first()
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("missing gid"))?;
         let guard = self.tasks.read().await;
         let task = guard.get(gid).ok_or_else(|| anyhow!("unknown gid"))?;
         Ok(json!({
@@ -285,7 +301,11 @@ impl RpcServer {
     }
 
     async fn resume(&self, params: Vec<Value>) -> Result<Value> {
-        let gid = params.first().and_then(Value::as_str).ok_or_else(|| anyhow!("missing gid"))?.to_owned();
+        let gid = params
+            .first()
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("missing gid"))?
+            .to_owned();
         let (request, cancel) = {
             let mut guard = self.tasks.write().await;
             let task = guard.get_mut(&gid).ok_or_else(|| anyhow!("unknown gid"))?;
@@ -312,5 +332,7 @@ impl RpcServer {
 }
 
 fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).position(|window| window == needle)
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
