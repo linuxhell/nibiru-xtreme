@@ -161,6 +161,9 @@ async fn download_case(segmented: bool) {
         .unwrap();
         let result = tokio::task::spawn_blocking(move || {
             std::process::Command::new("powershell.exe")
+                // Do not inherit PowerShell 7 module paths from the CI shell.
+                // Windows PowerShell must initialize its own native modules.
+                .env_remove("PSModulePath")
                 .args([
                     "-NoProfile",
                     "-NonInteractive",
