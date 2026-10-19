@@ -51,10 +51,10 @@ impl LogSink {
         });
         let line = record.to_string();
         eprintln!("{line}");
-        if let Some(file) = &self.file {
-            if let Ok(mut file) = file.lock() {
-                let _ = writeln!(file, "{line}");
-            }
+        if let Some(file) = &self.file
+            && let Ok(mut file) = file.lock()
+        {
+            let _ = writeln!(file, "{line}");
         }
     }
 }
