@@ -29,6 +29,57 @@ const MIN_SEGMENTED_SIZE: u64 = 8 * 1024 * 1024;
 const RANGE_CHUNK_SIZE: u64 = 4 * 1024 * 1024;
 const MAX_HTTP_WORKERS: usize = 16;
 
+struct TransferLog {
+    mode: &'static str,
+    started: Instant,
+    last_at: Instant,
+    last_bytes: u64,
+}
+
+impl TransferLog {
+    fn new(mode: &'static str, started: Instant, initial_bytes: u64) -> Self {
+        Self {
+            mode,
+            started,
+            last_at: started,
+            last_bytes: initial_bytes,
+        }
+    }
+
+    fn record(
+        &mut self,
+        log: &LogSink,
+        downloaded: u64,
+        total: Option<u64>,
+        workers_remaining: usize,
+        force: bool,
+    ) {
+        let now = Instant::now();
+        let interval = now.duration_since(self.last_at);
+        if !force && interval < Duration::from_secs(1) {
+            return;
+        }
+        let delta = downloaded.saturating_sub(self.last_bytes);
+        let speed = (delta as f64 / interval.as_secs_f64().max(0.001)) as u64;
+        let total_text = total.map_or_else(|| "unknown".to_owned(), |value| value.to_string());
+        let remaining = total.map_or_else(
+            || "unknown".to_owned(),
+            |value| value.saturating_sub(downloaded).to_string(),
+        );
+        log.info(
+            "http.progress",
+            &format!(
+                "mode={} downloaded={downloaded} total={total_text} remaining={remaining} interval_bytes={delta} interval_ms={} speed_bytes_per_second={speed} elapsed_ms={} workers_remaining={workers_remaining}",
+                self.mode,
+                interval.as_millis(),
+                now.duration_since(self.started).as_millis(),
+            ),
+        );
+        self.last_at = now;
+        self.last_bytes = downloaded;
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Progress {
@@ -172,11 +223,24 @@ impl Engine {
         };
 
         let mut downloaded = if resumed { existing } else { 0 };
+        let mut telemetry = TransferLog::new("single", started, downloaded);
         let mut last_report = Instant::now();
         let mut last_report_bytes = downloaded;
         let mut stream = response.bytes_stream();
+        let mut log_ticker = time::interval(Duration::from_secs(1));
+        log_ticker.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
 
-        while let Some(chunk) = stream.next().await {
+        loop {
+            let chunk = tokio::select! {
+                chunk = stream.next() => match chunk {
+                    Some(chunk) => chunk,
+                    None => break,
+                },
+                _ = log_ticker.tick() => {
+                    telemetry.record(&self.log, downloaded, total, 1, false);
+                    continue;
+                }
+            };
             if cancelled.load(Ordering::Acquire) {
                 file.flush().await?;
                 self.log.warn(
@@ -206,7 +270,15 @@ impl Engine {
             }
         }
 
+        telemetry.record(&self.log, downloaded, total, 0, true);
+        let transfer_ms = started.elapsed().as_millis();
+        self.log.info(
+            "http.finalization_started",
+            &format!("mode=single downloaded={downloaded} transfer_ms={transfer_ms}"),
+        );
+        let finalizing = Instant::now();
         file.flush().await?;
+        let finalize_ms = finalizing.elapsed().as_millis();
         on_progress(Progress {
             downloaded,
             total: total.or(Some(downloaded)),
@@ -221,11 +293,11 @@ impl Engine {
         self.log.info(
             "http.download_completed",
             &format!(
-                "destination={} bytes={} elapsed_ms={} resumed={} mode=single",
+                "destination={} bytes={} elapsed_ms={} resumed={} mode=single transfer_ms={transfer_ms} finalize_ms={finalize_ms}",
                 destination.display(),
                 downloaded,
                 started.elapsed().as_millis(),
-                resumed
+                resumed,
             ),
         );
         Ok(())
@@ -242,6 +314,7 @@ impl Engine {
     where
         F: FnMut(Progress) + Send,
     {
+        let started = Instant::now();
         let workers = suggested_worker_count(total);
         let part_path = temporary_part_path(destination);
         let _ = fs::remove_file(&part_path).await;
@@ -330,10 +403,11 @@ impl Engine {
             });
         }
 
-        let started = Instant::now();
+        let mut telemetry = TransferLog::new("segmented", started, 0);
         let mut last_at = Instant::now();
         let mut last_bytes = 0_u64;
         let mut ticker = time::interval(Duration::from_millis(250));
+        ticker.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
 
         while !set.is_empty() {
             tokio::select! {
@@ -352,6 +426,7 @@ impl Engine {
                         total: Some(total),
                         speed_bytes_per_second: speed,
                     });
+                    telemetry.record(&self.log, done, Some(total), set.len(), false);
                     last_at = now;
                     last_bytes = done;
                 }
@@ -385,6 +460,13 @@ impl Engine {
             bail!("segmented download incomplete expected={total} got={done}");
         }
 
+        telemetry.record(&self.log, done, Some(total), 0, true);
+        let transfer_ms = started.elapsed().as_millis();
+        self.log.info(
+            "http.finalization_started",
+            &format!("mode=segmented downloaded={done} transfer_ms={transfer_ms}"),
+        );
+        let finalizing = Instant::now();
         file.sync_all()?;
         drop(file);
 
@@ -392,6 +474,7 @@ impl Engine {
             fs::remove_file(destination).await?;
         }
         fs::rename(&part_path, destination).await?;
+        let finalize_ms = finalizing.elapsed().as_millis();
 
         let elapsed = started.elapsed().as_secs_f64().max(0.001);
         on_progress(Progress {
@@ -402,10 +485,10 @@ impl Engine {
         self.log.info(
             "http.download_completed",
             &format!(
-                "destination={} bytes={} elapsed_ms={} mode=segmented workers={workers}",
+                "destination={} bytes={} elapsed_ms={} mode=segmented workers={workers} transfer_ms={transfer_ms} finalize_ms={finalize_ms}",
                 destination.display(),
                 total,
-                started.elapsed().as_millis()
+                started.elapsed().as_millis(),
             ),
         );
         Ok(())
