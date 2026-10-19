@@ -1,3 +1,4 @@
+#![cfg(feature = "sftp")]
 use anyhow::Result;
 use nibiru_xtreme::{
     engine::{DownloadRequest, Engine},

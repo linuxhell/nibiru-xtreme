@@ -1,3 +1,4 @@
+#![cfg(feature = "http3")]
 use nibiru_xtreme::{
     engine::{DownloadRequest, Engine},
     logging::LogSink,

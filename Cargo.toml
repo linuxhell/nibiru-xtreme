@@ -13,27 +13,34 @@ panic = "abort"
 strip = "symbols"
 opt-level = 3
 
+[features]
+default = ["ftp", "sftp", "http3"]
+ftp = ["dep:suppaftp", "dep:rustls", "dep:webpki-roots"]
+sftp = ["dep:russh", "dep:russh-sftp"]
+http3 = ["reqwest/http3", "dep:tokio-util"]
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 futures-util = "0.3"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "http3", "stream", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "stream", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 url = "2"
 percent-encoding = "2"
-tokio-util = { version = "0.7", features = ["io"] }
-suppaftp = { version = "12.1", default-features = false, features = ["tokio-rustls-ring", "deprecated"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-webpki-roots = "1"
+tokio-util = { version = "0.7", optional = true, features = ["io"] }
+suppaftp = { version = "12.1", optional = true, default-features = false, features = ["tokio-rustls-ring", "deprecated"] }
+rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = { version = "1", optional = true }
 tempfile = "3"
 flate2 = "1"
-russh = { version = "0.64", default-features = false, features = ["ring"] }
-russh-sftp = "3"
+russh = { version = "0.64", optional = true, default-features = false, features = ["ring"] }
+russh-sftp = { version = "3", optional = true }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 bytes = "1"
 h2 = "0.4"
 http = "1"

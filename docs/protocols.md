@@ -39,6 +39,13 @@ for FTPS or HTTP/3; it does not disable certificate validation. JSON-RPC addUri
 accepts `ssh-host-key`, `ssh-identity`, and `ca-certificate` as per-task options.
 Resume options are preserved for the same RPC task.
 
+## Embedding without unused transports
+
+Cargo features `ftp`, `sftp`, and `http3` are enabled in the standalone build.
+An ED2K-only consumer can use `default-features = false` to avoid compiling and
+linking the SSH/FTP stacks. Feature-disabled protocols are not advertised by RPC.
+The HTTP and ED2K/Kad foundations remain available.
+
 ## Native ED2K/Kad foundation
 
 The `ed2k` Rust module implements bounded `server.met` and Kad2 `nodes.dat`

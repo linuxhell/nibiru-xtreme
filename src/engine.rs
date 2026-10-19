@@ -251,6 +251,9 @@ impl Engine {
         }
         let parsed = Url::parse(&request.url).context("invalid URL")?;
         if self.http3_only {
+            #[cfg(not(feature = "http3"))]
+            bail!("HTTP/3 is disabled in this build");
+            #[cfg(feature = "http3")]
             return crate::protocols::http3::download(
                 &parsed,
                 &request.destination,
@@ -263,6 +266,7 @@ impl Engine {
         }
         match parsed.scheme() {
             "http" | "https" => {}
+            #[cfg(feature = "ftp")]
             "ftp" | "ftps" | "ftpes" => {
                 return crate::protocols::ftp::download(
                     &parsed,
@@ -274,6 +278,7 @@ impl Engine {
                 )
                 .await;
             }
+            #[cfg(feature = "sftp")]
             "sftp" => {
                 return crate::protocols::sftp::download(
                     &parsed,

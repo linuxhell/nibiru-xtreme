@@ -155,10 +155,19 @@ impl RpcServer {
 
     async fn dispatch(&self, method: &str, params: Vec<Value>) -> Result<Value> {
         match method {
-            "aria2.getVersion" | "nibiru.getVersion" => Ok(json!({
-                "version": VERSION,
-                "enabledFeatures": ["HTTP", "HTTPS", "HTTP/2", "FTP", "FTPS", "SFTP", "WebDAV-GET", "RPC", "Resume"]
-            })),
+            "aria2.getVersion" | "nibiru.getVersion" => {
+                let mut features = vec!["HTTP", "HTTPS", "HTTP/2", "WebDAV-GET", "RPC", "Resume"];
+                if cfg!(feature = "ftp") {
+                    features.extend(["FTP", "FTPS"]);
+                }
+                if cfg!(feature = "sftp") {
+                    features.push("SFTP");
+                }
+                if cfg!(feature = "http3") {
+                    features.push("HTTP/3-explicit");
+                }
+                Ok(json!({"version":VERSION,"enabledFeatures":features}))
+            }
             "aria2.addUri" | "nibiru.addUri" => self.add_uri(params).await,
             "aria2.tellStatus" | "nibiru.tellStatus" => self.tell_status(params).await,
             "aria2.pause" | "aria2.forcePause" | "nibiru.pause" => self.pause(params).await,

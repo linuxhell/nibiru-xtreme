@@ -1,7 +1,8 @@
-use super::{StagedFile, TransportOptions, decoded, operation, tls_config};
+use super::{StagedFile, TransportOptions, decoded, operation};
 use crate::{engine::Progress, logging::LogSink};
 use anyhow::{Context, Result, bail};
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use suppaftp::{
     Mode,
@@ -155,4 +156,22 @@ where
     // QUIT is best-effort after data has been acknowledged and committed.
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), ftp.quit()).await;
     Ok(())
+}
+
+pub(crate) fn tls_config(extra_ca: Option<&Path>) -> Result<Arc<rustls::ClientConfig>> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    if let Some(path) = extra_ca {
+        roots.add(rustls::pki_types::CertificateDer::from(std::fs::read(
+            path,
+        )?))?;
+    }
+    Ok(Arc::new(
+        rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()?
+        .with_root_certificates(roots)
+        .with_no_client_auth(),
+    ))
 }
