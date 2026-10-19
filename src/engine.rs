@@ -129,7 +129,10 @@ impl Engine {
                 file.flush().await?;
                 self.log.warn(
                     "http.download_paused",
-                    &format!("destination={} downloaded={downloaded}", request.destination.display()),
+                    &format!(
+                        "destination={} downloaded={downloaded}",
+                        request.destination.display()
+                    ),
                 );
                 return Err(anyhow!("cancelled"));
             }
