@@ -227,6 +227,12 @@ async fn download_case(
         )
         .await
         .unwrap();
+        // The JSONL is append-only. Old adaptive events must not describe a
+        // later fixed-mode run in its freshly written summary.
+        tokio::fs::write(root.join("nibiru-download.jsonl"), concat!(
+            "{\"event\":\"http.adaptive_started\",\"detail\":\"maximum_workers=16\"}\n",
+            "{\"event\":\"http.adaptive_decision\",\"detail\":\"previous_workers=16 target_workers=8\"}\n",
+        )).await.unwrap();
         let result = tokio::task::spawn_blocking(move || {
             std::process::Command::new("powershell.exe")
                 // Do not inherit PowerShell 7 module paths from the CI shell.
@@ -266,6 +272,8 @@ async fn download_case(
         .unwrap();
         assert_eq!(summary["size_bytes"], data.len() as u64);
         assert_eq!(summary["http_mode"], "http1-only");
+        assert_eq!(summary["adaptive_started"], false);
+        assert_eq!(summary["adaptive_decision_count"], 0);
         assert_eq!(summary["sha256"].as_str().unwrap().len(), 64);
         assert_eq!(summary["binary_sha256"].as_str().unwrap().len(), 64);
         let script_log = tokio::fs::read_to_string(root.join("nibiru-download.jsonl"))

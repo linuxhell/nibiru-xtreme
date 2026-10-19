@@ -184,6 +184,9 @@ terminar sem ajuste. Workers são tarefas de requisição, não necessariamente
 conexões TCP distintas, especialmente em HTTP/2. O recurso não é um modelo treinado
 nem garante capacidade futura do servidor.
 
+O JSONL pode conter o histórico de várias execuções. O resumo lê apenas os bytes
+acrescentados pela execução atual, usando UTF-8, para não misturar decisões antigas.
+
 O modo normal continua fixo. Para ativar explicitamente: `windows11.ps1 -Adaptive`
 ou `download URL --out ARQUIVO --adaptive`. Para duas rodadas em ordem alternada:
 

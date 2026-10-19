@@ -55,6 +55,8 @@ if ($LASTEXITCODE -ne 0) { throw "Could not read engine version" }
 Write-Host ("Version: {0}" -f $version)
 Write-Host ("Sync interval: {0} MiB (0 = final only)" -f $SyncIntervalMiB)
 
+$logOffset = 0L
+if (Test-Path -LiteralPath $LogFile) { $logOffset = (Get-Item -LiteralPath $LogFile).Length }
 $started = [System.Diagnostics.Stopwatch]::StartNew()
 $downloadArgs = @("download", $Url, "--out", $Output, "--log", $LogFile, "--sync-interval-mib", "$SyncIntervalMiB")
 if ($Http1Only) { $downloadArgs += "--http1-only" }
@@ -75,7 +77,16 @@ $gbps = (($bytes * 8) / 1e9) / $seconds
 
 $hash = Get-FileHash -Algorithm SHA256 $Output
 $nativeTimings = [ordered]@{}
-$records = @(Get-Content -LiteralPath $LogFile | ForEach-Object { $_ | ConvertFrom-Json })
+$logStream = [System.IO.File]::OpenRead($LogFile)
+try {
+    $null = $logStream.Seek($logOffset, [System.IO.SeekOrigin]::Begin)
+    $reader = [System.IO.StreamReader]::new($logStream, [System.Text.Encoding]::UTF8)
+    try { $currentLog = $reader.ReadToEnd() }
+    finally { $reader.Dispose() }
+}
+finally { $logStream.Dispose() }
+$records = @($currentLog -split '\r?\n' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+    ForEach-Object { $_ | ConvertFrom-Json })
 $completion = $records |
     Where-Object { $_.event -eq "http.download_completed" } | Select-Object -Last 1
 if ($null -ne $completion) {
