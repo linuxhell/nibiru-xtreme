@@ -250,7 +250,7 @@ impl RpcServer {
                             task.total = task.completed;
                         }
                     }
-                    Err(error) if cancel.load(Ordering::Acquire) => {
+                    Err(_error) if cancel.load(Ordering::Acquire) => {
                         task.status = "paused".into();
                         task.speed = 0;
                     }
