@@ -4,10 +4,17 @@ param(
 
     [string]$Output = "$PSScriptRoot\windows11-test.iso",
 
-    [string]$Nibiru = "$PSScriptRoot\..\..\target\release\nibiru-xtreme.exe"
+    [string]$Nibiru = ""
 )
 
 $ErrorActionPreference = "Stop"
+
+if ([string]::IsNullOrWhiteSpace($Nibiru)) {
+    $Nibiru = Join-Path $PSScriptRoot "nibiru-xtreme.exe"
+    if (-not (Test-Path $Nibiru)) {
+        $Nibiru = Join-Path $PSScriptRoot "..\target\release\nibiru-xtreme.exe"
+    }
+}
 
 if (-not (Test-Path $Nibiru)) {
     throw "Nibiru binary not found: $Nibiru"

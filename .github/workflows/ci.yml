@@ -30,3 +30,20 @@ jobs:
         run: cargo test --all-targets --all-features
       - name: Release build
         run: cargo build --release
+      - name: Package Windows x64
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./target/release/nibiru-xtreme.exe --version
+          if ($LASTEXITCODE -ne 0) { throw "Binary smoke test failed" }
+          New-Item -ItemType Directory -Force dist/nibiru-windows-x64 | Out-Null
+          Copy-Item target/release/nibiru-xtreme.exe, benchmarks/windows11.ps1, benchmarks/README.md, LICENSE dist/nibiru-windows-x64/
+          $hash = (Get-FileHash dist/nibiru-windows-x64/nibiru-xtreme.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  nibiru-xtreme.exe" | Set-Content -Encoding ascii dist/nibiru-windows-x64/SHA256SUMS.txt
+      - name: Upload Windows x64
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nibiru-windows-x64
+          path: dist/nibiru-windows-x64/
+          if-no-files-found: error
