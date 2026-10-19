@@ -13,15 +13,25 @@ use tokio::{
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn segmented_download_reassembles_ranges_exactly() {
-    download_case(true).await;
+    download_case(true, 0, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn single_download_logs_stalls_and_reassembles_exactly() {
-    download_case(false).await;
+    download_case(false, 0, false).await;
 }
 
-async fn download_case(segmented: bool) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn background_sync_preserves_segmented_file_bytes() {
+    download_case(true, 1, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelling_background_sync_download_does_not_publish_partial_file() {
+    download_case(true, 1, true).await;
+}
+
+async fn download_case(segmented: bool, sync_interval_mib: u32, cancel_on_progress: bool) {
     let data = Arc::new(
         (0..(9 * 1024 * 1024 + 321))
             .map(|i| ((i * 31 + 17) % 251) as u8)
@@ -74,7 +84,7 @@ async fn download_case(segmented: bool) {
                     if body.len() > 1 {
                         tokio::time::sleep(Duration::from_millis(1400)).await;
                     }
-                    stream.write_all(body).await.unwrap();
+                    let _ = stream.write_all(body).await;
                 } else {
                     let response = format!(
                         "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
@@ -94,18 +104,39 @@ async fn download_case(segmented: bool) {
 
     let log_path = root.join("download.jsonl");
     let log = Arc::new(LogSink::new(Some(&log_path)).unwrap());
-    let engine = Engine::new(log).unwrap();
-    engine
+    let engine = Engine::new(log)
+        .unwrap()
+        .with_sync_interval_mib(sync_interval_mib);
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancel_signal = cancelled.clone();
+    let data_len = data.len() as u64;
+    let result = engine
         .download(
             DownloadRequest {
                 url: format!("http://{address}/payload.bin"),
                 destination: destination.clone(),
             },
-            Arc::new(AtomicBool::new(false)),
-            |_| {},
+            cancelled,
+            move |progress| {
+                if cancel_on_progress && progress.downloaded > 0 && progress.downloaded < data_len {
+                    cancel_signal.store(true, std::sync::atomic::Ordering::Release);
+                }
+            },
         )
-        .await
-        .unwrap();
+        .await;
+
+    if cancel_on_progress {
+        assert!(result.unwrap_err().to_string().contains("cancelled"));
+        assert!(!destination.exists());
+        assert!(!root.join(".payload.bin.nibiru.part").exists());
+        let log = tokio::fs::read_to_string(&log_path).await.unwrap();
+        assert!(!log.contains("http.download_completed"));
+        server.abort();
+        drop(engine);
+        let _ = tokio::fs::remove_dir_all(root).await;
+        return;
+    }
+    result.unwrap();
 
     let downloaded = tokio::fs::read(&destination).await.unwrap();
     assert_eq!(downloaded.as_slice(), data.as_slice());
@@ -136,6 +167,12 @@ async fn download_case(segmented: bool) {
     assert!(detail.contains("transfer_ms="));
     assert!(detail.contains("finalize_ms="));
     if segmented {
+        assert_eq!(
+            records
+                .iter()
+                .any(|record| record["event"] == "storage.checkpoint_completed"),
+            sync_interval_mib > 0
+        );
         let metrics = records
             .iter()
             .find(|record| record["event"] == "http.segmented_metrics")
@@ -152,7 +189,7 @@ async fn download_case(segmented: bool) {
 
     drop(engine);
     #[cfg(windows)]
-    if segmented {
+    if segmented && sync_interval_mib == 0 {
         // Exercise the packaged script under Windows PowerShell 5.1, including
         // its default output path, log file, binary lookup and saved SHA-256.
         let script = root.join("windows11.ps1");
@@ -213,6 +250,79 @@ async fn download_case(segmented: bool) {
             .await
             .unwrap();
         assert!(script_log.contains("http.download_completed"));
+
+        // Exercise the two-download comparison and diagnostic ZIP on Windows
+        // PowerShell 5.1, with a small checkpoint interval for this fixture.
+        let comparison_script = root.join("comparar-sync.ps1");
+        tokio::fs::copy(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/benchmarks/comparar-sync.ps1"),
+            &comparison_script,
+        )
+        .await
+        .unwrap();
+        let result = tokio::task::spawn_blocking(move || {
+            std::process::Command::new("powershell.exe")
+                .env_remove("PSModulePath")
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                ])
+                .arg(comparison_script)
+                .arg("-Url")
+                .arg(format!("http://{address}/payload.bin"))
+                .arg("-Http1Only")
+                .arg("-SyncIntervalMiB")
+                .arg("1")
+                .output()
+                .unwrap()
+        })
+        .await
+        .unwrap();
+        assert!(
+            result.status.success(),
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let mut entries = tokio::fs::read_dir(&root).await.unwrap();
+        let mut zip_found = false;
+        let mut comparison_found = false;
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("comparacao-sync-")
+            {
+                if entry.file_type().await.unwrap().is_dir() {
+                    let comparison: serde_json::Value = serde_json::from_slice(
+                        &tokio::fs::read(entry.path().join("comparacao-sync.json"))
+                            .await
+                            .unwrap(),
+                    )
+                    .unwrap();
+                    assert_eq!(comparison["same_size_and_sha256"], true);
+                    assert_eq!(comparison["experiment_exercised"], true);
+                    assert_eq!(comparison["results"].as_array().unwrap().len(), 2);
+                    assert!(
+                        comparison["results"][1]["native_timings"]["checkpoint_count"]
+                            .as_u64()
+                            .unwrap()
+                            > 0
+                    );
+                    comparison_found = true;
+                } else if entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "zip")
+                {
+                    zip_found = true;
+                }
+            }
+        }
+        assert!(zip_found && comparison_found);
     }
     server.abort();
     tokio::time::sleep(Duration::from_millis(10)).await;

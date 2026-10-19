@@ -2,8 +2,9 @@
 
 Objetivo no Windows do usuário: sustentar aproximadamente 110 MB/s durante a
 transferência da ISO de 8.731.574.272 bytes, sem colapso nos últimos blocos.
-Os resultados abaixo são de fixtures locais Linux. **Não comprovam 110 MB/s na
-CDN Microsoft nem equivalência ao IDM.**
+Os resultados sintéticos abaixo são de fixtures locais Linux. **Não comprovam
+110 MB/s na CDN Microsoft nem equivalência ao IDM.** As execuções reais no
+Windows são identificadas separadamente.
 
 Ambiente: Linux x86_64, glibc 2.39, filesystem overlay, 9 CPUs visíveis,
 Rust 1.99.1. As dependências usadas foram fixadas em Cargo.lock. Não foram
@@ -92,6 +93,13 @@ mas os ensaios Windows não tiveram ordem alternada nem condições de CDN fixas
 
 ## Investigação de finalização, versão 0.1.2
 
+O teste Windows posterior da 0.1.2 identificou a espera: 3.107 ms em `sync_all`,
+de 3.108 ms totais de finalização. Fechamento, limpeza do destino e rename
+ficaram abaixo de 1 ms cada. Foram 79,3330 s totais (110,062 MB/s), com
+75,992 s de transferência/escrita (114,901 MB/s). O SHA-256 permaneceu igual.
+Isso identifica a chamada onde o processo aguarda, não separa os custos internos
+de cache, filesystem, driver, antivírus ou dispositivo.
+
 Uma fixture HTTP/1.1 Linux, 1 GiB, 105 MiB/s agregados e 40 ms por requisição,
 comparou três perfis em ordem rotacionada, três vezes cada. Todos os nove arquivos
 passaram pela validação de tamanho e SHA-256. A sincronização final nunca foi
@@ -132,6 +140,46 @@ O fsync externo usa um descritor separado e observa o progresso gravado em log,
 não o tráfego bruto. Há três checkpoints por execução no relatório. O tempo
 total inclui esperar essa thread terminar; os tempos nativos vêm do log do
 motor. A CPU informada é a dos processos-filho, sem a thread Python de fsync.
+
+## Checkpoints nativos opcionais, versão 0.1.3
+
+Foi implementado um modo experimental com uma thread por download segmentado,
+limite de uma operação pendente/em andamento, espera pela thread antes do rename
+e `sync_all` final preservado. O padrão permanece zero checkpoints. A opção
+`--sync-interval-mib N` e o iniciador `comparar-sync.cmd` permitem medir no Windows
+o efeito no tempo total, sem mudar o padrão. O iniciador usa 512 MiB como hipótese
+de teste e gera um ZIP dos resultados de duas transferências, sem incluir a ISO.
+
+A fixture local Linux anterior foi repetida com 1 GiB, 105 MiB/s, 40 ms por
+requisição e três amostras por perfil, alternando a ordem. Desta vez os dois
+perfis usam o mesmo binário e o mesmo caminho de sincronização final; muda apenas
+o agendamento de checkpoints nativos de 256 MiB. O motor realizou três checkpoints
+por execução experimental. Todos os seis arquivos passaram por tamanho e SHA-256.
+
+| Perfil | Tempo total mediano | Finalização mediana |
+|---|---:|---:|
+| Final-only, padrão | 9,9068 s | 22 ms |
+| Checkpoints nativos a cada 256 MiB de progresso | 9,9365 s | 61 ms |
+
+Não houve vantagem local que justificasse alterar o padrão. Esta fixture não
+reproduz os 3.107 ms de sync no Windows. O recurso é entregue **opcional**, para
+avaliar essa hipótese no computador do usuário, usando tempo total e hashes,
+sem prometer antecipadamente que a sincronização vai ficar mais rápida.
+As amostras e os hashes dos binários estão em
+[`native-checkpoint-experiment-2026-10-19.json`](native-checkpoint-experiment-2026-10-19.json).
+
+```bash
+python benchmarks/controlled_http.py \
+  --engine final=/caminho/nibiru-0.1.3 \
+  --engine background=/caminho/nibiru-0.1.3 \
+  --native-sync background=256 --size-mib 1024 \
+  --rate-mib 105 --latency-ms 40 --rounds 3 --report native-sync.json
+```
+
+Os novos testes cobrem hash/conteúdo com checkpoints, cancelamento sem publicar
+parcial, falha de sincronização e ausência de acúmulo de operações. O teste Windows
+executa tanto o script simples quanto a comparação, verifica os hashes iguais,
+a ocorrência de checkpoints e a criação do ZIP no Windows PowerShell 5.1.
 
 ## Reproduzir
 

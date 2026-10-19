@@ -30,6 +30,9 @@ enum Command {
         log: Option<PathBuf>,
         #[arg(long)]
         http1_only: bool,
+        /// Experimental background sync interval in MiB; zero keeps final-only sync.
+        #[arg(long, default_value_t = 0)]
+        sync_interval_mib: u32,
     },
     Serve {
         #[arg(long, default_value_t = 6800)]
@@ -58,13 +61,15 @@ async fn main() -> Result<()> {
             out,
             log,
             http1_only,
+            sync_interval_mib,
         }) => {
             let log = Arc::new(LogSink::new(log.as_deref())?);
             let engine = if http1_only {
                 Engine::with_http1_only(log)?
             } else {
                 Engine::new(log)?
-            };
+            }
+            .with_sync_interval_mib(sync_interval_mib);
             let cancelled = Arc::new(AtomicBool::new(false));
             engine
                 .download(

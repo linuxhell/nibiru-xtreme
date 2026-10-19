@@ -107,3 +107,49 @@ o motor: `--checkpoint LABEL=MIB` chama `fsync` em um descritor separado do
 arquivo parcial a cada MIB de progresso observado. Isso é um experimento local,
 não um modo disponível no executável Windows. A sincronização final do motor
 permanece ativa, e o tempo do experimento inclui aguardar o sincronizador externo.
+
+## Versão 0.1.3: comparação de sincronização no Windows
+
+Abra **`comparar-sync.cmd`** e cole a URL uma vez. O iniciador executa dois
+downloads completos com o mesmo binário: primeiro o modo atual, depois o modo
+experimental com sincronização a cada 512 MiB de progresso gravado. Ele substitui
+a própria ISO de teste entre as execuções; só uma ISO dessa comparação fica
+armazenada. Os arquivos de resultado ficam em uma pasta exclusiva
+`comparacao-sync-DATA-ID`, e o ZIP com o mesmo nome inclui somente JSON e JSONL,
+sem a ISO. Envie esse ZIP para análise.
+
+O modo experimental usa uma thread de sincronização e permite no máximo uma
+operação pendente ou em andamento. Não cria uma fila de flushes. Antes de
+renomear o arquivo, aguarda a operação pendente e executa novamente `sync_all`.
+Falhas de checkpoint impedem a conclusão e não provocam fallback silencioso.
+O cancelamento aguarda o sincronizador e remove o parcial. A sincronização não
+altera os bytes nem substitui as validações de ranges e tamanho.
+
+O evento `storage.checkpoint_completed` registra `observed_written` e o tempo
+da operação. Esse contador é o progresso observado quando ela foi solicitada,
+**não um prefixo contíguo ou uma garantia de bytes persistidos**. No evento de
+conclusão, `checkpoint_wait_ms` é a espera final pelo sincronizador;
+`checkpoint_count` e `checkpoint_sync_ms_sum` contabilizam as operações
+antecipadas. O tempo acumulado de checkpoints pode se sobrepor à transferência
+e não deve ser somado ao tempo total. A espera pendente já entra em `finalize_ms`.
+
+`comparacao-sync.json` inclui os dois resultados, tempos nativos, hashes, médias
+e diferença de tempo total. Confere tamanho e SHA-256 entre execuções e indica
+se houve checkpoints de fato. Um arquivo pequeno pode terminar antes de qualquer
+checkpoint. O ganho relevante é reduzir o **tempo total**, não apenas `sync_ms`.
+Uma rodada é indicativa, pois CDN e cache podem mudar. Para duas rodadas em
+ordem alternada (quatro downloads), execute:
+
+```powershell
+powershell -NoExit -ExecutionPolicy Bypass -File .\comparar-sync.ps1 -Rounds 2
+```
+
+O modo normal de `iniciar-teste.cmd` continua sem checkpoints. Para testar
+manualmente apenas a alternativa, use `windows11.ps1 -SyncIntervalMiB 512`.
+No CLI nativo, a opção é `download URL --out ARQUIVO --sync-interval-mib 512`;
+zero é o padrão. O recurso vale para downloads segmentados, não para o modo
+simples ou retomadas existentes.
+
+A escolha de 512 MiB é uma hipótese de teste, não uma configuração já validada
+como superior no Windows. Flushes frequentes também podem reduzir desempenho,
+conforme a [documentação da Microsoft](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers).

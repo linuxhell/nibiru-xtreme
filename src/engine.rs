@@ -166,6 +166,7 @@ pub struct DownloadRequest {
 pub struct Engine {
     client: Client,
     log: Arc<LogSink>,
+    sync_interval_bytes: u64,
 }
 
 impl Engine {
@@ -181,7 +182,17 @@ impl Engine {
         let client = Self::client_builder(http1_only)
             .build()
             .context("failed to build HTTP client")?;
-        Ok(Self { client, log })
+        Ok(Self {
+            client,
+            log,
+            sync_interval_bytes: 0,
+        })
+    }
+
+    /// Experimental checkpoints for segmented downloads. Zero keeps final-only sync.
+    pub fn with_sync_interval_mib(mut self, interval_mib: u32) -> Self {
+        self.sync_interval_bytes = u64::from(interval_mib) * 1024 * 1024;
+        self
     }
 
     fn client_builder(http1_only: bool) -> reqwest::ClientBuilder {
@@ -238,6 +249,9 @@ impl Engine {
                 .await
             {
                 Ok(()) => return Ok(()),
+                Err(error) if error.is::<storage::checkpoints::BackgroundSyncError>() => {
+                    return Err(error);
+                }
                 Err(error) if !cancelled.load(Ordering::Acquire) => {
                     self.log.warn(
                         "http.segmented_fallback",
@@ -422,6 +436,15 @@ impl Engine {
             .open(&part_path)?;
         file.set_len(total)?;
         let file = Arc::new(file);
+        let mut checkpoints = if self.sync_interval_bytes > 0 {
+            Some(storage::checkpoints::BackgroundSync::start(
+                file.clone(),
+                self.sync_interval_bytes,
+                self.log.clone(),
+            )?)
+        } else {
+            None
+        };
 
         let next_offset = Arc::new(AtomicU64::new(0));
         let completed = Arc::new(AtomicU64::new(0));
@@ -431,12 +454,13 @@ impl Engine {
         self.log.info(
             "http.segmented_started",
             &format!(
-                "url={} destination={} total={} workers={} chunk_size={} max_range_size={MAX_HTTP_RANGE_SIZE}",
+                "url={} destination={} total={} workers={} chunk_size={} max_range_size={MAX_HTTP_RANGE_SIZE} sync_interval_bytes={}",
                 redact_url(&parsed),
                 destination.display(),
                 total,
                 workers,
-                RANGE_CHUNK_SIZE
+                RANGE_CHUNK_SIZE,
+                self.sync_interval_bytes,
             ),
         );
 
@@ -580,6 +604,9 @@ impl Engine {
                 _ = ticker.tick() => {
                     if cancelled.load(Ordering::Acquire) {
                         set.abort_all();
+                        while set.join_next().await.is_some() {}
+                        let _ = storage::checkpoints::finish(checkpoints.take()).await;
+                        drop(file);
                         let _ = fs::remove_file(&part_path).await;
                         return Err(anyhow!("cancelled"));
                     }
@@ -593,6 +620,9 @@ impl Engine {
                         speed_bytes_per_second: speed,
                     });
                     telemetry.record(&self.log, done, Some(total), set.len(), false);
+                    if let Some(worker) = checkpoints.as_mut() {
+                        worker.consider(done, total);
+                    }
                     last_at = now;
                     last_bytes = done;
                 }
@@ -602,15 +632,19 @@ impl Engine {
                         Some(Ok(Err(error))) => {
                             set.abort_all();
                             while set.join_next().await.is_some() {}
+                            let checkpoint_result = storage::checkpoints::finish(checkpoints.take()).await;
                             drop(file);
                             let _ = fs::remove_file(&part_path).await;
+                            checkpoint_result?;
                             return Err(error);
                         }
                         Some(Err(error)) => {
                             set.abort_all();
                             while set.join_next().await.is_some() {}
+                            let checkpoint_result = storage::checkpoints::finish(checkpoints.take()).await;
                             drop(file);
                             let _ = fs::remove_file(&part_path).await;
+                            checkpoint_result?;
                             return Err(anyhow!("range worker panicked: {error}"));
                         }
                         None => break,
@@ -621,8 +655,10 @@ impl Engine {
 
         let done = completed.load(Ordering::Acquire);
         if done != total {
+            let checkpoint_result = storage::checkpoints::finish(checkpoints.take()).await;
             drop(file);
             let _ = fs::remove_file(&part_path).await;
+            checkpoint_result?;
             bail!("segmented download incomplete expected={total} got={done}");
         }
 
@@ -634,8 +670,18 @@ impl Engine {
             &format!("mode=segmented downloaded={done} transfer_ms={transfer_ms}"),
         );
         let finalizing = Instant::now();
+        let checkpoint_stats = match storage::checkpoints::finish(checkpoints.take()).await {
+            Ok(stats) => stats,
+            Err(error) => {
+                drop(file);
+                let _ = fs::remove_file(&part_path).await;
+                return Err(error);
+            }
+        };
+        let checkpoint_wait_ms = finalizing.elapsed().as_millis();
+        let syncing = Instant::now();
         file.sync_all()?;
-        let sync_ms = finalizing.elapsed().as_millis();
+        let sync_ms = syncing.elapsed().as_millis();
         let closing = Instant::now();
         drop(file);
         let close_ms = closing.elapsed().as_millis();
@@ -659,10 +705,12 @@ impl Engine {
         self.log.info(
             "http.download_completed",
             &format!(
-                "destination={} bytes={} elapsed_ms={} mode=segmented workers={workers} transfer_ms={transfer_ms} finalize_ms={finalize_ms} sync_ms={sync_ms} close_ms={close_ms} destination_cleanup_ms={destination_cleanup_ms} rename_ms={rename_ms}",
+                "destination={} bytes={} elapsed_ms={} mode=segmented workers={workers} transfer_ms={transfer_ms} finalize_ms={finalize_ms} sync_ms={sync_ms} close_ms={close_ms} destination_cleanup_ms={destination_cleanup_ms} rename_ms={rename_ms} checkpoint_wait_ms={checkpoint_wait_ms} checkpoint_count={} checkpoint_sync_ms_sum={}",
                 destination.display(),
                 total,
                 started.elapsed().as_millis(),
+                checkpoint_stats.count,
+                checkpoint_stats.elapsed_ms,
             ),
         );
         Ok(())

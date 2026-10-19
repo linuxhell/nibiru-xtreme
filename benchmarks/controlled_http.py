@@ -23,6 +23,8 @@ def main():
     parser.add_argument("--no-log-label", action="append", default=[])
     parser.add_argument("--checkpoint", action="append", default=[], metavar="LABEL=MIB",
                         help="Experimental external fsync every MIB of logged progress (Unix only)")
+    parser.add_argument("--native-sync", action="append", default=[], metavar="LABEL=MIB",
+                        help="Use the engine's optional background sync for this label")
     parser.add_argument("--size-mib", type=int, default=512)
     parser.add_argument("--rate-mib", type=float, default=105)
     parser.add_argument("--latency-ms", type=float, default=40)
@@ -35,13 +37,26 @@ def main():
                (item.split("=", 1) for item in args.engine)]
     checkpoints = {label: int(mib) * 2**20 for label, mib in
                    (item.split("=", 1) for item in args.checkpoint)}
+    native_sync = {label: int(mib) for label, mib in
+                   (item.split("=", 1) for item in args.native_sync)}
     labels = {label for label, _ in engines}
     if any(label not in labels or size <= 0 or label in args.no_log_label
            for label, size in checkpoints.items()):
         parser.error("checkpoint requires a known, logged label and positive size")
+    if any(label not in labels or mib < 0 or mib > 2**32 - 1
+           for label, mib in native_sync.items()):
+        parser.error("native-sync requires a known label and unsigned 32-bit MiB value")
+    if checkpoints.keys() & native_sync.keys():
+        parser.error("do not combine external and native synchronization for the same label")
     for label, path in engines:
         if not path.is_file():
             parser.error(f"missing binary: {label}={path}")
+    profiles = {}
+    for label, path in engines:
+        with path.open("rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        profiles[label] = dict(binary_sha256=digest,
+                               version=subprocess.check_output([str(path), "--version"], text=True).strip())
     size = args.size_mib * 1024 * 1024
     block = bytes(range(256)) * 256
     doubled = block * 2
@@ -118,6 +133,8 @@ def main():
                                "--out", str(output)]
                     if label not in args.no_log_label:
                         command += ["--log", str(log)]
+                    if label in native_sync:
+                        command += ["--sync-interval-mib", str(native_sync[label])]
                     before = resource.getrusage(resource.RUSAGE_CHILDREN)
                     checkpoint_result = dict(count=0, seconds=0.0)
                     stop_checkpoint = threading.Event()
@@ -205,6 +222,8 @@ def main():
                                       final["detail"].split() if "=" in item)
                         row["engine_timings_ms"] = {key: int(value) for key, value in fields.items()
                                                    if key.endswith("_ms")}
+                        row["checkpoint_count"] = int(fields.get("checkpoint_count", 0))
+                        row["checkpoint_sync_ms_sum"] = int(fields.get("checkpoint_sync_ms_sum", 0))
                     if label in checkpoints:
                         row["external_checkpoint"] = checkpoint_result
                     rows.append(row)
@@ -216,7 +235,8 @@ def main():
                        "cpu_seconds": statistics.median(r["cpu_seconds"] for r in rows if r["label"] == label)}
                for label, _ in engines}
     report = dict(size_bytes=size, rate_mib=args.rate_mib, latency_ms=args.latency_ms,
-                  rounds=args.rounds, checkpoint_bytes=checkpoints, samples=rows, medians=medians)
+                  rounds=args.rounds, checkpoint_bytes=checkpoints, native_sync_mib=native_sync,
+                  profiles=profiles, samples=rows, medians=medians)
     args.report.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps({"medians": medians}), flush=True)
 
