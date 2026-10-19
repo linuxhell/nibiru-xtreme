@@ -33,7 +33,10 @@ fn write_all_at(file: &File, mut offset: u64, mut data: &[u8]) -> io::Result<()>
     while !data.is_empty() {
         let written = file.seek_write(data, offset)?;
         if written == 0 {
-            return Err(io::Error::new(io::ErrorKind::WriteZero, "zero-byte positional write"));
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "zero-byte positional write",
+            ));
         }
         offset = offset.saturating_add(written as u64);
         data = &data[written..];
