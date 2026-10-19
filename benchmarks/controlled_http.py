@@ -25,6 +25,10 @@ def main():
                         help="Experimental external fsync every MIB of logged progress (Unix only)")
     parser.add_argument("--native-sync", action="append", default=[], metavar="LABEL=MIB",
                         help="Use the engine's optional background sync for this label")
+    parser.add_argument("--adaptive", action="append", default=[], metavar="LABEL")
+    parser.add_argument("--connection-rate-mib", type=float, default=0)
+    parser.add_argument("--overload-above", type=int, default=0)
+    parser.add_argument("--overload-delay-ms", type=float, default=0)
     parser.add_argument("--size-mib", type=int, default=512)
     parser.add_argument("--rate-mib", type=float, default=105)
     parser.add_argument("--latency-ms", type=float, default=40)
@@ -40,6 +44,8 @@ def main():
     native_sync = {label: int(mib) for label, mib in
                    (item.split("=", 1) for item in args.native_sync)}
     labels = {label for label, _ in engines}
+    if not set(args.adaptive) <= labels or min(args.connection_rate_mib, args.overload_above, args.overload_delay_ms) < 0:
+        parser.error("adaptive labels must exist and server limits must be nonnegative")
     if any(label not in labels or size <= 0 or label in args.no_log_label
            for label, size in checkpoints.items()):
         parser.error("checkpoint requires a known, logged label and positive size")
@@ -65,7 +71,7 @@ def main():
         expected.update(block)
     expected = expected.hexdigest()
     lock = threading.Lock()
-    state = {"started": 0.0, "sent": 0, "requests": 0}
+    state = {"started": 0.0, "sent": 0, "requests": 0, "deadline": 0.0, "active": 0, "peak_active": 0}
 
     class Handler(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -95,14 +101,29 @@ def main():
             self.end_headers()
             with lock:
                 state["requests"] += 1
+                is_data = end > start
+                state["active"] += int(is_data)
+                state["peak_active"] = max(state["peak_active"], state["active"])
+            connection_deadline = time.monotonic()
             try:
                 while start <= end:
                     n = min(len(block), end - start + 1)
                     with lock:
+                        overloaded = args.overload_above > 0 and state["active"] > args.overload_above
+                    if overloaded:
+                        time.sleep(args.overload_delay_ms / 1000)
+                    if args.connection_rate_mib:
+                        connection_deadline = max(time.monotonic(), connection_deadline) + n / (args.connection_rate_mib * 2**20)
+                    with lock:
                         if not state["started"]:
                             state["started"] = time.monotonic()
                         state["sent"] += n
-                        deadline = state["started"] + state["sent"] / (args.rate_mib * 2**20)
+                        # Reserve future send slots without accumulating catch-up
+                        # credit during overload-induced stalls.
+                        deadline = max(time.monotonic(), state["deadline"]) + n / (args.rate_mib * 2**20)
+                        state["deadline"] = deadline
+                    if args.connection_rate_mib:
+                        deadline = max(deadline, connection_deadline)
                     delay = deadline - time.monotonic()
                     if delay > 0:
                         time.sleep(delay)
@@ -111,6 +132,9 @@ def main():
                     start += n
             except (BrokenPipeError, ConnectionResetError):
                 pass  # The one-byte range probe may be closed after headers.
+            finally:
+                with lock:
+                    state["active"] -= int(is_data)
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -128,13 +152,15 @@ def main():
                     output.unlink(missing_ok=True)
                     log.unlink(missing_ok=True)
                     with lock:
-                        state.update(started=0.0, sent=0, requests=0)
+                        state.update(started=0.0, sent=0, requests=0, deadline=0.0, active=0, peak_active=0)
                     command = [str(binary), "download", f"http://127.0.0.1:{server.server_port}/payload.bin",
                                "--out", str(output)]
                     if label not in args.no_log_label:
                         command += ["--log", str(log)]
                     if label in native_sync:
                         command += ["--sync-interval-mib", str(native_sync[label])]
+                    if label in args.adaptive:
+                        command += ["--adaptive"]
                     before = resource.getrusage(resource.RUSAGE_CHILDREN)
                     checkpoint_result = dict(count=0, seconds=0.0)
                     stop_checkpoint = threading.Event()
@@ -214,6 +240,7 @@ def main():
                                cpu_seconds=after.ru_utime + after.ru_stime - before.ru_utime - before.ru_stime,
                                requests=state["requests"], sha256=digest,
                                log_bytes=log.stat().st_size if log.exists() else 0)
+                    row["peak_active_requests"] = state["peak_active"]
                     if log.exists():
                         records = [json.loads(line) for line in log.read_text().splitlines()]
                         final = next(record for record in reversed(records)
@@ -224,6 +251,8 @@ def main():
                                                    if key.endswith("_ms")}
                         row["checkpoint_count"] = int(fields.get("checkpoint_count", 0))
                         row["checkpoint_sync_ms_sum"] = int(fields.get("checkpoint_sync_ms_sum", 0))
+                        row["adaptive_decisions"] = [record["detail"] for record in records
+                                                     if record["event"] == "http.adaptive_decision"]
                     if label in checkpoints:
                         row["external_checkpoint"] = checkpoint_result
                     rows.append(row)
@@ -236,6 +265,9 @@ def main():
                for label, _ in engines}
     report = dict(size_bytes=size, rate_mib=args.rate_mib, latency_ms=args.latency_ms,
                   rounds=args.rounds, checkpoint_bytes=checkpoints, native_sync_mib=native_sync,
+                  adaptive_labels=args.adaptive, connection_rate_mib=args.connection_rate_mib,
+                  overload_above=args.overload_above, overload_delay_ms=args.overload_delay_ms,
+                  pacing="future slots without catch-up credit",
                   profiles=profiles, samples=rows, medians=medians)
     args.report.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps({"medians": medians}), flush=True)

@@ -13,7 +13,9 @@ param(
 
     [string]$LogFile = "",
 
-    [string]$SummaryFile = ""
+    [string]$SummaryFile = "",
+
+    [switch]$Adaptive
 )
 
 $ErrorActionPreference = "Stop"
@@ -56,6 +58,7 @@ Write-Host ("Sync interval: {0} MiB (0 = final only)" -f $SyncIntervalMiB)
 $started = [System.Diagnostics.Stopwatch]::StartNew()
 $downloadArgs = @("download", $Url, "--out", $Output, "--log", $LogFile, "--sync-interval-mib", "$SyncIntervalMiB")
 if ($Http1Only) { $downloadArgs += "--http1-only" }
+if ($Adaptive) { $downloadArgs += "--adaptive" }
 & $Nibiru @downloadArgs
 $started.Stop()
 if ($LASTEXITCODE -ne 0) {
@@ -72,12 +75,19 @@ $gbps = (($bytes * 8) / 1e9) / $seconds
 
 $hash = Get-FileHash -Algorithm SHA256 $Output
 $nativeTimings = [ordered]@{}
-$completion = Get-Content -LiteralPath $LogFile | ForEach-Object { $_ | ConvertFrom-Json } |
+$records = @(Get-Content -LiteralPath $LogFile | ForEach-Object { $_ | ConvertFrom-Json })
+$completion = $records |
     Where-Object { $_.event -eq "http.download_completed" } | Select-Object -Last 1
 if ($null -ne $completion) {
-    foreach ($match in [regex]::Matches($completion.detail, '(?:^| )([a-z_]+_ms|checkpoint_count|checkpoint_sync_ms_sum)=([0-9]+)')) {
+    foreach ($match in [regex]::Matches($completion.detail, '(?:^| )([a-z_]+_ms|checkpoint_count|checkpoint_sync_ms_sum|adaptive_target_at_end)=([0-9]+)')) {
         $nativeTimings[$match.Groups[1].Value] = [long]$match.Groups[2].Value
     }
+}
+$adaptiveChanges = 0
+foreach ($record in $records) {
+    if ($record.event -eq "http.adaptive_decision" -and
+        $record.detail -match 'previous_workers=([0-9]+) target_workers=([0-9]+)' -and
+        $Matches[1] -ne $Matches[2]) { $adaptiveChanges++ }
 }
 $summaryPath = $SummaryFile
 $summary = [ordered]@{
@@ -85,6 +95,9 @@ $summary = [ordered]@{
     engine_version = $version
     http_mode = $(if ($Http1Only) { "http1-only" } else { "auto-h2-window16m" })
     sync_interval_mib = $SyncIntervalMiB
+    adaptive = [bool]$Adaptive
+    adaptive_started = @($records | Where-Object { $_.event -eq "http.adaptive_started" }).Count -gt 0
+    adaptive_decision_count = $adaptiveChanges
     native_timings = $nativeTimings
     output_file = $item.FullName
     size_bytes = $item.Length

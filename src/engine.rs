@@ -11,7 +11,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -24,6 +24,8 @@ use tokio::{
 use url::Url;
 
 use crate::{logging::LogSink, storage};
+
+mod adaptive;
 
 const MIN_SEGMENTED_SIZE: u64 = 8 * 1024 * 1024;
 const RANGE_CHUNK_SIZE: u64 = 4 * 1024 * 1024;
@@ -167,6 +169,7 @@ pub struct Engine {
     client: Client,
     log: Arc<LogSink>,
     sync_interval_bytes: u64,
+    adaptive: bool,
 }
 
 impl Engine {
@@ -186,12 +189,19 @@ impl Engine {
             client,
             log,
             sync_interval_bytes: 0,
+            adaptive: false,
         })
     }
 
     /// Experimental checkpoints for segmented downloads. Zero keeps final-only sync.
     pub fn with_sync_interval_mib(mut self, interval_mib: u32) -> Self {
         self.sync_interval_bytes = u64::from(interval_mib) * 1024 * 1024;
+        self
+    }
+
+    /// Opt-in, bounded concurrency experiments; the default scheduler is unchanged.
+    pub fn with_adaptive(mut self, enabled: bool) -> Self {
+        self.adaptive = enabled;
         self
     }
 
@@ -450,6 +460,15 @@ impl Engine {
         let completed = Arc::new(AtomicU64::new(0));
         let metrics = Arc::new(RangeMetrics::default());
         let mut set = JoinSet::new();
+        let (adaptive_limit, _) = tokio::sync::watch::channel(workers);
+        let active_ranges = Arc::new(AtomicU32::new(0));
+        let mut controller = self.adaptive.then(|| adaptive::Controller::new(workers));
+        if self.adaptive {
+            self.log.info("http.adaptive_started", &format!(
+                "maximum_workers={workers} initial_workers={workers} window_ms=4000 sync_interval_bytes={}",
+                self.sync_interval_bytes,
+            ));
+        }
 
         self.log.info(
             "http.segmented_started",
@@ -473,14 +492,38 @@ impl Engine {
             let cancelled = cancelled.clone();
             let metrics = metrics.clone();
             let log = self.log.clone();
+            let mut gate = self.adaptive.then(|| adaptive::Gate {
+                limit: adaptive_limit.subscribe(),
+                wake_all: adaptive_limit.clone(),
+                maximum: workers,
+                active: active_ranges.clone(),
+                worker: worker_id,
+            });
             set.spawn(async move {
                 loop {
                     if cancelled.load(Ordering::Acquire) {
                         return Err(anyhow!("cancelled"));
                     }
-                    let Some((start, end)) = claim_range(&next_offset, total, workers) else {
+                    if next_offset.load(Ordering::Acquire) >= total {
+                        break;
+                    }
+                    let range_workers = if let Some(gate) = gate.as_mut() {
+                        let Some(limit) = gate.enter().await else {
+                            break;
+                        };
+                        limit
+                    } else {
+                        workers
+                    };
+                    let Some((start, end)) = claim_range(&next_offset, total, range_workers) else {
                         break;
                     };
+                    if end + 1 == total
+                        && let Some(gate) = gate.as_ref()
+                    {
+                        gate.wake_all.send_replace(gate.maximum);
+                    }
+                    let _active_range = gate.as_ref().map(adaptive::Gate::track);
 
                     let requesting = Instant::now();
                     let response = client
@@ -620,6 +663,23 @@ impl Engine {
                         speed_bytes_per_second: speed,
                     });
                     telemetry.record(&self.log, done, Some(total), set.len(), false);
+                    if let Some(controller) = controller.as_mut() {
+                        let unclaimed = total.saturating_sub(next_offset.load(Ordering::Acquire));
+                        if let Some(decision) = controller.observe(
+                            started.elapsed().as_millis() as u64, done,
+                            active_ranges.load(Ordering::Acquire), unclaimed,
+                        ) {
+                            adaptive_limit.send_replace(decision.target);
+                            self.log.info("http.adaptive_decision", &format!(
+                                "previous_workers={} target_workers={} measured_bytes_per_second={} reference_bytes_per_second={} reason={}",
+                                decision.previous, decision.target, decision.measured_bps,
+                                decision.reference_bps, decision.reason,
+                            ));
+                        }
+                        // All data is assigned: wake parked workers so they can
+                        // observe the exhausted allocator and exit without a request.
+                        if unclaimed == 0 { adaptive_limit.send_replace(workers); }
+                    }
                     if let Some(worker) = checkpoints.as_mut() {
                         worker.consider(done, total);
                     }
@@ -705,12 +765,14 @@ impl Engine {
         self.log.info(
             "http.download_completed",
             &format!(
-                "destination={} bytes={} elapsed_ms={} mode=segmented workers={workers} transfer_ms={transfer_ms} finalize_ms={finalize_ms} sync_ms={sync_ms} close_ms={close_ms} destination_cleanup_ms={destination_cleanup_ms} rename_ms={rename_ms} checkpoint_wait_ms={checkpoint_wait_ms} checkpoint_count={} checkpoint_sync_ms_sum={}",
+                "destination={} bytes={} elapsed_ms={} mode=segmented workers={workers} transfer_ms={transfer_ms} finalize_ms={finalize_ms} sync_ms={sync_ms} close_ms={close_ms} destination_cleanup_ms={destination_cleanup_ms} rename_ms={rename_ms} checkpoint_wait_ms={checkpoint_wait_ms} checkpoint_count={} checkpoint_sync_ms_sum={} adaptive={} adaptive_target_at_end={}",
                 destination.display(),
                 total,
                 started.elapsed().as_millis(),
                 checkpoint_stats.count,
                 checkpoint_stats.elapsed_ms,
+                self.adaptive,
+                controller.as_ref().map_or(workers, adaptive::Controller::target),
             ),
         );
         Ok(())

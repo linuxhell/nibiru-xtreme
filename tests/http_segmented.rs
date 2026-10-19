@@ -13,25 +13,40 @@ use tokio::{
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn segmented_download_reassembles_ranges_exactly() {
-    download_case(true, 0, false).await;
+    download_case(true, 0, false, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn single_download_logs_stalls_and_reassembles_exactly() {
-    download_case(false, 0, false).await;
+    download_case(false, 0, false, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn background_sync_preserves_segmented_file_bytes() {
-    download_case(true, 1, false).await;
+    download_case(true, 1, false, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancelling_background_sync_download_does_not_publish_partial_file() {
-    download_case(true, 1, true).await;
+    download_case(true, 1, true, false).await;
 }
 
-async fn download_case(segmented: bool, sync_interval_mib: u32, cancel_on_progress: bool) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adaptive_download_preserves_file_bytes() {
+    download_case(true, 0, false, true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelling_adaptive_download_removes_partial_file() {
+    download_case(true, 0, true, true).await;
+}
+
+async fn download_case(
+    segmented: bool,
+    sync_interval_mib: u32,
+    cancel_on_progress: bool,
+    adaptive: bool,
+) {
     let data = Arc::new(
         (0..(9 * 1024 * 1024 + 321))
             .map(|i| ((i * 31 + 17) % 251) as u8)
@@ -106,7 +121,8 @@ async fn download_case(segmented: bool, sync_interval_mib: u32, cancel_on_progre
     let log = Arc::new(LogSink::new(Some(&log_path)).unwrap());
     let engine = Engine::new(log)
         .unwrap()
-        .with_sync_interval_mib(sync_interval_mib);
+        .with_sync_interval_mib(sync_interval_mib)
+        .with_adaptive(adaptive);
     let cancelled = Arc::new(AtomicBool::new(false));
     let cancel_signal = cancelled.clone();
     let data_len = data.len() as u64;
@@ -166,6 +182,12 @@ async fn download_case(segmented: bool, sync_interval_mib: u32, cancel_on_progre
     let detail = completed["detail"].as_str().unwrap();
     assert!(detail.contains("transfer_ms="));
     assert!(detail.contains("finalize_ms="));
+    assert_eq!(
+        records
+            .iter()
+            .any(|r| r["event"] == "http.adaptive_started"),
+        adaptive
+    );
     if segmented {
         assert_eq!(
             records
@@ -189,7 +211,7 @@ async fn download_case(segmented: bool, sync_interval_mib: u32, cancel_on_progre
 
     drop(engine);
     #[cfg(windows)]
-    if segmented && sync_interval_mib == 0 {
+    if segmented && sync_interval_mib == 0 && !adaptive {
         // Exercise the packaged script under Windows PowerShell 5.1, including
         // its default output path, log file, binary lookup and saved SHA-256.
         let script = root.join("windows11.ps1");
@@ -260,58 +282,86 @@ async fn download_case(segmented: bool, sync_interval_mib: u32, cancel_on_progre
         )
         .await
         .unwrap();
-        let result = tokio::task::spawn_blocking(move || {
-            std::process::Command::new("powershell.exe")
-                .env_remove("PSModulePath")
-                .args([
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-File",
-                ])
-                .arg(comparison_script)
-                .arg("-Url")
-                .arg(format!("http://{address}/payload.bin"))
-                .arg("-Http1Only")
-                .arg("-SyncIntervalMiB")
-                .arg("1")
-                .output()
-                .unwrap()
-        })
-        .await
-        .unwrap();
-        assert!(
-            result.status.success(),
-            "stdout={} stderr={}",
-            String::from_utf8_lossy(&result.stdout),
-            String::from_utf8_lossy(&result.stderr)
-        );
-        let mut entries = tokio::fs::read_dir(&root).await.unwrap();
-        let mut zip_found = false;
-        let mut comparison_found = false;
-        while let Some(entry) = entries.next_entry().await.unwrap() {
-            if entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("comparacao-sync-")
-            {
+        for adaptive_comparison in [false, true] {
+            let script = comparison_script.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                let mut command = std::process::Command::new("powershell.exe");
+                command
+                    .env_remove("PSModulePath")
+                    .args([
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-File",
+                    ])
+                    .arg(script)
+                    .arg("-Url")
+                    .arg(format!("http://{address}/payload.bin"))
+                    .arg("-Http1Only");
+                if adaptive_comparison {
+                    command.arg("-TestAdaptive").arg("-Rounds").arg("2");
+                } else {
+                    command.arg("-SyncIntervalMiB").arg("1");
+                }
+                command.output().unwrap()
+            })
+            .await
+            .unwrap();
+            assert!(
+                result.status.success(),
+                "stdout={} stderr={}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            let prefix = if adaptive_comparison {
+                "comparacao-adaptativo-"
+            } else {
+                "comparacao-sync-"
+            };
+            let summary_name = if adaptive_comparison {
+                "comparacao-adaptativo.json"
+            } else {
+                "comparacao-sync.json"
+            };
+            let mut entries = tokio::fs::read_dir(&root).await.unwrap();
+            let mut zip_found = false;
+            let mut comparison_found = false;
+            while let Some(entry) = entries.next_entry().await.unwrap() {
+                if !entry.file_name().to_string_lossy().starts_with(prefix) {
+                    continue;
+                }
                 if entry.file_type().await.unwrap().is_dir() {
                     let comparison: serde_json::Value = serde_json::from_slice(
-                        &tokio::fs::read(entry.path().join("comparacao-sync.json"))
+                        &tokio::fs::read(entry.path().join(summary_name))
                             .await
                             .unwrap(),
                     )
                     .unwrap();
                     assert_eq!(comparison["same_size_and_sha256"], true);
                     assert_eq!(comparison["experiment_exercised"], true);
-                    assert_eq!(comparison["results"].as_array().unwrap().len(), 2);
-                    assert!(
-                        comparison["results"][1]["native_timings"]["checkpoint_count"]
-                            .as_u64()
-                            .unwrap()
-                            > 0
+                    assert_eq!(
+                        comparison["results"].as_array().unwrap().len(),
+                        if adaptive_comparison { 4 } else { 2 }
                     );
+                    if adaptive_comparison {
+                        assert_eq!(comparison["test_kind"], "adaptive_concurrency");
+                        assert_eq!(comparison["results"][0]["adaptive"], false);
+                        assert_eq!(comparison["results"][1]["adaptive"], true);
+                        assert_eq!(comparison["results"][2]["adaptive"], true);
+                        assert_eq!(comparison["results"][3]["adaptive"], false);
+                        assert_eq!(
+                            comparison["results"][1]["native_timings"]["checkpoint_count"],
+                            0
+                        );
+                    } else {
+                        assert!(
+                            comparison["results"][1]["native_timings"]["checkpoint_count"]
+                                .as_u64()
+                                .unwrap()
+                                > 0
+                        );
+                    }
                     comparison_found = true;
                 } else if entry
                     .path()
@@ -321,8 +371,8 @@ async fn download_case(segmented: bool, sync_interval_mib: u32, cancel_on_progre
                     zip_found = true;
                 }
             }
+            assert!(zip_found && comparison_found);
         }
-        assert!(zip_found && comparison_found);
     }
     server.abort();
     tokio::time::sleep(Duration::from_millis(10)).await;

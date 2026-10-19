@@ -169,6 +169,7 @@ async fn run_fixture(flow: Flow, size: usize, rtt: Duration) -> f64 {
     let destination = root.join("payload.bin");
     let engine = Engine {
         sync_interval_bytes: 0,
+        adaptive: false,
         client: match flow {
             Flow::Default => Client::builder(),
             Flow::Adaptive => Client::builder().http2_adaptive_window(true),

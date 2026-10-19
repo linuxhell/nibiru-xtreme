@@ -33,6 +33,9 @@ enum Command {
         /// Experimental background sync interval in MiB; zero keeps final-only sync.
         #[arg(long, default_value_t = 0)]
         sync_interval_mib: u32,
+        /// Experiment with bounded request concurrency during segmented downloads.
+        #[arg(long)]
+        adaptive: bool,
     },
     Serve {
         #[arg(long, default_value_t = 6800)]
@@ -62,6 +65,7 @@ async fn main() -> Result<()> {
             log,
             http1_only,
             sync_interval_mib,
+            adaptive,
         }) => {
             let log = Arc::new(LogSink::new(log.as_deref())?);
             let engine = if http1_only {
@@ -69,7 +73,8 @@ async fn main() -> Result<()> {
             } else {
                 Engine::new(log)?
             }
-            .with_sync_interval_mib(sync_interval_mib);
+            .with_sync_interval_mib(sync_interval_mib)
+            .with_adaptive(adaptive);
             let cancelled = Arc::new(AtomicBool::new(false));
             engine
                 .download(

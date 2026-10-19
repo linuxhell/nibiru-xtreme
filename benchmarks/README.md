@@ -153,3 +153,40 @@ simples ou retomadas existentes.
 A escolha de 512 MiB é uma hipótese de teste, não uma configuração já validada
 como superior no Windows. Flushes frequentes também podem reduzir desempenho,
 conforme a [documentação da Microsoft](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers).
+
+## Versão 0.1.4: controlador adaptativo opcional
+
+Abra **`comparar-adaptativo.cmd`** para comparar quatro downloads com o mesmo
+executável, em duas rodadas com ordem alternada: agendamento fixo e controle
+adaptativo. Ambos usam sincronização
+somente no final. O ZIP `comparacao-adaptativo-DATA-ID.zip` contém o resumo e os
+logs, sem a ISO. O teste de checkpoints é independente e permanece opcional.
+
+O controlador começa com o mesmo teto de workers do modo normal, determinado
+pelo tamanho do arquivo (até 16). Observa o progresso após escrita, testa metade
+dos workers e só mede a nova configuração depois que requisições antigas acima
+do limite terminam. As janelas têm pelo menos quatro segundos e 16 MiB de dados.
+Se a vazão cair mais de 3%, restaura o limite anterior. Uma configuração menor
+validada pode testar mais workers após um intervalo; o aumento exige ganho maior
+que 8%. Isso é uma heurística experimental, sensível a variações de rede e disco.
+
+Requisições em andamento não são canceladas para ajustar o limite. Workers
+excedentes aguardam para pedir outro range. O controlador interrompe as tentativas
+perto do final e restaura uma tentativa ainda sem validação suficiente. A última
+alocação acorda os workers pausados para que encerrem sem pedir dados adicionais.
+Os buffers continuam em 4 MiB e o teto de range em 32 MiB; a região de ranges
+pequenos no fim acompanha o paralelismo escolhido.
+
+`http.adaptive_started` identifica a ativação. `http.adaptive_decision` registra
+limites anterior/novo, vazão observada, referência e motivo. O resumo indica se o
+controlador foi ativado e quantas decisões mudaram o limite. Um arquivo curto pode
+terminar sem ajuste. Workers são tarefas de requisição, não necessariamente
+conexões TCP distintas, especialmente em HTTP/2. O recurso não é um modelo treinado
+nem garante capacidade futura do servidor.
+
+O modo normal continua fixo. Para ativar explicitamente: `windows11.ps1 -Adaptive`
+ou `download URL --out ARQUIVO --adaptive`. Para duas rodadas em ordem alternada:
+
+```powershell
+powershell -NoExit -ExecutionPolicy Bypass -File .\comparar-sync.ps1 -TestAdaptive -Rounds 2
+```

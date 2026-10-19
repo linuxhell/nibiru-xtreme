@@ -183,6 +183,72 @@ a ocorrência de checkpoints e a criação do ZIP no Windows PowerShell 5.1.
 
 ## Reproduzir
 
+### Decisão Windows após os testes de checkpoints
+
+A comparação em ordem alternada, com duas execuções por modo e mesmo binário
+0.1.3, rejeitou os checkpoints de 1.536 MiB: tempo médio de 85,5083 s, contra
+79,7401 s no padrão (7,23% mais tempo). As vazões agregadas foram 102,114 e
+109,500 MB/s. Em cada execução experimental houve oito intervalos de progresso
+sem avanço na escrita, todos sobrepostos a checkpoints; no padrão, nenhum.
+Os quatro arquivos tiveram tamanho e SHA-256 iguais. A espera final menor não
+compensou o custo durante a transferência. **A sincronização fica apenas no final
+por padrão; essa linha de ajuste foi encerrada.** O modo opcional é mantido para
+reprodução, não como recomendação de uso.
+
+### Controlador adaptativo 0.1.4
+
+O controlador opcional altera o número de tarefas elegíveis para novos ranges,
+com um teto igual ao modo fixo e sem cancelar ranges em andamento. Usa medições
+de bytes escritos, espera o escoamento dos workers antigos e testa limites
+menores. Pode restaurar o limite anterior ao detectar perda. No fim interrompe
+as tentativas e descarta candidatos ainda sem validação suficiente. Trata-se de
+uma heurística local experimental; não foi adicionado aprendizado de máquina.
+
+O harness oferece `--adaptive LABEL`, limite por conexão e penalidade de servidor
+com excesso de requisições simultâneas. O limitador agregado foi ajustado para
+reservar slots futuros sem acumular crédito de recuperação durante paradas.
+Esse detalhe difere do pacing usado nos experimentos anteriores. Os novos
+resultados são comparações dentro da mesma fixture; não equivalem a testes CDN.
+
+Foram feitas duas rodadas por cenário, alternando a ordem dos perfis e validando
+tamanho e SHA-256 de todos os arquivos. Ambos os modos usam o mesmo binário e
+sincronização somente no final. Limite agregado: 105 MiB/s; por conexão:
+32 MiB/s; atraso de 40 ms por requisição. No cenário de sobrecarga, o servidor
+acrescenta 20 ms por bloco de 64 KiB enquanto há mais de oito requisições de
+dados ativas. Essa penalidade é artificial e foi escolhida para testar o feedback.
+
+| Cenário | Fixo: tempo mediano | Adaptativo: tempo mediano | Diferença de tempo |
+|---|---:|---:|---:|
+| Penalidade por excesso de requisições, 1 GiB | 29,2917 s | 17,8345 s | -39,11% |
+| Sem penalidade, 2 GiB | 19,7568 s | 20,2170 s | +2,33% |
+
+Na sobrecarga, o controlador reduziu de 12 para 6 workers e manteve esse limite
+na cauda com evidência de maior vazão. No cenário sem penalidade, uma execução
+restaurou 12 após testar 6; a outra aceitou 6, testou 3 e restaurou 6 ao perder
+vazão. O custo de experimentar é real: não há justificativa para mudar o padrão.
+O recurso é entregue opcional, sem afirmar ganho na CDN Microsoft ou estimativa
+instantânea de capacidade. São somente duas amostras por perfil em cada cenário.
+
+Dados completos, hashes e decisões:
+[`adaptive-overload-2026-10-19.json`](adaptive-overload-2026-10-19.json) e
+[`adaptive-stable-2026-10-19.json`](adaptive-stable-2026-10-19.json).
+
+Uma comparação adicional de 512 MiB, duas rodadas alternadas, confrontou a 0.1.3
+com o modo fixo da 0.1.4: medianas de 5,2003 s e 5,1997 s, com 73 GETs e hashes
+iguais em todas as quatro amostras. Não foi observado custo de tempo relevante
+na fixture para o modo padrão. Dados:
+[`adaptive-reference-2026-10-19.json`](adaptive-reference-2026-10-19.json).
+
+```bash
+python benchmarks/controlled_http.py \
+  --engine fixed=/caminho/nibiru-0.1.4 --engine adaptive=/caminho/nibiru-0.1.4 \
+  --adaptive adaptive --size-mib 1024 --rate-mib 105 --connection-rate-mib 32 \
+  --overload-above 8 --overload-delay-ms 20 --latency-ms 40 --rounds 2 \
+  --report overload.json
+```
+
+Para o cenário sem penalidade, use 2.048 MiB e omita os dois parâmetros de overload.
+
 O harness Python usa a biblioteca padrão e `resource` (Linux/macOS):
 
 ```bash
