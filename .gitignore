@@ -1,0 +1,5 @@
+/target
+*.log
+*.part
+.DS_Store
+Thumbs.db
