@@ -102,10 +102,7 @@ impl Engine {
                         Err(error) if !cancelled.load(Ordering::Acquire) => {
                             self.log.warn(
                                 "http.segmented_fallback",
-                                &format!(
-                                    "url={} reason={error}",
-                                    redact_url(&parsed)
-                                ),
+                                &format!("url={} reason={error}", redact_url(&parsed)),
                             );
                         }
                         Err(error) => return Err(error),
@@ -307,7 +304,12 @@ impl Engine {
                             response.status()
                         );
                     }
-                    validate_content_range(response.headers().get(CONTENT_RANGE), start, end, total)?;
+                    validate_content_range(
+                        response.headers().get(CONTENT_RANGE),
+                        start,
+                        end,
+                        total,
+                    )?;
 
                     let bytes = response
                         .bytes()
