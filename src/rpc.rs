@@ -29,6 +29,7 @@ struct Task {
     error: Option<String>,
     cancel: Arc<AtomicBool>,
     request: DownloadRequest,
+    transport: crate::protocols::TransportOptions,
 }
 
 #[derive(Clone)]
@@ -156,7 +157,7 @@ impl RpcServer {
         match method {
             "aria2.getVersion" | "nibiru.getVersion" => Ok(json!({
                 "version": VERSION,
-                "enabledFeatures": ["HTTP", "HTTPS", "HTTP/2", "RPC", "Resume"]
+                "enabledFeatures": ["HTTP", "HTTPS", "HTTP/2", "FTP", "FTPS", "SFTP", "WebDAV-GET", "RPC", "Resume"]
             })),
             "aria2.addUri" | "nibiru.addUri" => self.add_uri(params).await,
             "aria2.tellStatus" | "nibiru.tellStatus" => self.tell_status(params).await,
@@ -194,6 +195,12 @@ impl RpcServer {
             url: uri,
             destination: dir.join(out),
         };
+        let value = |key: &str| options.and_then(|m| m.get(key)).and_then(Value::as_str);
+        let transport = crate::protocols::TransportOptions {
+            ca_certificate: value("ca-certificate").map(PathBuf::from),
+            ssh_host_key: value("ssh-host-key").map(str::to_owned),
+            ssh_identity: value("ssh-identity").map(PathBuf::from),
+        };
         let gid = uuid::Uuid::new_v4().simple().to_string();
         let cancel = Arc::new(AtomicBool::new(false));
         self.tasks.write().await.insert(
@@ -206,14 +213,21 @@ impl RpcServer {
                 error: None,
                 cancel: cancel.clone(),
                 request: request.clone(),
+                transport: transport.clone(),
             },
         );
-        self.spawn_download(gid.clone(), request, cancel);
+        self.spawn_download(gid.clone(), request, cancel, transport);
         Ok(Value::String(gid))
     }
 
-    fn spawn_download(&self, gid: String, request: DownloadRequest, cancel: Arc<AtomicBool>) {
-        let engine = self.engine.clone();
+    fn spawn_download(
+        &self,
+        gid: String,
+        request: DownloadRequest,
+        cancel: Arc<AtomicBool>,
+        transport: crate::protocols::TransportOptions,
+    ) {
+        let engine = self.engine.clone().with_transport_options(transport);
         let tasks = self.tasks.clone();
         let log = self.log.clone();
         tokio::spawn(async move {
@@ -309,7 +323,7 @@ impl RpcServer {
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("missing gid"))?
             .to_owned();
-        let (request, cancel) = {
+        let (request, cancel, transport) = {
             let mut guard = self.tasks.write().await;
             let task = guard.get_mut(&gid).ok_or_else(|| anyhow!("unknown gid"))?;
             if task.status != "paused" && task.status != "error" {
@@ -319,9 +333,9 @@ impl RpcServer {
             task.cancel = cancel.clone();
             task.status = "active".into();
             task.error = None;
-            (task.request.clone(), cancel)
+            (task.request.clone(), cancel, task.transport.clone())
         };
-        self.spawn_download(gid.clone(), request, cancel);
+        self.spawn_download(gid.clone(), request, cancel, transport);
         Ok(Value::String(gid))
     }
 

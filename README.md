@@ -2,6 +2,13 @@
 
 **Nibiru Xtreme** é um novo motor de downloads multiplataforma escrito em Rust, criado do zero para ser pequeno, seguro, poderoso, rápido e fácil de diagnosticar.
 
+## Desenvolvimento multiprotocolo
+
+A branch de desenvolvimento 0.2.0-alpha.1 acrescenta FTP/FTPS, SFTP, HTTP/3
+explícito, aliases WebDAV GET e a fundação nativa de ED2K/Kad. Ela **não** é um
+release multiprotocolo completo. Veja [suporte e limitações](docs/protocols.md).
+O agendador HTTP fixo continua como padrão; os experimentos não foram ativados.
+
 ## Estado atual
 
 A primeira fundação funcional já contém:

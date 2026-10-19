@@ -6,6 +6,7 @@ use nibiru_xtreme::{
     VERSION,
     engine::{DownloadRequest, Engine},
     logging::LogSink,
+    protocols::TransportOptions,
     rpc::RpcServer,
 };
 use std::{
@@ -30,12 +31,24 @@ enum Command {
         log: Option<PathBuf>,
         #[arg(long)]
         http1_only: bool,
+        /// Require HTTP/3 over QUIC; never silently falls back to TCP.
+        #[arg(long, conflicts_with = "http1_only")]
+        http3_only: bool,
         /// Experimental background sync interval in MiB; zero keeps final-only sync.
         #[arg(long, default_value_t = 0)]
         sync_interval_mib: u32,
         /// Experiment with bounded request concurrency during segmented downloads.
         #[arg(long)]
         adaptive: bool,
+        /// Additional DER root certificate for FTPS.
+        #[arg(long)]
+        ca_certificate: Option<PathBuf>,
+        /// Trusted SSH server fingerprint, e.g. SHA256:...
+        #[arg(long)]
+        ssh_host_key: Option<String>,
+        /// Unencrypted OpenSSH private key for SFTP authentication.
+        #[arg(long)]
+        ssh_identity: Option<PathBuf>,
     },
     Serve {
         #[arg(long, default_value_t = 6800)]
@@ -64,8 +77,12 @@ async fn main() -> Result<()> {
             out,
             log,
             http1_only,
+            http3_only,
             sync_interval_mib,
             adaptive,
+            ca_certificate,
+            ssh_host_key,
+            ssh_identity,
         }) => {
             let log = Arc::new(LogSink::new(log.as_deref())?);
             let engine = if http1_only {
@@ -74,7 +91,13 @@ async fn main() -> Result<()> {
                 Engine::new(log)?
             }
             .with_sync_interval_mib(sync_interval_mib)
-            .with_adaptive(adaptive);
+            .with_adaptive(adaptive)
+            .with_http3_only(http3_only)
+            .with_transport_options(TransportOptions {
+                ca_certificate,
+                ssh_host_key,
+                ssh_identity,
+            });
             let cancelled = Arc::new(AtomicBool::new(false));
             engine
                 .download(

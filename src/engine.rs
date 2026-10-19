@@ -170,6 +170,8 @@ pub struct Engine {
     log: Arc<LogSink>,
     sync_interval_bytes: u64,
     adaptive: bool,
+    http3_only: bool,
+    transport_options: crate::protocols::TransportOptions,
 }
 
 impl Engine {
@@ -190,6 +192,8 @@ impl Engine {
             log,
             sync_interval_bytes: 0,
             adaptive: false,
+            http3_only: false,
+            transport_options: Default::default(),
         })
     }
 
@@ -202,6 +206,16 @@ impl Engine {
     /// Opt-in, bounded concurrency experiments; the default scheduler is unchanged.
     pub fn with_adaptive(mut self, enabled: bool) -> Self {
         self.adaptive = enabled;
+        self
+    }
+
+    pub fn with_http3_only(mut self, enabled: bool) -> Self {
+        self.http3_only = enabled;
+        self
+    }
+
+    pub fn with_transport_options(mut self, options: crate::protocols::TransportOptions) -> Self {
+        self.transport_options = options;
         self
     }
 
@@ -221,17 +235,57 @@ impl Engine {
 
     pub async fn download<F>(
         &self,
-        request: DownloadRequest,
+        mut request: DownloadRequest,
         cancelled: Arc<AtomicBool>,
         mut on_progress: F,
     ) -> Result<()>
     where
         F: FnMut(Progress) + Send,
     {
+        // A WebDAV file is downloaded through its HTTP GET representation.
+        // No collection traversal or write methods are implied by these aliases.
+        if let Some(rest) = request.url.strip_prefix("webdav://") {
+            request.url = format!("http://{rest}");
+        } else if let Some(rest) = request.url.strip_prefix("webdavs://") {
+            request.url = format!("https://{rest}");
+        }
         let parsed = Url::parse(&request.url).context("invalid URL")?;
+        if self.http3_only {
+            return crate::protocols::http3::download(
+                &parsed,
+                &request.destination,
+                &self.transport_options,
+                &cancelled,
+                &self.log,
+                &mut on_progress,
+            )
+            .await;
+        }
         match parsed.scheme() {
             "http" | "https" => {}
-            scheme => bail!("unsupported protocol in bootstrap engine: {scheme}"),
+            "ftp" | "ftps" | "ftpes" => {
+                return crate::protocols::ftp::download(
+                    &parsed,
+                    &request.destination,
+                    &self.transport_options,
+                    &cancelled,
+                    &self.log,
+                    &mut on_progress,
+                )
+                .await;
+            }
+            "sftp" => {
+                return crate::protocols::sftp::download(
+                    &parsed,
+                    &request.destination,
+                    &self.transport_options,
+                    &cancelled,
+                    &self.log,
+                    &mut on_progress,
+                )
+                .await;
+            }
+            scheme => bail!("unsupported protocol: {scheme}"),
         }
 
         if let Some(parent) = request.destination.parent() {
