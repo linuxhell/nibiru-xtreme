@@ -635,12 +635,19 @@ impl Engine {
         );
         let finalizing = Instant::now();
         file.sync_all()?;
+        let sync_ms = finalizing.elapsed().as_millis();
+        let closing = Instant::now();
         drop(file);
+        let close_ms = closing.elapsed().as_millis();
 
+        let cleaning = Instant::now();
         if fs::try_exists(destination).await? {
             fs::remove_file(destination).await?;
         }
+        let destination_cleanup_ms = cleaning.elapsed().as_millis();
+        let renaming = Instant::now();
         fs::rename(&part_path, destination).await?;
+        let rename_ms = renaming.elapsed().as_millis();
         let finalize_ms = finalizing.elapsed().as_millis();
 
         let elapsed = started.elapsed().as_secs_f64().max(0.001);
@@ -652,7 +659,7 @@ impl Engine {
         self.log.info(
             "http.download_completed",
             &format!(
-                "destination={} bytes={} elapsed_ms={} mode=segmented workers={workers} transfer_ms={transfer_ms} finalize_ms={finalize_ms}",
+                "destination={} bytes={} elapsed_ms={} mode=segmented workers={workers} transfer_ms={transfer_ms} finalize_ms={finalize_ms} sync_ms={sync_ms} close_ms={close_ms} destination_cleanup_ms={destination_cleanup_ms} rename_ms={rename_ms}",
                 destination.display(),
                 total,
                 started.elapsed().as_millis(),

@@ -1,0 +1,26 @@
+--- a/src/engine.rs
++++ b/src/engine.rs
+@@ -634,7 +634,7 @@
+             &format!("mode=segmented downloaded={done} transfer_ms={transfer_ms}"),
+         );
+         let finalizing = Instant::now();
+-        file.sync_all()?;
++        storage::sync_all(file.clone()).await?;
+         let sync_ms = finalizing.elapsed().as_millis();
+         let closing = Instant::now();
+         drop(file);
+--- a/src/storage.rs
++++ b/src/storage.rs
+@@ -1,5 +1,12 @@
+ use anyhow::{Result, anyhow};
+ use std::{fs::File, io, sync::Arc};
++
++pub async fn sync_all(file: Arc<File>) -> Result<()> {
++    tokio::task::spawn_blocking(move || file.sync_all())
++        .await
++        .map_err(|error| anyhow!("storage sync worker failed: {error}"))??;
++    Ok(())
++}
+ 
+ pub async fn write_at<D>(file: Arc<File>, offset: u64, data: D) -> Result<()>
+ where

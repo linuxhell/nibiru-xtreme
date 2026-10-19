@@ -42,7 +42,8 @@ O limite configurado não garante que a própria fixture consiga produzir essa t
 A janela maior limitada foi escolhida: melhorou as três medições com atraso e
 ficou próxima do padrão sem atraso adicional. A adaptativa foi avaliada, mas
 não virou o padrão desta versão por seu custo de arranque na fixture sem atraso.
-O protocolo da CDN no Windows ainda precisa ser observado no novo log.
+No teste Windows posterior, a CDN negociou HTTP/1.1; portanto o ganho observado
+nessa execução não pode ser atribuído às janelas HTTP/2.
 
 ## Ranges maiores com buffers limitados
 
@@ -57,7 +58,7 @@ com a candidata que recebe ranges maiores por streaming:
 O ganho principal nesta fixture limitada foi menos CPU e menos requisições;
 a vazão ficou próxima. Uma simulação do agendamento da ISO do usuário, com
 16 workers, prevê 367 ranges de dados em vez de 2.082. Isso é uma contagem do
-algoritmo, não uma medição já realizada no servidor Microsoft.
+algoritmo, confirmada posteriormente pelo log de 367 ranges do teste Windows.
 
 A candidata recebe até 32 MiB por requisição, mas escreve a cada 4 MiB, sem
 acumular o range inteiro em memória nem fazer a cópia adicional para Vec depois
@@ -75,8 +76,62 @@ Com a combinação final de streaming, uma segunda fixture HTTP/2 de 512 MiB e
 | Janela limitada escolhida | 5,3451 s | 100,442 MB/s |
 
 Os payloads foram novamente comparados byte a byte. O resultado confirma a
-escolha nesta fixture; não significa que a ISO já tenha sido medida no Windows
-com esta versão nem que 110 MB/s estejam demonstrados.
+escolha nesta fixture; os números sintéticos não substituem o teste Windows
+descrito abaixo.
+
+## ISO no Windows, versão 0.1.1
+
+O teste enviado pelo usuário registrou 8.731.574.272 bytes em 79,5682 s de tempo
+total: 109,737 MB/s decimais. A fase de transferência e escrita levou 75,659 s
+(115,407 MB/s), seguida de 3,230 s de finalização. Foram 367 ranges HTTP/1.1,
+sem fallback. Os últimos 695.287.808 bytes levaram 5,906 s (117,726 MB/s).
+O SHA-256 coincidiu com os testes anteriores; não foi feita comparação com um
+hash oficial da Microsoft. Uma execução não comprova velocidade constante ou
+estabilidade entre execuções. A versão anterior levou 92,8792 s no teste anterior,
+mas os ensaios Windows não tiveram ordem alternada nem condições de CDN fixas.
+
+## Investigação de finalização, versão 0.1.2
+
+Uma fixture HTTP/1.1 Linux, 1 GiB, 105 MiB/s agregados e 40 ms por requisição,
+comparou três perfis em ordem rotacionada, três vezes cada. Todos os nove arquivos
+passaram pela validação de tamanho e SHA-256. A sincronização final nunca foi
+removida. Resultados completos e hashes dos binários experimentais:
+[`finalization-experiment-2026-10-19.json`](finalization-experiment-2026-10-19.json).
+
+| Perfil | Tempo total mediano | Finalização mediana |
+|---|---:|---:|
+| Referência 0.1.1, commit 0a8bffe7 | 9,8918 s | 29 ms |
+| Candidata com sincronização no pool bloqueante | 10,1368 s | 265 ms |
+| Mesma candidata e fsync externo a cada 256 MiB de progresso | 9,9917 s | 101 ms |
+
+A transferência ficou em aproximadamente 9,753 s em todos os perfis. O pool não
+melhorou a latência total nesta amostra. Os checkpoints reduziram a finalização
+em relação à candidata, mas não o tempo total em relação à referência. Há
+variabilidade de flush/cache no overlay Linux: isso não demonstra como o disco
+Windows se comportará, e os 3,23 s do teste real não foram reproduzidos aqui.
+
+Decisão: **nenhuma dessas duas alternativas virou padrão**. A versão publicada
+0.1.2 conserva o caminho de sincronização da 0.1.1 e acrescenta somente os tempos
+de sync, fechamento, limpeza do destino e rename. O objetivo é identificar a
+origem da espera Windows antes de alterar a política de escrita.
+
+Para reproduzir a candidata em uma cópia separada da 0.1.2, aplique
+`git apply benchmarks/sync-pool-experiment.patch` e compile em release. Esse
+patch é experimental e não está aplicado no pacote distribuído. Depois execute:
+
+```bash
+python benchmarks/controlled_http.py \
+  --engine reference=/caminho/nibiru-0.1.1 \
+  --engine diagnostics=/caminho/nibiru-sync-pool \
+  --engine checkpoint=/caminho/nibiru-sync-pool \
+  --checkpoint checkpoint=256 --size-mib 1024 \
+  --rate-mib 105 --latency-ms 40 --rounds 3 --report finalization.json
+```
+
+O fsync externo usa um descritor separado e observa o progresso gravado em log,
+não o tráfego bruto. Há três checkpoints por execução no relatório. O tempo
+total inclui esperar essa thread terminar; os tempos nativos vêm do log do
+motor. A CPU informada é a dos processos-filho, sem a thread Python de fsync.
 
 ## Reproduzir
 

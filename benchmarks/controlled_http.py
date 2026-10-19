@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import http.server
 import json
+import os
 import pathlib
 import resource
 import statistics
@@ -20,6 +21,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--engine", action="append", required=True, metavar="LABEL=PATH")
     parser.add_argument("--no-log-label", action="append", default=[])
+    parser.add_argument("--checkpoint", action="append", default=[], metavar="LABEL=MIB",
+                        help="Experimental external fsync every MIB of logged progress (Unix only)")
     parser.add_argument("--size-mib", type=int, default=512)
     parser.add_argument("--rate-mib", type=float, default=105)
     parser.add_argument("--latency-ms", type=float, default=40)
@@ -30,6 +33,12 @@ def main():
         parser.error("size, rate and rounds must be positive; latency must be nonnegative")
     engines = [(label, pathlib.Path(path).resolve()) for label, path in
                (item.split("=", 1) for item in args.engine)]
+    checkpoints = {label: int(mib) * 2**20 for label, mib in
+                   (item.split("=", 1) for item in args.checkpoint)}
+    labels = {label for label, _ in engines}
+    if any(label not in labels or size <= 0 or label in args.no_log_label
+           for label, size in checkpoints.items()):
+        parser.error("checkpoint requires a known, logged label and positive size")
     for label, path in engines:
         if not path.is_file():
             parser.error(f"missing binary: {label}={path}")
@@ -110,13 +119,75 @@ def main():
                     if label not in args.no_log_label:
                         command += ["--log", str(log)]
                     before = resource.getrusage(resource.RUSAGE_CHILDREN)
+                    checkpoint_result = dict(count=0, seconds=0.0)
+                    stop_checkpoint = threading.Event()
+
+                    def checkpoint(interval):
+                        # A separate file handle approximates background flush without
+                        # changing the engine. Final engine sync is always preserved.
+                        next_at = interval
+                        try:
+                            with log.open(encoding="utf-8") as records:
+                                pending = ""
+                                while not stop_checkpoint.is_set():
+                                    line = records.readline()
+                                    if not line:
+                                        stop_checkpoint.wait(0.02)
+                                        continue
+                                    pending += line
+                                    if not pending.endswith("\n"):
+                                        continue
+                                    record = json.loads(pending)
+                                    pending = ""
+                                    if record["event"] != "http.progress":
+                                        continue
+                                    fields = dict(item.split("=", 1) for item in
+                                                  record["detail"].split() if "=" in item)
+                                    done = int(fields["downloaded"])
+                                    if done >= next_at:
+                                        part = root / ".payload.bin.nibiru.part"
+                                        try:
+                                            fd = os.open(part, os.O_RDWR)
+                                        except FileNotFoundError:
+                                            break
+                                        try:
+                                            syncing = time.perf_counter()
+                                            os.fsync(fd)
+                                            checkpoint_result["seconds"] += time.perf_counter() - syncing
+                                            checkpoint_result["count"] += 1
+                                        finally:
+                                            os.close(fd)
+                                        next_at = done + interval
+                        except Exception as error:
+                            checkpoint_result["error"] = repr(error)
+
                     started = time.perf_counter()
-                    result = subprocess.run(command, stdout=subprocess.DEVNULL,
-                                            stderr=subprocess.DEVNULL, timeout=120)
-                    elapsed = time.perf_counter() - started
+                    with subprocess.Popen(command, stdout=subprocess.DEVNULL,
+                                          stderr=subprocess.DEVNULL) as process:
+                        worker = None
+                        if label in checkpoints:
+                            # LogSink opens the log before requests start.
+                            while not log.exists() and process.poll() is None:
+                                stop_checkpoint.wait(0.005)
+                            worker = threading.Thread(target=checkpoint,
+                                                      args=(checkpoints[label],))
+                            worker.start()
+                        try:
+                            returncode = process.wait(timeout=120)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait()
+                            raise
+                        finally:
+                            stop_checkpoint.set()
+                            if worker:
+                                worker.join()
+                        elapsed = time.perf_counter() - started
                     after = resource.getrusage(resource.RUSAGE_CHILDREN)
-                    if result.returncode:
-                        raise RuntimeError(f"{label} exited with {result.returncode}")
+                    if returncode:
+                        raise RuntimeError(f"{label} exited with {returncode}")
+                    if "error" in checkpoint_result:
+                        raise RuntimeError(f"{label}: checkpoint failed: {checkpoint_result}")
                     with output.open("rb") as stream:
                         digest = hashlib.file_digest(stream, "sha256").hexdigest()
                     if output.stat().st_size != size or digest != expected:
@@ -126,6 +197,16 @@ def main():
                                cpu_seconds=after.ru_utime + after.ru_stime - before.ru_utime - before.ru_stime,
                                requests=state["requests"], sha256=digest,
                                log_bytes=log.stat().st_size if log.exists() else 0)
+                    if log.exists():
+                        records = [json.loads(line) for line in log.read_text().splitlines()]
+                        final = next(record for record in reversed(records)
+                                     if record["event"] == "http.download_completed")
+                        fields = dict(item.split("=", 1) for item in
+                                      final["detail"].split() if "=" in item)
+                        row["engine_timings_ms"] = {key: int(value) for key, value in fields.items()
+                                                   if key.endswith("_ms")}
+                    if label in checkpoints:
+                        row["external_checkpoint"] = checkpoint_result
                     rows.append(row)
                     print(json.dumps(row), flush=True)
     finally:
@@ -135,7 +216,7 @@ def main():
                        "cpu_seconds": statistics.median(r["cpu_seconds"] for r in rows if r["label"] == label)}
                for label, _ in engines}
     report = dict(size_bytes=size, rate_mib=args.rate_mib, latency_ms=args.latency_ms,
-                  rounds=args.rounds, samples=rows, medians=medians)
+                  rounds=args.rounds, checkpoint_bytes=checkpoints, samples=rows, medians=medians)
     args.report.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps({"medians": medians}), flush=True)
 

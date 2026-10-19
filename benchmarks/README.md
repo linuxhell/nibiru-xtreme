@@ -88,3 +88,22 @@ powershell -NoExit -ExecutionPolicy Bypass -File .\windows11.ps1 -Http1Only
 Esse modo é opcional; o iniciador `iniciar-teste.cmd` usa a negociação automática.
 Os resultados locais e os comandos de reprodução estão em
 [`performance-2026-10-19.md`](performance-2026-10-19.md).
+
+## Versão 0.1.2: diagnóstico da finalização
+
+A transferência conserva o agendamento, os buffers e a configuração HTTP da 0.1.1.
+No modo segmentado, `http.download_completed` agora discrimina `sync_ms`,
+`close_ms`, `destination_cleanup_ms` e `rename_ms`. Os valores inteiros em
+milissegundos são arredondados para baixo; sua soma pode ser ligeiramente menor
+que `finalize_ms`. `sync_ms` mede a chamada síncrona `sync_all`, conservada da 0.1.1.
+
+A sincronização continua sendo obrigatória antes de renomear o arquivo e
+informar conclusão. As alternativas de sincronização foram avaliadas localmente,
+mas não adotadas por falta de ganho consistente. Essa versão permite diagnosticar
+a espera final; não promete aumentar a velocidade da rede.
+
+O harness Unix permite investigar sincronização em segundo plano sem modificar
+o motor: `--checkpoint LABEL=MIB` chama `fsync` em um descritor separado do
+arquivo parcial a cada MIB de progresso observado. Isso é um experimento local,
+não um modo disponível no executável Windows. A sincronização final do motor
+permanece ativa, e o tempo do experimento inclui aguardar o sincronizador externo.
