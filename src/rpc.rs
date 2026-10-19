@@ -293,7 +293,10 @@ impl RpcServer {
     }
 
     async fn pause(&self, params: Vec<Value>) -> Result<Value> {
-        let gid = params.first().and_then(Value::as_str).ok_or_else(|| anyhow!("missing gid"))?;
+        let gid = params
+            .first()
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("missing gid"))?;
         let guard = self.tasks.read().await;
         let task = guard.get(gid).ok_or_else(|| anyhow!("unknown gid"))?;
         task.cancel.store(true, Ordering::Release);
@@ -323,7 +326,11 @@ impl RpcServer {
     }
 
     async fn remove(&self, params: Vec<Value>) -> Result<Value> {
-        let gid = params.first().and_then(Value::as_str).ok_or_else(|| anyhow!("missing gid"))?.to_owned();
+        let gid = params
+            .first()
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("missing gid"))?
+            .to_owned();
         if let Some(task) = self.tasks.write().await.remove(&gid) {
             task.cancel.store(true, Ordering::Release);
         }
