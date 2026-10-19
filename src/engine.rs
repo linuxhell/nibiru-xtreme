@@ -85,29 +85,29 @@ impl Engine {
             .map(|m| m.len())
             .unwrap_or(0);
 
-        if existing == 0 {
-            if let Ok((Some(total), ranges)) = self.probe(&request.url).await {
-                if ranges && total >= MIN_SEGMENTED_SIZE {
-                    match self
-                        .download_segmented(
-                            parsed.clone(),
-                            &request.destination,
-                            total,
-                            cancelled.clone(),
-                            &mut on_progress,
-                        )
-                        .await
-                    {
-                        Ok(()) => return Ok(()),
-                        Err(error) if !cancelled.load(Ordering::Acquire) => {
-                            self.log.warn(
-                                "http.segmented_fallback",
-                                &format!("url={} reason={error}", redact_url(&parsed)),
-                            );
-                        }
-                        Err(error) => return Err(error),
-                    }
+        if existing == 0
+            && let Ok((Some(total), ranges)) = self.probe(&request.url).await
+            && ranges
+            && total >= MIN_SEGMENTED_SIZE
+        {
+            match self
+                .download_segmented(
+                    parsed.clone(),
+                    &request.destination,
+                    total,
+                    cancelled.clone(),
+                    &mut on_progress,
+                )
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(error) if !cancelled.load(Ordering::Acquire) => {
+                    self.log.warn(
+                        "http.segmented_fallback",
+                        &format!("url={} reason={error}", redact_url(&parsed)),
+                    );
                 }
+                Err(error) => return Err(error),
             }
         }
 
