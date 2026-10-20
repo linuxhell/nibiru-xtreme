@@ -178,7 +178,7 @@ impl World {
     }
 
     async fn status(&self, gid: &str) -> Value {
-        self.call("aria2.tellStatus", vec![json!(gid)])
+        self.call("nibiru.tellStatus", vec![json!(gid)])
             .await
             .unwrap()
     }
@@ -211,7 +211,7 @@ async fn add_torrent_with_one_based_select_file_downloads_only_those_files() {
     let encoded = base64::engine::general_purpose::STANDARD.encode(w.torrent.to_torrent_file());
     let gid = w
         .call(
-            "aria2.addTorrent",
+            "nibiru.addTorrent",
             vec![
                 json!(encoded),
                 json!([]),
@@ -260,19 +260,19 @@ async fn add_torrent_with_one_based_select_file_downloads_only_those_files() {
     // keys filter
     let few = w
         .call(
-            "aria2.tellStatus",
+            "nibiru.tellStatus",
             vec![json!(gid), json!(["status", "totalLength"])],
         )
         .await
         .unwrap();
     assert_eq!(few.as_object().unwrap().len(), 3, "{few}"); // + gid
     // The ADM then cleans up.
-    w.call("aria2.remove", vec![json!(gid)]).await.unwrap();
+    w.call("nibiru.remove", vec![json!(gid)]).await.unwrap();
     assert_eq!(w.status(&gid).await["status"], "removed");
-    w.call("aria2.removeDownloadResult", vec![json!(gid)])
+    w.call("nibiru.removeResult", vec![json!(gid)])
         .await
         .unwrap();
-    assert!(w.call("aria2.tellStatus", vec![json!(gid)]).await.is_err());
+    assert!(w.call("nibiru.tellStatus", vec![json!(gid)]).await.is_err());
 }
 
 #[tokio::test]
@@ -281,7 +281,7 @@ async fn magnet_metadata_only_saves_the_torrent_then_the_real_download_follows()
     let torrents = tempfile::tempdir().unwrap();
     let gid = w
         .call(
-            "aria2.addUri",
+            "nibiru.addUri",
             vec![
                 json!([w.magnet()]),
                 json!({"dir": torrents.path(), "bt-metadata-only": "true", "bt-save-metadata": "true",
@@ -308,7 +308,7 @@ async fn magnet_metadata_only_saves_the_torrent_then_the_real_download_follows()
     );
     // Metadata-only never creates payload files.
     assert!(!torrents.path().join("Show").exists());
-    w.call("aria2.removeDownloadResult", vec![json!(gid)])
+    w.call("nibiru.removeResult", vec![json!(gid)])
         .await
         .unwrap();
 
@@ -317,7 +317,7 @@ async fn magnet_metadata_only_saves_the_torrent_then_the_real_download_follows()
     let encoded = base64::engine::general_purpose::STANDARD.encode(std::fs::read(&saved).unwrap());
     let gid = w
         .call(
-            "aria2.addTorrent",
+            "nibiru.addTorrent",
             vec![
                 json!(encoded),
                 json!([]),
@@ -341,7 +341,7 @@ async fn pause_unpause_limits_and_global_calls() {
     let encoded = base64::engine::general_purpose::STANDARD.encode(w.torrent.to_torrent_file());
     let gid = w
         .call(
-            "aria2.addTorrent",
+            "nibiru.addTorrent",
             vec![
                 json!(encoded),
                 json!([]),
@@ -351,27 +351,27 @@ async fn pause_unpause_limits_and_global_calls() {
         .await
         .unwrap();
     let gid = gid.as_str().unwrap().to_owned();
-    let stat = w.call("aria2.getGlobalStat", vec![]).await.unwrap();
+    let stat = w.call("nibiru.getGlobalStat", vec![]).await.unwrap();
     assert_eq!(stat["numActive"], "1");
-    w.call("aria2.pause", vec![json!(gid)]).await.unwrap();
+    w.call("nibiru.pause", vec![json!(gid)]).await.unwrap();
     assert_eq!(w.status(&gid).await["status"], "paused");
     w.call(
-        "aria2.changeOption",
+        "nibiru.changeOption",
         vec![json!(gid), json!({"max-download-limit": "0"})],
     )
     .await
     .unwrap();
     w.call(
-        "aria2.changeGlobalOption",
+        "nibiru.changeGlobalOption",
         vec![json!({"max-overall-download-limit": "0"})],
     )
     .await
     .unwrap();
-    w.call("aria2.unpause", vec![json!(gid)]).await.unwrap();
+    w.call("nibiru.resume", vec![json!(gid)]).await.unwrap();
     w.wait_status(&gid, "complete").await;
-    let peers = w.call("aria2.getPeers", vec![json!(gid)]).await.unwrap();
+    let peers = w.call("nibiru.getPeers", vec![json!(gid)]).await.unwrap();
     assert!(peers.is_array());
-    let version = w.call("aria2.getVersion", vec![]).await.unwrap();
+    let version = w.call("nibiru.getVersion", vec![]).await.unwrap();
     let features = version["enabledFeatures"].to_string();
     assert!(
         features.contains("BitTorrent") && features.contains("Magnet"),
@@ -387,7 +387,7 @@ async fn stream_url_lets_a_player_watch_the_biggest_file_while_it_downloads() {
     // Nothing selected: the download only starts because somebody presses play.
     let gid = w
         .call(
-            "aria2.addTorrent",
+            "nibiru.addTorrent",
             vec![
                 json!(encoded),
                 json!([]),
@@ -442,13 +442,13 @@ async fn stream_url_lets_a_player_watch_the_biggest_file_while_it_downloads() {
 async fn rpc_rejects_bad_tokens_bad_torrents_and_bad_selections() {
     let w = world().await;
     assert!(
-        w.call_with("wrong", "aria2.getVersion", vec![])
+        w.call_with("wrong", "nibiru.getVersion", vec![])
             .await
             .is_err()
     );
     assert!(
         w.call(
-            "aria2.addTorrent",
+            "nibiru.addTorrent",
             vec![json!("not base64!!"), json!([]), json!({})]
         )
         .await
@@ -456,7 +456,7 @@ async fn rpc_rejects_bad_tokens_bad_torrents_and_bad_selections() {
     );
     let junk = base64::engine::general_purpose::STANDARD.encode(b"d4:spami1ee");
     assert!(
-        w.call("aria2.addTorrent", vec![json!(junk), json!([]), json!({})])
+        w.call("nibiru.addTorrent", vec![json!(junk), json!([]), json!({})])
             .await
             .is_err()
     );
@@ -465,7 +465,7 @@ async fn rpc_rejects_bad_tokens_bad_torrents_and_bad_selections() {
     for bad in ["0", "4", "3-1", "x"] {
         let r = w
             .call(
-                "aria2.addTorrent",
+                "nibiru.addTorrent",
                 vec![
                     json!(encoded),
                     json!([]),
@@ -477,14 +477,14 @@ async fn rpc_rejects_bad_tokens_bad_torrents_and_bad_selections() {
     }
     assert!(
         w.call(
-            "aria2.addUri",
+            "nibiru.addUri",
             vec![json!(["magnet:?xt=urn:btih:zzz"]), json!({})]
         )
         .await
         .is_err()
     );
     assert!(
-        w.call("aria2.tellStatus", vec![json!("ffffffffffffffff")])
+        w.call("nibiru.tellStatus", vec![json!("ffffffffffffffff")])
             .await
             .is_err()
     );

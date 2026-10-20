@@ -63,6 +63,7 @@ struct BtTask {
     /// Set once the `.torrent` for a metadata-only task has been written.
     saved: Arc<Mutex<Option<PathBuf>>>,
     removed: bool,
+    created: std::time::Instant,
 }
 
 pub struct BtService {
@@ -274,6 +275,7 @@ impl BtService {
                     metadata_only,
                     saved,
                     removed: false,
+                    created: std::time::Instant::now(),
                 },
             );
         }
@@ -375,7 +377,7 @@ impl BtService {
             .ok_or_else(|| anyhow!("GID {gid} is not found"))?;
         if !task.removed {
             task.removed = true;
-            self.session.remove(&task.handle.info_hash(), false);
+            self.session.remove_instance(&task.handle);
         }
         Ok(())
     }
@@ -385,8 +387,18 @@ impl BtService {
             .tasks
             .lock()
             .map_err(|_| anyhow!("task table poisoned"))?;
+        if let Some(task) = tasks.get(gid) {
+            let saved = task.saved.lock().ok().and_then(|s| s.clone());
+            anyhow::ensure!(
+                matches!(
+                    aria_status(&task.handle.status(), task, saved.as_deref()),
+                    "complete" | "removed" | "error"
+                ),
+                "cannot purge an unfinished torrent"
+            );
+        }
         if let Some(task) = tasks.remove(gid) {
-            self.session.remove(&task.handle.info_hash(), false);
+            self.session.remove_instance(&task.handle);
         }
         Ok(())
     }
@@ -449,7 +461,8 @@ impl BtService {
             .ok_or_else(|| anyhow!("GID {gid} is not found"))?;
         let saved = task.saved.lock().ok().and_then(|s| s.clone());
         let mut value = status_json(gid, task, saved.as_deref());
-        if let (Some(keys), Value::Object(map)) = (keys, &mut value) {
+        if let (Some(keys), Value::Object(map)) = (keys.filter(|keys| !keys.is_empty()), &mut value)
+        {
             map.retain(|key, _| keys.iter().any(|k| k == key) || key == "gid");
         }
         Ok(value)
@@ -506,6 +519,9 @@ impl BtService {
         (active, down, up)
     }
 
+    pub fn created(&self, gid: &str) -> Option<std::time::Instant> {
+        self.tasks.lock().ok()?.get(gid).map(|t| t.created)
+    }
     pub fn list_ids(&self) -> Vec<String> {
         self.tasks
             .lock()

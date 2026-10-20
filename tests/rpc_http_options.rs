@@ -89,7 +89,7 @@ async fn call(port: u16, client: &reqwest::Client, method: &str, params: Vec<Val
 
 async fn finish(port: u16, client: &reqwest::Client, gid: &str) -> Value {
     for _ in 0..200 {
-        let s = call(port, client, "aria2.tellStatus", vec![json!(gid)]).await;
+        let s = call(port, client, "nibiru.tellStatus", vec![json!(gid)]).await;
         if s["status"] == "complete" || s["status"] == "error" {
             return s;
         }
@@ -111,7 +111,7 @@ async fn cookies_referer_and_user_agent_reach_the_server() {
     let gid = call(
         port,
         &client,
-        "aria2.addUri",
+        "nibiru.addUri",
         vec![json!([url]), json!({"dir": dir.path(), "out": "no.bin"})],
     )
     .await;
@@ -124,7 +124,7 @@ async fn cookies_referer_and_user_agent_reach_the_server() {
     let gid = call(
         port,
         &client,
-        "aria2.addUri",
+        "nibiru.addUri",
         vec![
             json!([url]),
             json!({"dir": dir.path(), "out": "yes.bin", "continue": "true",
@@ -147,7 +147,7 @@ async fn invalid_header_lines_are_rejected_not_sent() {
     let (port, client) = rpc(false).await;
     let response: Value = client
         .post(format!("http://127.0.0.1:{port}/jsonrpc"))
-        .json(&json!({"jsonrpc":"2.0","id":1,"method":"aria2.addUri",
+        .json(&json!({"jsonrpc":"2.0","id":1,"method":"nibiru.addUri",
                       "params":["token:k", ["http://127.0.0.1:9/x"], {"header": ["no colon here"]}]}))
         .send()
         .await
@@ -191,7 +191,7 @@ async fn an_http_proxy_carries_the_request() {
     let gid = call(
         port,
         &client,
-        "aria2.addUri",
+        "nibiru.addUri",
         vec![
             json!(["http://files.example.test/a.txt"]),
             json!({"dir": dir.path(), "out": "a.txt", "all-proxy": format!("http://127.0.0.1:{proxy_port}")}),
@@ -230,7 +230,7 @@ async fn per_task_and_global_limits_slow_the_transfer_and_can_be_lifted() {
     let gid = call(
         port,
         &client,
-        "aria2.addUri",
+        "nibiru.addUri",
         vec![json!([url]), options("slow.bin", "100K")],
     )
     .await;
@@ -245,7 +245,7 @@ async fn per_task_and_global_limits_slow_the_transfer_and_can_be_lifted() {
     call(
         port,
         &client,
-        "aria2.changeGlobalOption",
+        "nibiru.changeGlobalOption",
         vec![json!({"max-overall-download-limit": "100K"})],
     )
     .await;
@@ -253,7 +253,7 @@ async fn per_task_and_global_limits_slow_the_transfer_and_can_be_lifted() {
     let gid = call(
         port,
         &client,
-        "aria2.addUri",
+        "nibiru.addUri",
         vec![json!([url]), options("global.bin", "0")],
     )
     .await;
@@ -267,7 +267,7 @@ async fn per_task_and_global_limits_slow_the_transfer_and_can_be_lifted() {
     call(
         port,
         &client,
-        "aria2.changeGlobalOption",
+        "nibiru.changeGlobalOption",
         vec![json!({"max-overall-download-limit": "0"})],
     )
     .await;
@@ -275,7 +275,7 @@ async fn per_task_and_global_limits_slow_the_transfer_and_can_be_lifted() {
     let gid = call(
         port,
         &client,
-        "aria2.addUri",
+        "nibiru.addUri",
         vec![json!([url]), options("fast.bin", "0")],
     )
     .await;
@@ -358,7 +358,7 @@ async fn split_and_server_caps_bound_actual_concurrent_http_requests() {
         ("4", "4", "20M", 1, "large-min.bin"),
     ] {
         peak.store(0, Ordering::SeqCst);
-        let gid=call(port,&client,"aria2.addUri",vec![json!([format!("http://127.0.0.1:{origin}/file")]),json!({"dir":dir.path(),"out":name,"split":split,"max-connection-per-server":cap,"min-split-size":min_size})]).await;
+        let gid=call(port,&client,"nibiru.addUri",vec![json!([format!("http://127.0.0.1:{origin}/file")]),json!({"dir":dir.path(),"out":name,"split":split,"max-connection-per-server":cap,"min-split-size":min_size})]).await;
         let done = finish(port, &client, gid.as_str().unwrap()).await;
         assert_eq!(done["status"], "complete", "{done}");
         assert_eq!(std::fs::read(dir.path().join(name)).unwrap(), *body);

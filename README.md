@@ -120,6 +120,30 @@ O ADM continuará usando o motor atual durante o desenvolvimento. A substituiç�
 - atualização automática da ferramenta;
 - Windows x64, Linux x64 e macOS x64.
 
+## Contrato nativo para o ADM (ramo de integração)
+
+```sh
+nibiru-xtreme capabilities --json
+nibiru-xtreme serve --port=6800 --secret=SEGREDO --dir=downloads --stop-with-process=PID
+```
+
+A negociação usa `schema_version: 1`, identidade `nibiru-xtreme` e capacidade
+`native_rpc`. O ADM usa métodos `nibiru.*`; os nomes antigos continuam apenas
+para consumidores externos. `serve` aceita portas de peers, DHT IPv4/IPv6,
+limites, diretório de estado e vínculo à vida do processo pai. O serviço RPC
+escuta em loopback e limita conexões, tamanho de requisição e tempo de leitura.
+
+A retomada HTTP exige origem e validador persistidos (`ETag` forte ou
+`Last-Modified`). Arquivos preexistentes sem essa identidade não são usados
+como parciais. Workers de intervalos verificam a mesma identidade de resposta;
+pausa/retomada rápida serializa as gravações da mesma tarefa. Os contadores de
+conclusão vêm do arquivo real. A lista RPC mantém ordem/paginação e a limpeza
+de um resultado torrent antigo não remove uma instância nova do mesmo hash.
+
+A tabela de tarefas RPC fica em memória: ao reiniciar o motor, o consumidor
+precisa recriar GIDs antigos e retomar a partir dos dados verificados. O cliente
+ED2K/Kad integrado ao ADM permanece experimental e não tem paridade com aMule.
+
 ## Licença
 
 MIT.

@@ -341,6 +341,23 @@ impl Session {
         }
     }
 
+    /// Remove exactly this instance, never a newer transfer with the same hash.
+    pub(crate) fn remove_instance(&self, expected: &TorrentHandle) -> bool {
+        let removed = self.torrents.lock().ok().and_then(|mut torrents| {
+            let key = torrents
+                .iter()
+                .find(|(_, h)| Arc::ptr_eq(&h.shared, &expected.shared))
+                .map(|(key, _)| *key)?;
+            torrents.remove(&key)
+        });
+        if let Some(handle) = removed {
+            handle.shutdown(false);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn shutdown(&self) {
         let handles: Vec<TorrentHandle> = self.list();
         for handle in handles {

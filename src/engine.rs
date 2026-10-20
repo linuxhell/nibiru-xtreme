@@ -2,7 +2,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use futures_util::StreamExt;
 use reqwest::{
     Client, StatusCode,
-    header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, RANGE},
+    header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, ETAG, IF_RANGE, LAST_MODIFIED, RANGE},
     redirect::Policy,
 };
 use serde::{Deserialize, Serialize};
@@ -32,6 +32,50 @@ const RANGE_CHUNK_SIZE: u64 = 4 * 1024 * 1024;
 const MAX_HTTP_RANGE_SIZE: u64 = 32 * 1024 * 1024;
 const MAX_HTTP_WORKERS: usize = 16;
 const HTTP2_CONNECTION_WINDOW: u32 = 16 * 1024 * 1024;
+
+#[derive(Serialize, Deserialize)]
+struct HttpIdentity {
+    origin: String,
+    final_url: String,
+    etag: Option<String>,
+    modified: Option<String>,
+    total: Option<u64>,
+}
+impl HttpIdentity {
+    fn response(origin: &Url, response: &reqwest::Response) -> Self {
+        let header = |key| {
+            response
+                .headers()
+                .get(key)
+                .and_then(|v| v.to_str().ok())
+                .filter(|v| v.len() <= 4096)
+                .map(str::to_owned)
+        };
+        Self {
+            origin: origin.to_string(),
+            final_url: response.url().to_string(),
+            etag: header(ETAG).filter(|v| !v.starts_with("W/")),
+            modified: header(LAST_MODIFIED),
+            total: response.content_length(),
+        }
+    }
+    fn matches(&self, response: &reqwest::Response) -> bool {
+        let actual = Self::response(
+            &Url::parse(&self.origin).expect("validated HTTP origin"),
+            response,
+        );
+        self.final_url == actual.final_url
+            && self.etag.as_ref().map_or_else(
+                || self.modified.is_some() && self.modified == actual.modified,
+                |_| self.etag == actual.etag,
+            )
+    }
+}
+fn http_identity_path(destination: &Path) -> PathBuf {
+    let mut path = destination.as_os_str().to_owned();
+    path.push(".nibiru-http.json");
+    PathBuf::from(path)
+}
 
 fn claim_range(next: &AtomicU64, total: u64, workers: usize) -> Option<(u64, u64)> {
     loop {
@@ -381,6 +425,18 @@ impl Engine {
             fs::create_dir_all(parent).await?;
         }
 
+        let mut lock_path = request.destination.as_os_str().to_owned();
+        lock_path.push(".nibiru-http.lock");
+        let _destination_lock = StdOpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(PathBuf::from(lock_path))?;
+        _destination_lock
+            .try_lock()
+            .context("download destination is already in use")?;
+
         let existing = fs::metadata(&request.destination)
             .await
             .map(|m| m.len())
@@ -435,9 +491,32 @@ impl Engine {
             .map(|m| m.len())
             .unwrap_or(0);
 
+        let identity_path = http_identity_path(&destination);
+        let saved = if existing > 0 {
+            anyhow::ensure!(
+                fs::metadata(&identity_path)
+                    .await
+                    .map(|m| m.len() <= 65536)
+                    .unwrap_or(false),
+                "existing file has no verified HTTP resume identity"
+            );
+            let saved: HttpIdentity = serde_json::from_slice(&fs::read(&identity_path).await?)
+                .context("invalid HTTP resume identity")?;
+            anyhow::ensure!(
+                saved.origin == parsed.as_str()
+                    && (saved.etag.is_some() || saved.modified.is_some()),
+                "cannot safely resume without the same origin and validator"
+            );
+            Some(saved)
+        } else {
+            None
+        };
         let mut builder = self.client.get(parsed.clone());
-        if existing > 0 {
-            builder = builder.header(RANGE, format!("bytes={existing}-"));
+        if let Some(saved) = &saved {
+            builder = builder.header(RANGE, format!("bytes={existing}-")).header(
+                IF_RANGE,
+                saved.etag.as_ref().or(saved.modified.as_ref()).unwrap(),
+            );
         }
 
         self.log.info(
@@ -462,10 +541,74 @@ impl Engine {
         );
         let status = response.status();
 
+        if status == StatusCode::RANGE_NOT_SATISFIABLE
+            && let Some(saved) = &saved
+        {
+            let head = self.client.head(parsed.clone()).send().await?;
+            if head.status().is_success()
+                && saved.matches(&head)
+                && head
+                    .headers()
+                    .get(CONTENT_LENGTH)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse::<u64>().ok())
+                    == Some(existing)
+                && saved.total == Some(existing)
+            {
+                let _ = fs::remove_file(&identity_path).await;
+                on_progress(Progress {
+                    downloaded: existing,
+                    total: Some(existing),
+                    speed_bytes_per_second: 0,
+                });
+                return Ok(());
+            }
+        }
         if !status.is_success() {
             bail!("HTTP error: {status}");
         }
-
+        if let Some(saved) = &saved {
+            anyhow::ensure!(
+                status == StatusCode::PARTIAL_CONTENT && saved.matches(&response),
+                "HTTP source changed or ignored validated resume; existing file preserved"
+            );
+            let content_range = response
+                .headers()
+                .get(CONTENT_RANGE)
+                .and_then(|v| v.to_str().ok())
+                .context("resume response lacks Content-Range")?;
+            let (bounds, total) = content_range
+                .strip_prefix("bytes ")
+                .and_then(|v| v.split_once('/'))
+                .context("invalid resume Content-Range")?;
+            let (start, end) = bounds.split_once('-').context("invalid resume bounds")?;
+            let (start, end, total) = (
+                start.parse::<u64>()?,
+                end.parse::<u64>()?,
+                total.parse::<u64>()?,
+            );
+            anyhow::ensure!(
+                start == existing
+                    && end.checked_add(1) == Some(total)
+                    && saved.total.is_none_or(|n| n == total),
+                "resume range/length mismatch"
+            );
+            anyhow::ensure!(
+                response
+                    .content_length()
+                    .is_none_or(|n| existing.checked_add(n) == Some(total)),
+                "resume body length mismatch"
+            );
+        } else {
+            anyhow::ensure!(
+                status != StatusCode::PARTIAL_CONTENT,
+                "unexpected partial response without Range"
+            );
+            let identity = HttpIdentity::response(&parsed, &response);
+            let temp = identity_path.with_extension("tmp");
+            fs::write(&temp, serde_json::to_vec(&identity)?).await?;
+            fs::rename(&temp, &identity_path).await?;
+        }
         let resumed = existing > 0 && status == StatusCode::PARTIAL_CONTENT;
         let response_len = response.content_length();
         let total = response_len.map(|len| if resumed { existing + len } else { len });
@@ -500,6 +643,7 @@ impl Engine {
                     None => break,
                 },
                 _ = log_ticker.tick() => {
+                    if cancelled.load(Ordering::Acquire){file.flush().await?;bail!("cancelled");}
                     telemetry.record(&self.log, downloaded, total, 1, false);
                     continue;
                 }
@@ -564,6 +708,7 @@ impl Engine {
                 resumed,
             ),
         );
+        let _ = fs::remove_file(&identity_path).await;
         Ok(())
     }
 
@@ -601,6 +746,9 @@ impl Engine {
             None
         };
 
+        let identity = Arc::new(std::sync::Mutex::new(
+            None::<(String, Option<String>, Option<String>)>,
+        ));
         let next_offset = Arc::new(AtomicU64::new(0));
         let completed = Arc::new(AtomicU64::new(0));
         let metrics = Arc::new(RangeMetrics::default());
@@ -630,6 +778,7 @@ impl Engine {
 
         for worker_id in 0..workers {
             let client = self.client.clone();
+            let identity = identity.clone();
             let url = parsed.clone();
             let file = file.clone();
             let next_offset = next_offset.clone();
@@ -672,12 +821,46 @@ impl Engine {
                     let _active_range = gate.as_ref().map(adaptive::Gate::track);
 
                     let requesting = Instant::now();
-                    let response = client
+                    let mut request = client
                         .get(url.clone())
-                        .header(RANGE, format!("bytes={start}-{end}"))
+                        .header(RANGE, format!("bytes={start}-{end}"));
+                    let validator = {
+                        let guard = identity
+                            .lock()
+                            .map_err(|_| anyhow!("HTTP identity lock poisoned"))?;
+                        guard
+                            .as_ref()
+                            .and_then(|(_, etag, modified)| etag.clone().or(modified.clone()))
+                    };
+                    if let Some(validator) = validator {
+                        request = request.header(IF_RANGE, validator);
+                    }
+                    let response = request
                         .send()
                         .await
                         .with_context(|| format!("range worker {worker_id} request failed"))?;
+                    let value = |key| {
+                        response
+                            .headers()
+                            .get(key)
+                            .and_then(|v| v.to_str().ok())
+                            .map(str::to_owned)
+                    };
+                    let etag = value(ETAG).filter(|etag| !etag.starts_with("W/"));
+                    let actual = (response.url().to_string(), etag, value(LAST_MODIFIED));
+                    {
+                        let mut expected = identity
+                            .lock()
+                            .map_err(|_| anyhow!("HTTP identity lock poisoned"))?;
+                        if let Some(expected) = expected.as_ref() {
+                            anyhow::ensure!(
+                                expected == &actual,
+                                "HTTP resource identity changed between ranges"
+                            );
+                        } else {
+                            *expected = Some(actual);
+                        }
+                    }
                     metrics
                         .header_wait_us
                         .fetch_add(requesting.elapsed().as_micros() as u64, Ordering::Relaxed);

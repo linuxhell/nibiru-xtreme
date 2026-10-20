@@ -25,6 +25,8 @@ use crate::{
 
 #[derive(Clone)]
 struct Task {
+    created: std::time::Instant,
+    io: Arc<tokio::sync::Mutex<()>>,
     status: String,
     total: u64,
     completed: u64,
@@ -78,14 +80,20 @@ impl RpcServer {
         let addr = listener.local_addr()?;
         self.log
             .info("rpc.started", &format!("listen=127.0.0.1:{}", addr.port()));
+        let permits = Arc::new(tokio::sync::Semaphore::new(64));
         loop {
+            let permit = permits.clone().acquire_owned().await?;
             let (stream, peer) = listener.accept().await?;
             if !peer.ip().is_loopback() {
                 continue;
             }
             let server = self.clone();
             tokio::spawn(async move {
-                if let Err(error) = server.handle(stream).await {
+                let _permit = permit;
+                if let Ok(Err(error)) =
+                    tokio::time::timeout(std::time::Duration::from_secs(30), server.handle(stream))
+                        .await
+                {
                     server.log.warn("rpc.request_failed", &error.to_string());
                 }
             });
@@ -113,14 +121,15 @@ impl RpcServer {
         let content_length = headers
             .lines()
             .find_map(|line| {
-                line.strip_prefix("Content-Length:")
-                    .or_else(|| line.strip_prefix("content-length:"))
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length").then_some(value)
             })
             .and_then(|v| v.trim().parse::<usize>().ok())
             .unwrap_or(0);
         if content_length > 1024 * 1024 {
             return Err(anyhow!("RPC body too large"));
         }
+        buffer.resize(buffer.len().max(header_end + content_length), 0);
         while used < header_end + content_length {
             let n = stream.read(&mut buffer[used..]).await?;
             if n == 0 {
@@ -224,7 +233,7 @@ impl RpcServer {
                 }
                 self.add_uri(params).await
             }
-            "aria2.addTorrent" => {
+            "aria2.addTorrent" | "nibiru.addTorrent" => {
                 let torrent = params
                     .first()
                     .and_then(Value::as_str)
@@ -267,13 +276,22 @@ impl RpcServer {
                 }
                 self.remove(params).await
             }
-            "aria2.removeDownloadResult" => {
+            "aria2.removeDownloadResult" | "nibiru.removeResult" => {
                 if let Some(bt) = bt_gid {
                     bt.remove_result(gid)?;
+                } else {
+                    let mut tasks = self.tasks.write().await;
+                    if let Some(task) = tasks.get(gid) {
+                        anyhow::ensure!(
+                            matches!(task.status.as_str(), "complete" | "removed" | "error"),
+                            "cannot purge an unfinished download"
+                        );
+                    }
+                    tasks.remove(gid);
                 }
                 Ok(Value::String("OK".into()))
             }
-            "aria2.changeOption" => {
+            "aria2.changeOption" | "nibiru.changeOption" => {
                 if let (Some(bt), Some(options)) = (bt_gid, options_at(1)) {
                     bt.change_option(gid, options)?;
                 } else if let Some(options) = options_at(1)
@@ -287,7 +305,7 @@ impl RpcServer {
                 }
                 Ok(Value::String("OK".into()))
             }
-            "aria2.changeGlobalOption" => {
+            "aria2.changeGlobalOption" | "nibiru.changeGlobalOption" => {
                 if let Some(options) = options_at(0) {
                     if let Some(limit) = options
                         .get("max-overall-download-limit")
@@ -302,15 +320,15 @@ impl RpcServer {
                 }
                 Ok(Value::String("OK".into()))
             }
-            "aria2.getFiles" => match bt_gid {
+            "aria2.getFiles" | "nibiru.getFiles" => match bt_gid {
                 Some(bt) => bt.files(gid),
                 None => Ok(json!([])),
             },
-            "aria2.getPeers" => match bt_gid {
+            "aria2.getPeers" | "nibiru.getPeers" => match bt_gid {
                 Some(bt) => bt.peers(gid),
                 None => Ok(json!([])),
             },
-            "aria2.getGlobalStat" => {
+            "aria2.getGlobalStat" | "nibiru.getGlobalStat" => {
                 let (active, down, up) = self.bt.as_ref().map(|bt| bt.totals()).unwrap_or_default();
                 let http_active = self
                     .tasks
@@ -329,20 +347,9 @@ impl RpcServer {
                     "numStoppedTotal": "0",
                 }))
             }
-            "aria2.tellActive" => {
-                let mut out = Vec::new();
-                if let Some(bt) = &self.bt {
-                    for id in bt.list_ids() {
-                        if let Ok(status) = bt.tell_status(&id, None)
-                            && status["status"] == "active"
-                        {
-                            out.push(status);
-                        }
-                    }
-                }
-                Ok(Value::Array(out))
-            }
-            "aria2.tellWaiting" | "aria2.tellStopped" => Ok(json!([])),
+            "aria2.tellActive" | "nibiru.tellActive" => self.list_tasks("active", params).await,
+            "aria2.tellWaiting" | "nibiru.tellWaiting" => self.list_tasks("waiting", params).await,
+            "aria2.tellStopped" | "nibiru.tellStopped" => self.list_tasks("stopped", params).await,
             // Not part of aria2: a loopback URL a media player can open to watch while downloading.
             "nibiru.streamUrl" => {
                 let file = params.get(1).and_then(Value::as_u64).map(|i| i as usize);
@@ -350,6 +357,80 @@ impl RpcServer {
             }
             _ => Err(anyhow!("method not implemented: {method}")),
         }
+    }
+
+    async fn list_tasks(&self, kind: &str, params: Vec<Value>) -> Result<Value> {
+        let matches = |state: &str| match kind {
+            "active" => state == "active",
+            "waiting" => matches!(state, "paused" | "pausing" | "waiting"),
+            _ => matches!(state, "complete" | "error" | "removed"),
+        };
+        let mut rows = Vec::new();
+        let ids = self
+            .tasks
+            .read()
+            .await
+            .iter()
+            .map(|(gid, task)| (gid.clone(), task.created))
+            .collect::<Vec<_>>();
+        for (gid, created) in ids {
+            if let Ok(status) = self.tell_status(vec![json!(gid)]).await {
+                if matches(status["status"].as_str().unwrap_or("")) {
+                    rows.push((created, status));
+                }
+            }
+        }
+        if let Some(bt) = &self.bt {
+            for gid in bt.list_ids() {
+                if let (Some(created), Ok(status)) = (bt.created(&gid), bt.tell_status(&gid, None))
+                {
+                    if matches(status["status"].as_str().unwrap_or("")) {
+                        rows.push((created, status));
+                    }
+                }
+            }
+        }
+        rows.sort_by_key(|(created, _)| *created);
+        let (offset, count, keys) = if kind == "active" {
+            (0, rows.len(), params.first())
+        } else {
+            let offset = params
+                .first()
+                .and_then(Value::as_i64)
+                .ok_or_else(|| anyhow!("missing offset"))?;
+            let count = params
+                .get(1)
+                .and_then(Value::as_u64)
+                .ok_or_else(|| anyhow!("missing count"))?
+                .min(10_000) as usize;
+            if offset < 0 {
+                rows.reverse();
+                (
+                    offset.unsigned_abs().saturating_sub(1) as usize,
+                    count,
+                    params.get(2),
+                )
+            } else {
+                (offset as usize, count, params.get(2))
+            }
+        };
+        let keys = keys
+            .and_then(Value::as_array)
+            .filter(|keys| !keys.is_empty());
+        Ok(json!(
+            rows.into_iter()
+                .skip(offset)
+                .take(count)
+                .map(|(_, mut status)| {
+                    if let (Some(keys), Value::Object(map)) = (keys, &mut status) {
+                        map.retain(|key, _| {
+                            key == "gid" || keys.iter().any(|k| k.as_str() == Some(key))
+                        });
+                    }
+                    status
+                })
+                .collect::<Vec<_>>()
+        ))
     }
 
     async fn add_uri(&self, params: Vec<Value>) -> Result<Value> {
@@ -389,11 +470,14 @@ impl RpcServer {
                 .and_then(bt::parse_size)
                 .unwrap_or(0),
         ));
+        let io = Arc::new(tokio::sync::Mutex::new(()));
         let gid = uuid::Uuid::new_v4().simple().to_string();
         let cancel = Arc::new(AtomicBool::new(false));
         self.tasks.write().await.insert(
             gid.clone(),
             Task {
+                created: std::time::Instant::now(),
+                io: io.clone(),
                 status: "active".into(),
                 total: 0,
                 completed: 0,
@@ -406,7 +490,7 @@ impl RpcServer {
                 limit: limit.clone(),
             },
         );
-        self.spawn_download(gid.clone(), request, cancel, transport, http, limit);
+        self.spawn_download(gid.clone(), request, cancel, transport, http, limit, io);
         Ok(Value::String(gid))
     }
 
@@ -418,6 +502,7 @@ impl RpcServer {
         transport: crate::protocols::TransportOptions,
         http: RequestOptions,
         limit: Arc<RateLimiter>,
+        io: Arc<tokio::sync::Mutex<()>>,
     ) {
         let engine = match self
             .engine
@@ -430,6 +515,9 @@ impl RpcServer {
                 let tasks = self.tasks.clone();
                 tokio::spawn(async move {
                     if let Some(task) = tasks.write().await.get_mut(&gid) {
+                        if !Arc::ptr_eq(&task.cancel, &cancel) {
+                            return;
+                        }
                         task.status = "error".into();
                         task.error = Some(error.to_string());
                     }
@@ -440,6 +528,8 @@ impl RpcServer {
         let tasks = self.tasks.clone();
         let log = self.log.clone();
         tokio::spawn(async move {
+            let _lease = io.lock().await;
+            let progress_cancel = cancel.clone();
             let gid_progress = gid.clone();
             let tasks_progress = tasks.clone();
             let result = engine
@@ -453,8 +543,14 @@ impl RpcServer {
                           }| {
                         let tasks = tasks_progress.clone();
                         let gid = gid_progress.clone();
+                        let progress_cancel = progress_cancel.clone();
                         tokio::spawn(async move {
                             if let Some(task) = tasks.write().await.get_mut(&gid) {
+                                if task.status != "active"
+                                    || !Arc::ptr_eq(&task.cancel, &progress_cancel)
+                                {
+                                    return;
+                                }
                                 task.completed = downloaded;
                                 task.total = total.unwrap_or_default();
                                 task.speed = speed_bytes_per_second;
@@ -463,14 +559,30 @@ impl RpcServer {
                     },
                 )
                 .await;
+            let completed_bytes = if result.is_ok() {
+                tokio::fs::metadata(&request.destination)
+                    .await
+                    .ok()
+                    .filter(|metadata| metadata.is_file())
+                    .map(|metadata| metadata.len())
+            } else {
+                None
+            };
             let mut guard = tasks.write().await;
             if let Some(task) = guard.get_mut(&gid) {
+                if !Arc::ptr_eq(&task.cancel, &cancel) {
+                    return;
+                }
                 match result {
                     Ok(()) => {
-                        task.status = "complete".into();
                         task.speed = 0;
-                        if task.total == 0 {
-                            task.total = task.completed;
+                        if let Some(bytes) = completed_bytes {
+                            task.completed = bytes;
+                            task.total = bytes;
+                            task.status = "complete".into();
+                        } else {
+                            task.status = "error".into();
+                            task.error = Some("completed output is missing".into());
                         }
                     }
                     Err(_error) if cancel.load(Ordering::Acquire) => {
@@ -520,8 +632,11 @@ impl RpcServer {
             .first()
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("missing gid"))?;
-        let guard = self.tasks.read().await;
-        let task = guard.get(gid).ok_or_else(|| anyhow!("unknown gid"))?;
+        let mut guard = self.tasks.write().await;
+        let task = guard.get_mut(gid).ok_or_else(|| anyhow!("unknown gid"))?;
+        if task.status == "active" {
+            task.status = "pausing".into();
+        }
         task.cancel.store(true, Ordering::Release);
         Ok(Value::String(gid.to_owned()))
     }
@@ -532,10 +647,10 @@ impl RpcServer {
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("missing gid"))?
             .to_owned();
-        let (request, cancel, transport, http, limit) = {
+        let (request, cancel, transport, http, limit, io) = {
             let mut guard = self.tasks.write().await;
             let task = guard.get_mut(&gid).ok_or_else(|| anyhow!("unknown gid"))?;
-            if task.status != "paused" && task.status != "error" {
+            if !matches!(task.status.as_str(), "paused" | "pausing" | "error") {
                 return Ok(Value::String(gid));
             }
             let cancel = Arc::new(AtomicBool::new(false));
@@ -548,9 +663,10 @@ impl RpcServer {
                 task.transport.clone(),
                 task.http.clone(),
                 task.limit.clone(),
+                task.io.clone(),
             )
         };
-        self.spawn_download(gid.clone(), request, cancel, transport, http, limit);
+        self.spawn_download(gid.clone(), request, cancel, transport, http, limit, io);
         Ok(Value::String(gid))
     }
 

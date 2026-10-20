@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use anyhow::{Result, anyhow};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use nibiru_xtreme::{
     VERSION,
     engine::{DownloadRequest, Engine},
@@ -27,6 +27,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Report the native manager contract without starting network services.
+    Capabilities {
+        #[arg(long)]
+        json: bool,
+    },
     Download {
         url: String,
         #[arg(short, long)]
@@ -54,14 +59,93 @@ enum Command {
         #[arg(long)]
         ssh_identity: Option<PathBuf>,
     },
-    Serve {
-        #[arg(long, default_value_t = 6800)]
-        port: u16,
-        #[arg(long, default_value = "")]
-        secret: String,
-        #[arg(long)]
-        log: Option<PathBuf>,
-    },
+    Serve(ServeArgs),
+}
+
+#[derive(Args)]
+struct ServeArgs {
+    #[arg(long, default_value_t = 6800)]
+    port: u16,
+    #[arg(long, default_value = "")]
+    secret: String,
+    #[arg(long)]
+    log: Option<PathBuf>,
+    #[arg(long, default_value = ".")]
+    dir: PathBuf,
+    #[arg(long, default_value = "6881-6999")]
+    listen_port: String,
+    #[arg(long, default_value_t = 0.0)]
+    seed_time_minutes: f64,
+    #[arg(long, default_value_t = 0.0)]
+    seed_ratio: f64,
+    #[arg(long, default_value_t = 50)]
+    bt_max_peers: usize,
+    #[arg(long, default_value = "0")]
+    max_overall_download_limit: String,
+    #[arg(long, default_value = "0")]
+    max_overall_upload_limit: String,
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    enable_dht: bool,
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    enable_dht6: bool,
+    #[arg(long)]
+    dht_file: Option<PathBuf>,
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    enable_utp: bool,
+    #[arg(long)]
+    bt_require_crypto: bool,
+    #[arg(long)]
+    allow_loopback_peers: bool,
+    #[arg(long)]
+    stop_with_process: Option<u32>,
+}
+
+impl ServeArgs {
+    fn config(&self) -> Result<BtConfig> {
+        let (first, last) = self
+            .listen_port
+            .split_once('-')
+            .unwrap_or((&self.listen_port, &self.listen_port));
+        let first = first.parse::<u16>()?;
+        let last = last.parse::<u16>()?;
+        anyhow::ensure!(first > 0 && last >= first, "invalid listening port range");
+        anyhow::ensure!(
+            self.seed_time_minutes.is_finite()
+                && self.seed_time_minutes >= 0.0
+                && self.seed_time_minutes <= 525600.0,
+            "invalid seed time"
+        );
+        anyhow::ensure!(
+            self.seed_ratio.is_finite() && self.seed_ratio >= 0.0,
+            "invalid seed ratio"
+        );
+        anyhow::ensure!(
+            (1..=200).contains(&self.bt_max_peers),
+            "peer count must be 1..200"
+        );
+        let mut config = BtConfig {
+            default_dir: self.dir.clone(),
+            port_range: Some((first, last)),
+            seed_time: Some(Duration::from_secs_f64(self.seed_time_minutes * 60.0)),
+            seed_ratio: Some(self.seed_ratio),
+            max_peers: self.bt_max_peers,
+            dht: self.enable_dht,
+            dht6: self.enable_dht6,
+            dht_file: self
+                .dht_file
+                .clone()
+                .or_else(|| self.enable_dht.then(|| self.dir.join("dht.dat"))),
+            allow_loopback_peers: self.allow_loopback_peers,
+            require_encryption: self.bt_require_crypto,
+            ..BtConfig::default()
+        };
+        config.session.enable_utp = self.enable_utp;
+        config.session.download_limit = parse_size(&self.max_overall_download_limit)
+            .ok_or_else(|| anyhow!("invalid download limit"))?;
+        config.session.upload_limit = parse_size(&self.max_overall_upload_limit)
+            .ok_or_else(|| anyhow!("invalid upload limit"))?;
+        Ok(config)
+    }
 }
 
 #[tokio::main]
@@ -76,6 +160,19 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     match cli.command {
+        Some(Command::Capabilities { json: _ }) => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema_version": 1, "engine": "nibiru-xtreme", "version": VERSION,
+                    "features": {"native_rpc": true, "rpc_namespace": "nibiru",
+                        "parent_lifetime": true, "http_resume_identity": true,
+                        "bittorrent": true, "ed2k_library": true,
+                        "ftp": cfg!(feature = "ftp"), "sftp": cfg!(feature = "sftp"),
+                        "http3": cfg!(feature = "http3")}
+                })
+            );
+        }
         Some(Command::Download {
             url,
             out,
@@ -121,13 +218,25 @@ async fn main() -> Result<()> {
                 )
                 .await?;
         }
-        Some(Command::Serve { port, secret, log }) => {
-            let log = Arc::new(LogSink::new(log.as_deref())?);
+        Some(Command::Serve(args)) => {
+            let config = args.config()?;
+            std::fs::create_dir_all(&args.dir)?;
+            if let Some(pid) = args.stop_with_process {
+                tokio::spawn(async move {
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(3)).await;
+                        if !process_alive(pid).await {
+                            std::process::exit(0);
+                        }
+                    }
+                });
+            }
+            let log = Arc::new(LogSink::new(args.log.as_deref())?);
             let engine = Engine::new(log.clone())?;
-            let service = BtService::start(BtConfig::default()).await?;
-            RpcServer::new(engine, log, secret)
+            let service = BtService::start(config).await?;
+            RpcServer::new(engine, log, args.secret)
                 .with_bittorrent(service)
-                .serve(port)
+                .serve(args.port)
                 .await?;
         }
         None => {
@@ -137,7 +246,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Started the way the Apocalipse Download Manager starts aria2 (`--enable-rpc=true ...`).
+/// Legacy third-party launcher compatibility; ADM uses the typed native `serve` command.
 async fn run_aria2_compatible_rpc(args: &[String]) -> Result<()> {
     let mut port = 6800u16;
     let mut secret = String::new();
