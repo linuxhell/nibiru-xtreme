@@ -1,0 +1,98 @@
+name: Release
+
+# Builds the engine for the three desktop targets and, when a tag is given, publishes them as raw
+# executables named like the Apocalipse Download Manager's updater expects:
+#   nibiru-xtreme-<version>-windows-x64.exe | -linux-x64 | -macos-x64   (+ .sha256 sidecars)
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths: [".github/workflows/release.yml"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Publish a release with this tag (created on the selected commit), e.g. v0.2.0-alpha.2"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            suffix: windows-x64.exe
+            binary: nibiru-xtreme.exe
+          - name: Linux x64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            suffix: linux-x64
+            binary: nibiru-xtreme
+          - name: macOS x64
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+            suffix: macos-x64
+            binary: nibiru-xtreme
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Install musl tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Smoke test
+        shell: bash
+        run: |
+          bin=target/${{ matrix.target }}/release/${{ matrix.binary }}
+          "$bin" --version
+      - name: Package
+        shell: bash
+        env:
+          REF_NAME: ${{ inputs.tag || github.ref_name }}
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | sed -E 's/version *= *"([^"]+)"/\1/')
+          case "$REF_NAME" in v*) version="${REF_NAME#v}" ;; esac
+          name="nibiru-xtreme-${version}-${{ matrix.suffix }}"
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "dist/$name"
+          (cd dist && if command -v sha256sum >/dev/null; then sha256sum "$name" > "$name.sha256"; else shasum -a 256 "$name" > "$name.sha256"; fi)
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nibiru-xtreme-${{ matrix.suffix }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.tag != ''
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          flags=""
+          case "$TAG" in *-*) flags="--prerelease" ;; esac
+          gh release create "$TAG" assets/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Nibiru Xtreme $TAG" --notes-file RELEASE_NOTES.md $flags
