@@ -179,7 +179,7 @@ pub struct Core {
     pub private: bool,
     pub paused: bool,
     pub web_seeds: Vec<WebSeedState>,
-    /// Peers we were connected to when paused; retried on resume.
+    /// Connected and handshaking peers when paused; retried on resume.
     pub resume_peers: Vec<SocketAddr>,
 }
 
@@ -656,7 +656,12 @@ impl TorrentHandle {
             }
             core.paused = true;
             core.state = State::Paused;
-            core.resume_peers = core.peers.values().map(|p| p.addr).collect();
+            core.resume_peers = core
+                .peers
+                .values()
+                .map(|p| p.addr)
+                .chain(core.connecting.iter().copied())
+                .collect();
             core.broadcast(|| PeerCmd::Shutdown);
         }
         self.shared.progress.notify_waiters();
@@ -1187,11 +1192,20 @@ fn maintain(core: &mut Core, shared: &Arc<Shared>, timers: &mut Timers) -> Vec<S
         .settings
         .max_peers
         .saturating_sub(core.peers.len() + core.connecting.len());
-    for _ in 0..capacity.min(8) {
+    // A resumed peer may still be processing Shutdown on its old connection.
+    // Keep it queued until cleanup, while allowing other candidates to proceed.
+    for _ in 0..core.candidates.len() {
+        if connect.len() >= capacity.min(8) {
+            break;
+        }
         let Some(addr) = core.candidates.pop_front() else {
             break;
         };
-        if core.peers.values().any(|p| p.addr == addr) || !core.peer_address_ok(&addr) {
+        if !core.peer_address_ok(&addr) {
+            continue;
+        }
+        if core.peers.values().any(|p| p.addr == addr) || core.connecting.contains(&addr) {
+            core.candidates.push_back(addr);
             continue;
         }
         core.connecting.insert(addr);
@@ -1414,5 +1428,106 @@ async fn dht_loop(shared: Arc<Shared>) {
             _ = tokio::time::sleep(wait) => {}
             _ = shared.stop_signal.notified() => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod resume_tests {
+    use super::*;
+
+    fn handle(directory: &std::path::Path) -> TorrentHandle {
+        let mut settings = Settings::new(directory);
+        settings.allow_loopback_peers = true;
+        TorrentHandle::spawn(
+            Start {
+                torrent: None,
+                info_hash: [1; 20],
+                name: None,
+                extras: Extras {
+                    trackers: vec![],
+                    web_seeds: vec![],
+                },
+            },
+            settings,
+            Environment {
+                peer_id: [2; 20],
+                listen_port: 0,
+                down_limit: Arc::new(RateLimiter::new(0)),
+                up_limit: Arc::new(RateLimiter::new(0)),
+                tracker: TrackerClient::default(),
+                dht: None,
+            },
+        )
+    }
+
+    fn timers() -> Timers {
+        Timers {
+            tick: Instant::now(),
+            choke: Instant::now(),
+            pex: Instant::now(),
+            optimistic: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_preserves_a_peer_until_its_old_connection_closes() {
+        let directory = tempfile::tempdir().unwrap();
+        let handle = handle(directory.path());
+        let addr = "127.0.0.1:12345".parse().unwrap();
+        let (tx, _commands) = mpsc::channel(64);
+        handle.shared.lock().peers.insert(
+            1,
+            PeerEntry {
+                addr,
+                tx,
+                incoming: false,
+                client: None,
+                bitfield: Bitfield::new(0),
+                peer_choking: true,
+                am_choking: true,
+                their_interested: false,
+                down: RateMeter::default(),
+                up: RateMeter::default(),
+                since: Instant::now(),
+            },
+        );
+        handle.pause();
+        handle.resume();
+        {
+            let mut core = handle.shared.lock();
+            let mut timers = timers();
+            assert!(maintain(&mut core, &handle.shared, &mut timers).is_empty());
+            assert_eq!(
+                core.candidates.front(),
+                Some(&addr),
+                "closing peer must stay queued"
+            );
+            core.peers.remove(&1);
+            assert_eq!(maintain(&mut core, &handle.shared, &mut timers), vec![addr]);
+        }
+        handle.shutdown(false);
+    }
+
+    #[tokio::test]
+    async fn resume_preserves_a_peer_whose_handshake_was_pending() {
+        let directory = tempfile::tempdir().unwrap();
+        let handle = handle(directory.path());
+        let addr = "127.0.0.1:12345".parse().unwrap();
+        handle.shared.lock().connecting.insert(addr);
+        handle.pause();
+        handle.resume();
+        {
+            let mut core = handle.shared.lock();
+            let mut timers = timers();
+            assert!(maintain(&mut core, &handle.shared, &mut timers).is_empty());
+            assert_eq!(
+                core.candidates.front(),
+                Some(&addr),
+                "pending handshake must stay queued"
+            );
+            core.connecting.remove(&addr);
+            assert_eq!(maintain(&mut core, &handle.shared, &mut timers), vec![addr]);
+        }
+        handle.shutdown(false);
     }
 }

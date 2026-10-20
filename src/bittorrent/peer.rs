@@ -130,7 +130,9 @@ async fn run(
     let key = shared.next_key();
     {
         let mut core = shared.lock();
-        if core.peers.len() >= core.settings.max_peers + 10
+        if core.paused
+            || shared.is_stopped()
+            || core.peers.len() >= core.settings.max_peers + 10
             || core.peers.values().any(|p| p.addr == addr)
         {
             return Ok(());

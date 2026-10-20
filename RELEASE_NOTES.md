@@ -12,6 +12,10 @@ Concurrent connections share that budget. Previously, an oversized final block
 could finish without waiting for the excess bytes, making limits depend on how
 the operating system divided network reads.
 
+Rapidly pausing and resuming a torrent also preserves peers whose old connection
+is still closing or whose handshake is pending, so they can reconnect without
+waiting for the tracker's next announce interval.
+
 ## What works
 
 - **HTTP/HTTPS/HTTP2** segmented downloads with resume, custom headers/cookies/referer/user-agent, proxies
