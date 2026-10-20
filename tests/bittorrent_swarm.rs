@@ -80,6 +80,7 @@ fn addr(session: &Session) -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], session.port()))
 }
 
+#[cfg(target_os = "linux")]
 fn addr_on(ip: [u8; 4], session: &Session) -> SocketAddr {
     SocketAddr::from((ip, session.port()))
 }
