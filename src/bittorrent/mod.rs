@@ -2,9 +2,13 @@
 //! download/upload engine. Implemented from the BEP specifications; see docs/bittorrent.md.
 pub mod bencode;
 pub mod bitfield;
+pub mod limiter;
 pub mod magnet;
 pub mod message;
 pub mod metainfo;
+pub mod peer;
 pub mod picker;
+pub mod session;
 pub mod storage;
+pub mod torrent;
 pub mod tracker;

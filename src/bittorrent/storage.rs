@@ -84,7 +84,7 @@ pub struct Storage {
     piece_length: u64,
     total: u64,
     pieces: Vec<[u8; 20]>,
-    open: Mutex<HashMap<usize, std::sync::Arc<File>>>,
+    open: Mutex<HashMap<(usize, bool), std::sync::Arc<File>>>,
 }
 
 impl Storage {
@@ -113,6 +113,10 @@ impl Storage {
             pieces: torrent.pieces.clone(),
             open: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub fn piece_length(&self) -> u64 {
+        self.piece_length
     }
 
     pub fn path_of(&self, file: usize) -> &Path {
@@ -149,7 +153,7 @@ impl Storage {
 
     fn handle(&self, index: usize, create: bool) -> Result<std::sync::Arc<File>> {
         let mut open = self.open.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
-        if let Some(file) = open.get(&index) {
+        if let Some(file) = open.get(&(index, create)) {
             return Ok(file.clone());
         }
         let slot = &self.slots[index];
@@ -186,7 +190,7 @@ impl Storage {
             open.remove(&victim);
         }
         let file = std::sync::Arc::new(file);
-        open.insert(index, file.clone());
+        open.insert((index, create), file.clone());
         Ok(file)
     }
 
