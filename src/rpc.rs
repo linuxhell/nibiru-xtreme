@@ -14,6 +14,8 @@ use tokio::{
     sync::RwLock,
 };
 
+pub mod bt;
+
 use crate::{
     VERSION,
     engine::{DownloadRequest, Engine, Progress, safe_output_name},
@@ -38,6 +40,7 @@ pub struct RpcServer {
     log: Arc<LogSink>,
     secret: String,
     tasks: Arc<RwLock<HashMap<String, Task>>>,
+    bt: Option<Arc<bt::BtService>>,
 }
 
 impl RpcServer {
@@ -47,7 +50,20 @@ impl RpcServer {
             log,
             secret,
             tasks: Arc::new(RwLock::new(HashMap::new())),
+            bt: None,
         }
+    }
+
+    /// Enables BitTorrent and Magnet downloads through this server.
+    pub fn with_bittorrent(mut self, service: Arc<bt::BtService>) -> Self {
+        self.bt = Some(service);
+        self
+    }
+
+    fn bt(&self) -> Result<&Arc<bt::BtService>> {
+        self.bt
+            .as_ref()
+            .ok_or_else(|| anyhow!("BitTorrent is not enabled in this server"))
     }
 
     pub async fn serve(self, port: u16) -> Result<()> {
@@ -154,9 +170,15 @@ impl RpcServer {
     }
 
     async fn dispatch(&self, method: &str, params: Vec<Value>) -> Result<Value> {
+        let gid = params.first().and_then(Value::as_str).unwrap_or_default();
+        let bt_gid = self.bt.as_ref().filter(|bt| bt.owns(gid));
+        let options_at = |index: usize| params.get(index).and_then(Value::as_object);
         match method {
             "aria2.getVersion" | "nibiru.getVersion" => {
                 let mut features = vec!["HTTP", "HTTPS", "HTTP/2", "WebDAV-GET", "RPC", "Resume"];
+                if self.bt.is_some() {
+                    features.extend(["BitTorrent", "Magnet"]);
+                }
                 if cfg!(feature = "ftp") {
                     features.extend(["FTP", "FTPS"]);
                 }
@@ -168,13 +190,131 @@ impl RpcServer {
                 }
                 Ok(json!({"version":VERSION,"enabledFeatures":features}))
             }
-            "aria2.addUri" | "nibiru.addUri" => self.add_uri(params).await,
-            "aria2.tellStatus" | "nibiru.tellStatus" => self.tell_status(params).await,
-            "aria2.pause" | "aria2.forcePause" | "nibiru.pause" => self.pause(params).await,
-            "aria2.unpause" | "nibiru.resume" => self.resume(params).await,
-            "aria2.remove" | "aria2.forceRemove" | "nibiru.remove" => self.remove(params).await,
-            "aria2.removeDownloadResult" => Ok(Value::String("OK".into())),
-            "aria2.changeOption" | "aria2.changeGlobalOption" => Ok(Value::String("OK".into())),
+            "aria2.addUri" | "nibiru.addUri" => {
+                let uri = params
+                    .first()
+                    .and_then(Value::as_array)
+                    .and_then(|v| v.first())
+                    .and_then(Value::as_str);
+                if uri.is_some_and(|u| {
+                    u.get(..7)
+                        .is_some_and(|p| p.eq_ignore_ascii_case("magnet:"))
+                }) {
+                    return Ok(Value::String(
+                        self.bt()?
+                            .add_magnet(uri.unwrap_or_default(), options_at(1))
+                            .await?,
+                    ));
+                }
+                self.add_uri(params).await
+            }
+            "aria2.addTorrent" => {
+                let torrent = params
+                    .first()
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("missing torrent"))?;
+                Ok(Value::String(
+                    self.bt()?.add_torrent(torrent, options_at(2)).await?,
+                ))
+            }
+            "aria2.tellStatus" | "nibiru.tellStatus" => {
+                if let Some(bt) = bt_gid {
+                    let keys: Option<Vec<String>> =
+                        params.get(1).and_then(Value::as_array).map(|keys| {
+                            keys.iter()
+                                .filter_map(Value::as_str)
+                                .map(str::to_owned)
+                                .collect()
+                        });
+                    return bt.tell_status(gid, keys.as_deref());
+                }
+                self.tell_status(params).await
+            }
+            "aria2.pause" | "aria2.forcePause" | "nibiru.pause" => {
+                if let Some(bt) = bt_gid {
+                    bt.pause(gid)?;
+                    return Ok(Value::String(gid.to_owned()));
+                }
+                self.pause(params).await
+            }
+            "aria2.unpause" | "nibiru.resume" => {
+                if let Some(bt) = bt_gid {
+                    bt.resume(gid)?;
+                    return Ok(Value::String(gid.to_owned()));
+                }
+                self.resume(params).await
+            }
+            "aria2.remove" | "aria2.forceRemove" | "nibiru.remove" => {
+                if let Some(bt) = bt_gid {
+                    bt.remove(gid)?;
+                    return Ok(Value::String(gid.to_owned()));
+                }
+                self.remove(params).await
+            }
+            "aria2.removeDownloadResult" => {
+                if let Some(bt) = bt_gid {
+                    bt.remove_result(gid)?;
+                }
+                Ok(Value::String("OK".into()))
+            }
+            "aria2.changeOption" => {
+                if let (Some(bt), Some(options)) = (bt_gid, options_at(1)) {
+                    bt.change_option(gid, options)?;
+                }
+                Ok(Value::String("OK".into()))
+            }
+            "aria2.changeGlobalOption" => {
+                if let (Some(bt), Some(options)) = (self.bt.as_ref(), options_at(0)) {
+                    bt.change_global_option(options);
+                }
+                Ok(Value::String("OK".into()))
+            }
+            "aria2.getFiles" => match bt_gid {
+                Some(bt) => bt.files(gid),
+                None => Ok(json!([])),
+            },
+            "aria2.getPeers" => match bt_gid {
+                Some(bt) => bt.peers(gid),
+                None => Ok(json!([])),
+            },
+            "aria2.getGlobalStat" => {
+                let (active, down, up) = self.bt.as_ref().map(|bt| bt.totals()).unwrap_or_default();
+                let http_active = self
+                    .tasks
+                    .read()
+                    .await
+                    .values()
+                    .filter(|t| t.status == "active")
+                    .count();
+                let http_speed: u64 = self.tasks.read().await.values().map(|t| t.speed).sum();
+                Ok(json!({
+                    "downloadSpeed": (down + http_speed).to_string(),
+                    "uploadSpeed": up.to_string(),
+                    "numActive": (active + http_active).to_string(),
+                    "numWaiting": "0",
+                    "numStopped": "0",
+                    "numStoppedTotal": "0",
+                }))
+            }
+            "aria2.tellActive" => {
+                let mut out = Vec::new();
+                if let Some(bt) = &self.bt {
+                    for id in bt.list_ids() {
+                        if let Ok(status) = bt.tell_status(&id, None)
+                            && status["status"] == "active"
+                        {
+                            out.push(status);
+                        }
+                    }
+                }
+                Ok(Value::Array(out))
+            }
+            "aria2.tellWaiting" | "aria2.tellStopped" => Ok(json!([])),
+            // Not part of aria2: a loopback URL a media player can open to watch while downloading.
+            "nibiru.streamUrl" => {
+                let file = params.get(1).and_then(Value::as_u64).map(|i| i as usize);
+                Ok(Value::String(self.bt()?.stream_url(gid, file)?))
+            }
             _ => Err(anyhow!("method not implemented: {method}")),
         }
     }

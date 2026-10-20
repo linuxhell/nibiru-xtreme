@@ -7,11 +7,15 @@ use nibiru_xtreme::{
     engine::{DownloadRequest, Engine},
     logging::LogSink,
     protocols::TransportOptions,
-    rpc::RpcServer,
+    rpc::{
+        RpcServer,
+        bt::{BtConfig, BtService, parse_size},
+    },
 };
 use std::{
     path::PathBuf,
     sync::{Arc, atomic::AtomicBool},
+    time::Duration,
 };
 
 #[derive(Parser)]
@@ -120,7 +124,11 @@ async fn main() -> Result<()> {
         Some(Command::Serve { port, secret, log }) => {
             let log = Arc::new(LogSink::new(log.as_deref())?);
             let engine = Engine::new(log.clone())?;
-            RpcServer::new(engine, log, secret).serve(port).await?;
+            let service = BtService::start(BtConfig::default()).await?;
+            RpcServer::new(engine, log, secret)
+                .with_bittorrent(service)
+                .serve(port)
+                .await?;
         }
         None => {
             println!("Nibiru Xtreme {VERSION}");
@@ -129,20 +137,99 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Started the way the Apocalipse Download Manager starts aria2 (`--enable-rpc=true ...`).
 async fn run_aria2_compatible_rpc(args: &[String]) -> Result<()> {
     let mut port = 6800u16;
     let mut secret = String::new();
     let mut log_path = None;
+    let mut stop_with = None;
+    let mut bt = BtConfig::default();
     for arg in args {
-        if let Some(v) = arg.strip_prefix("--rpc-listen-port=") {
-            port = v.parse().map_err(|_| anyhow!("invalid rpc port"))?;
-        } else if let Some(v) = arg.strip_prefix("--rpc-secret=") {
-            secret = v.to_owned();
-        } else if let Some(v) = arg.strip_prefix("--log=") {
-            log_path = Some(PathBuf::from(v));
+        let Some((name, value)) = arg.strip_prefix("--").and_then(|a| a.split_once('=')) else {
+            continue;
+        };
+        match name {
+            "rpc-listen-port" => port = value.parse().map_err(|_| anyhow!("invalid rpc port"))?,
+            "rpc-secret" => secret = value.to_owned(),
+            "log" => log_path = Some(PathBuf::from(value)),
+            "stop-with-process" => stop_with = value.parse::<u32>().ok(),
+            "listen-port" => {
+                let (first, last) = value.split_once('-').unwrap_or((value, value));
+                if let (Ok(first), Ok(last)) = (first.trim().parse(), last.trim().parse()) {
+                    bt.port_range = Some((first, last));
+                }
+            }
+            // aria2 counts seed-time in minutes; zero disables seeding after completion.
+            "seed-time" => {
+                bt.seed_time = value
+                    .parse::<f64>()
+                    .ok()
+                    .map(|m| Duration::from_secs_f64(m.max(0.0) * 60.0))
+            }
+            "seed-ratio" => bt.seed_ratio = value.parse::<f64>().ok(),
+            "bt-max-peers" => {
+                if let Ok(n) = value.parse::<usize>() {
+                    bt.max_peers = if n == 0 { 200 } else { n.min(200) };
+                }
+            }
+            "max-overall-download-limit" => {
+                bt.session.download_limit = parse_size(value).unwrap_or(0);
+            }
+            "max-overall-upload-limit" => {
+                bt.session.upload_limit = parse_size(value).unwrap_or(0);
+            }
+            "dir" => bt.default_dir = PathBuf::from(value),
+            // Not an aria2 option: lets tests and LAN setups connect to peers on this machine.
+            "x-nibiru-allow-loopback-peers" => bt.allow_loopback_peers = value == "true",
+            _ => {}
         }
+    }
+    if let Some(pid) = stop_with {
+        tokio::spawn(async move {
+            // The manager owns this process: exit when it goes away so nothing is left running.
+            loop {
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                if !process_alive(pid).await {
+                    std::process::exit(0);
+                }
+            }
+        });
     }
     let log = Arc::new(LogSink::new(log_path.as_deref())?);
     let engine = Engine::new(log.clone())?;
-    RpcServer::new(engine, log, secret).serve(port).await
+    let service = BtService::start(bt).await?;
+    log.info(
+        "bittorrent.started",
+        &format!("listen_port={}", service.listen_port()),
+    );
+    RpcServer::new(engine, log, secret)
+        .with_bittorrent(service)
+        .serve(port)
+        .await
+}
+
+#[cfg(unix)]
+async fn process_alive(pid: u32) -> bool {
+    tokio::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .map(|s| s.success())
+        .unwrap_or(true)
+}
+
+#[cfg(windows)]
+async fn process_alive(pid: u32) -> bool {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let output = tokio::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .await;
+    match output {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).contains(&format!("\",{pid},\"")),
+        Err(_) => true,
+    }
 }

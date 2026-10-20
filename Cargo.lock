@@ -1537,6 +1537,7 @@ name = "nibiru-xtreme"
 version = "0.2.0-alpha.1"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "bytes",
  "clap",
  "flate2",

@@ -158,6 +158,8 @@ pub struct Core {
     pub stream_touch: Option<Instant>,
     pub private: bool,
     pub paused: bool,
+    /// Peers we were connected to when paused; retried on resume.
+    pub resume_peers: Vec<SocketAddr>,
 }
 
 pub struct Shared {
@@ -170,9 +172,14 @@ pub struct Shared {
     /// Wakes the main loop early (new candidates, resume, settings changed).
     pub wake: Notify,
     pub completed_announce: Notify,
+    /// Wakes the tracker loop (resume, shutdown); separate so peer churn cannot cause announces.
+    pub tracker_wake: Notify,
     pub stop: AtomicBool,
     pub down_limit: Arc<RateLimiter>,
     pub up_limit: Arc<RateLimiter>,
+    /// This torrent's own caps (zero = unlimited), applied on top of the session-wide ones.
+    pub own_down: RateLimiter,
+    pub own_up: RateLimiter,
     pub tracker: TrackerClient,
     next_peer: AtomicU64,
 }
@@ -376,6 +383,9 @@ pub struct TorrentStatus {
     pub ratio: f64,
     pub seeding_seconds: u64,
     pub checking: Option<(usize, usize)>,
+    /// BEP 9 progress while the torrent description is still being fetched.
+    pub metadata_size: u64,
+    pub metadata_done: u64,
     pub files: Vec<FileStatus>,
     pub peers: Vec<PeerStatus>,
 }
@@ -433,6 +443,7 @@ impl TorrentHandle {
             stream_touch: None,
             private,
             paused: false,
+            resume_peers: Vec::new(),
         };
         for peer in &settings.peers {
             core.add_candidate(*peer);
@@ -445,9 +456,12 @@ impl TorrentHandle {
             progress: Notify::new(),
             wake: Notify::new(),
             completed_announce: Notify::new(),
+            tracker_wake: Notify::new(),
             stop: AtomicBool::new(false),
             down_limit,
             up_limit,
+            own_down: RateLimiter::new(0),
+            own_up: RateLimiter::new(0),
             tracker,
             next_peer: AtomicU64::new(1),
         });
@@ -502,11 +516,22 @@ impl TorrentHandle {
                 .map(|t| t.elapsed().as_secs())
                 .unwrap_or(0),
             checking: None,
+            metadata_size: 0,
+            metadata_done: 0,
             files: Vec::new(),
             peers: Vec::new(),
         };
         if let Phase::Checking { done, total } = &core.phase {
             status.checking = Some((*done, *total));
+        }
+        if let Phase::Metadata(Some(fetch)) = &core.phase {
+            status.metadata_size = fetch.size as u64;
+            status.metadata_done = fetch
+                .pieces
+                .iter()
+                .flatten()
+                .map(|piece| piece.len() as u64)
+                .sum();
         }
         let mut total_pieces = 0;
         if let Some(r) = core.ready() {
@@ -571,6 +596,7 @@ impl TorrentHandle {
             }
             core.paused = true;
             core.state = State::Paused;
+            core.resume_peers = core.peers.values().map(|p| p.addr).collect();
             core.broadcast(|| PeerCmd::Shutdown);
         }
         self.shared.progress.notify_waiters();
@@ -581,8 +607,13 @@ impl TorrentHandle {
             let mut core = self.shared.lock();
             core.paused = false;
             core.state = state_for(&core);
+            for addr in std::mem::take(&mut core.resume_peers) {
+                core.known.remove(&addr);
+                core.add_candidate(addr);
+            }
         }
         self.shared.wake.notify_one();
+        self.shared.tracker_wake.notify_one();
         self.shared.progress.notify_waiters();
     }
 
@@ -595,6 +626,7 @@ impl TorrentHandle {
             core.ready().map(|r| r.storage.clone())
         };
         self.shared.wake.notify_one();
+        self.shared.tracker_wake.notify_one();
         self.shared.completed_announce.notify_one();
         self.shared.progress.notify_waiters();
         if delete_files && let Some(storage) = storage {
@@ -632,6 +664,14 @@ impl TorrentHandle {
         if let Some(r) = core.ready_mut() {
             r.picker.mode = mode;
         }
+    }
+
+    pub fn set_download_limit(&self, bytes_per_second: u64) {
+        self.shared.own_down.set_rate(bytes_per_second);
+    }
+
+    pub fn set_upload_limit(&self, bytes_per_second: u64) {
+        self.shared.own_up.set_rate(bytes_per_second);
     }
 
     pub fn set_seed_limits(&self, ratio: Option<f64>, time: Option<Duration>) {
@@ -1157,7 +1197,7 @@ async fn tracker_loop(shared: Arc<Shared>) {
         if paused || trackers.is_empty() {
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(5)) => {}
-                _ = shared.wake.notified() => {}
+                _ = shared.tracker_wake.notified() => {}
             }
             continue;
         }
@@ -1231,7 +1271,7 @@ async fn tracker_loop(shared: Arc<Shared>) {
                     }
                 }
             }
-            _ = shared.wake.notified() => {
+            _ = shared.tracker_wake.notified() => {
                 if shared.is_stopped() {
                     announce_stopped(&shared, &trackers).await;
                     return;

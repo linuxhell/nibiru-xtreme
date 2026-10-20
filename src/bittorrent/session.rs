@@ -113,9 +113,12 @@ impl Session {
         self.port
     }
 
-    pub fn set_limits(&self, download: u64, upload: u64) {
-        self.down.set_rate(download);
-        self.up.set_rate(upload);
+    pub fn set_download_limit(&self, bytes_per_second: u64) {
+        self.down.set_rate(bytes_per_second);
+    }
+
+    pub fn set_upload_limit(&self, bytes_per_second: u64) {
+        self.up.set_rate(bytes_per_second);
     }
 
     fn register(&self, handle: TorrentHandle) -> TorrentHandle {

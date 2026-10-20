@@ -39,8 +39,12 @@ const MAX_PEX_ADDED: usize = 50;
 
 pub async fn connect(shared: Arc<Shared>, addr: SocketAddr) {
     let result = connect_inner(&shared, addr).await;
-    let _ = result;
-    shared.lock().connecting.remove(&addr);
+    let mut core = shared.lock();
+    core.connecting.remove(&addr);
+    if result.is_err() {
+        // Let a later tracker/PEX answer offer this address again.
+        core.known.remove(&addr);
+    }
 }
 
 async fn connect_inner(shared: &Arc<Shared>, addr: SocketAddr) -> Result<()> {
@@ -192,6 +196,7 @@ async fn run(
     {
         let mut core = shared.lock();
         let entry = core.peers.remove(&key);
+        core.known.remove(&addr);
         if let Some(r) = core.ready_mut() {
             r.picker.release_peer(key);
             if let Some(entry) = &entry {
@@ -498,10 +503,6 @@ impl Peer {
         Ok(true)
     }
 
-    fn early_pending(&self) -> bool {
-        self.early.bitfield.is_some() || self.early.have_all || !self.early.haves.is_empty()
-    }
-
     async fn send_pex(&mut self, all: &[SocketAddr]) -> Result<()> {
         let Some(id) = self
             .their_ext
@@ -724,6 +725,7 @@ impl Peer {
         self.inflight.remove(pos);
         let length = data.len() as u64;
         self.shared.down_limit.acquire(length).await;
+        self.shared.own_down.acquire(length).await;
         self.meter.add(length);
         let mut finished = None;
         {
@@ -825,6 +827,7 @@ impl Peer {
             return Ok(());
         };
         self.shared.up_limit.acquire(length as u64).await;
+        self.shared.own_up.acquire(length as u64).await;
         self.send(&Message::Piece { index, begin, data }).await?;
         let mut core = self.shared.lock();
         core.up.add(length as u64);
