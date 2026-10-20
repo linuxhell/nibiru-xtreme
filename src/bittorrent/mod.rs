@@ -5,5 +5,6 @@ pub mod bitfield;
 pub mod magnet;
 pub mod message;
 pub mod metainfo;
+pub mod picker;
 pub mod storage;
 pub mod tracker;
