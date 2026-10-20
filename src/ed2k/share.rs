@@ -4,19 +4,59 @@ use super::{
 };
 use anyhow::{Context, Result, bail};
 use md4::{Digest, Md4};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicU8, Ordering},
+    },
 };
+
+/// eMule-style upload priority: 0 very low, 1 low, 2 normal, 3 high, 4 release.
+pub const PRIORITY_NORMAL: u8 = 2;
+pub const PRIORITY_MAX: u8 = 4;
 
 #[derive(Clone, Debug)]
 pub struct SharedFile {
     pub path: PathBuf,
     pub link: FileLink,
     pub part_hashes: Vec<[u8; 16]>,
+    /// Modification time (nanoseconds since the Unix epoch) when the file was hashed.
+    pub mtime_ns: u128,
+    priority: Arc<AtomicU8>,
+}
+
+fn mtime_ns(metadata: &std::fs::Metadata) -> u128 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
+/// Hash results the caller persisted, so unchanged files are not hashed again.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CachedShare {
+    pub path: String,
+    pub size: u64,
+    pub mtime_ns: String,
+    pub name: String,
+    pub hash: String,
+    pub part_hashes: Vec<String>,
+}
+
+/// What a rescan found.
+#[derive(Clone, Copy, Debug, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RescanReport {
+    pub unchanged: usize,
+    pub rehashed: usize,
+    pub removed: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -28,6 +68,7 @@ pub struct SharedFileInfo {
     pub hash: String,
     pub link: String,
     pub parts: usize,
+    pub priority: u8,
 }
 
 impl From<&SharedFile> for SharedFileInfo {
@@ -39,6 +80,7 @@ impl From<&SharedFile> for SharedFileInfo {
             hash: file.link.hash_hex(),
             link: file.link.link(),
             parts: file.link.part_count(),
+            priority: file.priority(),
         }
     }
 }
@@ -103,7 +145,73 @@ pub fn hash_shared_file(path: &Path) -> Result<SharedFile> {
         path: canonical,
         link,
         part_hashes: hashes,
+        mtime_ns: mtime_ns(&metadata),
+        priority: Arc::new(AtomicU8::new(PRIORITY_NORMAL)),
     })
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+impl SharedFile {
+    pub fn priority(&self) -> u8 {
+        self.priority.load(Ordering::Relaxed)
+    }
+
+    fn cache_entry(&self) -> CachedShare {
+        CachedShare {
+            path: self.path.to_string_lossy().into_owned(),
+            size: self.link.size,
+            mtime_ns: self.mtime_ns.to_string(),
+            name: self.link.name.clone(),
+            hash: self.link.hash_hex(),
+            part_hashes: self.part_hashes.iter().map(|h| hex(h)).collect(),
+        }
+    }
+
+    /// Rebuilds a file from persisted hashes. Returns `None` unless the file on disk still has the
+    /// recorded size and modification time and the stored hashes are internally consistent.
+    fn from_cache(path: &Path, cached: &CachedShare) -> Option<Self> {
+        let canonical = std::fs::canonicalize(path).ok()?;
+        let metadata = validate_regular_file(&canonical).ok()?;
+        if canonical.to_string_lossy() != cached.path
+            || metadata.len() != cached.size
+            || mtime_ns(&metadata).to_string() != cached.mtime_ns
+        {
+            return None;
+        }
+        let part_hashes: Vec<[u8; 16]> = cached
+            .part_hashes
+            .iter()
+            .map(|h| super::server::file_hash(h).ok())
+            .collect::<Option<_>>()?;
+        let hash = super::server::file_hash(&cached.hash).ok()?;
+        let expected_parts = (cached.size / PART_SIZE + 1) as usize;
+        let root = if cached.size < PART_SIZE {
+            *part_hashes.first()?
+        } else {
+            digest(&part_hashes.concat())
+        };
+        if part_hashes.len() != expected_parts || root != hash {
+            return None;
+        }
+        let link = FileLink {
+            name: cached.name.clone(),
+            size: cached.size,
+            hash,
+        };
+        if FileLink::parse(&link.link()).ok()? != link {
+            return None;
+        }
+        Some(Self {
+            path: canonical,
+            link,
+            part_hashes,
+            mtime_ns: mtime_ns(&metadata),
+            priority: Arc::new(AtomicU8::new(PRIORITY_NORMAL)),
+        })
+    }
 }
 
 impl SharedFile {
@@ -137,6 +245,100 @@ impl ShareRegistry {
             .map_err(|error| anyhow::anyhow!("{error}"))?
             .insert(file.link.hash, Arc::new(file));
         Ok(info)
+    }
+
+    /// Like [`Self::add_file`], but reuses `cache` when the file is unchanged since it was hashed.
+    pub async fn add_file_cached(
+        &self,
+        path: PathBuf,
+        cache: &[CachedShare],
+    ) -> Result<SharedFileInfo> {
+        let cache: Vec<CachedShare> = cache.to_vec();
+        let file = tokio::task::spawn_blocking(move || {
+            let canonical = std::fs::canonicalize(&path)?;
+            let key = canonical.to_string_lossy().into_owned();
+            if let Some(file) = cache
+                .iter()
+                .find(|c| c.path == key)
+                .and_then(|c| SharedFile::from_cache(&canonical, c))
+            {
+                return Ok(file);
+            }
+            hash_shared_file(&path)
+        })
+        .await??;
+        let info = SharedFileInfo::from(&file);
+        self.files
+            .write()
+            .map_err(|error| anyhow::anyhow!("{error}"))?
+            .insert(file.link.hash, Arc::new(file));
+        Ok(info)
+    }
+
+    /// Hash results worth persisting, to be passed to [`Self::add_file_cached`] next time.
+    pub fn export_cache(&self) -> Vec<CachedShare> {
+        let mut entries: Vec<CachedShare> = self
+            .files
+            .read()
+            .map(|files| files.values().map(|f| f.cache_entry()).collect())
+            .unwrap_or_default();
+        entries.sort_by(|a, b| a.path.cmp(&b.path));
+        entries
+    }
+
+    /// Sets the upload priority (0..=4) of a shared file.
+    pub fn set_priority(&self, hash: [u8; 16], priority: u8) -> Result<bool> {
+        if priority > PRIORITY_MAX {
+            bail!("priority must be between 0 and {PRIORITY_MAX}");
+        }
+        let files = self
+            .files
+            .read()
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        Ok(files
+            .get(&hash)
+            .map(|f| f.priority.store(priority, Ordering::Relaxed))
+            .is_some())
+    }
+
+    /// Re-checks every registered file: vanished files are removed, modified ones are hashed again.
+    pub async fn rescan(&self) -> Result<RescanReport> {
+        let snapshot: Vec<Arc<SharedFile>> = self
+            .files
+            .read()
+            .map_err(|error| anyhow::anyhow!("{error}"))?
+            .values()
+            .cloned()
+            .collect();
+        let mut report = RescanReport::default();
+        for file in snapshot {
+            let current = std::fs::symlink_metadata(&file.path)
+                .ok()
+                .filter(|m| m.is_file() && !m.file_type().is_symlink() && m.len() > 0);
+            match current {
+                None => {
+                    self.remove(file.link.hash)?;
+                    report.removed += 1;
+                }
+                Some(m) if m.len() == file.link.size && mtime_ns(&m) == file.mtime_ns => {
+                    report.unchanged += 1;
+                }
+                Some(_) => {
+                    self.remove(file.link.hash)?;
+                    match self.add_file(file.path.clone()).await {
+                        Ok(new) => {
+                            // Keep the user's priority across a re-hash.
+                            if let Ok(hash) = super::server::file_hash(&new.hash) {
+                                let _ = self.set_priority(hash, file.priority());
+                            }
+                            report.rehashed += 1;
+                        }
+                        Err(_) => report.removed += 1,
+                    }
+                }
+            }
+        }
+        Ok(report)
     }
 
     pub async fn add_directory(
@@ -215,6 +417,26 @@ impl ShareRegistry {
         Ok(files)
     }
 
+    /// The registered files in the form the server publication expects.
+    pub fn offered(&self) -> Vec<super::OfferedFile> {
+        let mut files: Vec<_> = self
+            .files
+            .read()
+            .map(|files| {
+                files
+                    .values()
+                    .map(|file| super::OfferedFile {
+                        hash: file.link.hash,
+                        name: file.link.name.clone(),
+                        size: file.link.size,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        files.sort_by(|a: &super::OfferedFile, b| a.name.cmp(&b.name).then(a.hash.cmp(&b.hash)));
+        files
+    }
+
     pub(crate) fn get(&self, hash: &[u8; 16]) -> Option<Arc<SharedFile>> {
         self.files.read().ok()?.get(hash).cloned()
     }
@@ -268,5 +490,94 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[tokio::test]
+    async fn cached_hashes_are_reused_only_while_the_file_is_unchanged() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("data.bin");
+        std::fs::write(&path, vec![7u8; 100_000]).unwrap();
+        let first = ShareRegistry::default();
+        let info = first.add_file(path.clone()).await.unwrap();
+        let cache = first.export_cache();
+        assert_eq!(cache.len(), 1);
+
+        // Unchanged: the cached hashes are accepted without reading the file again. Proving that
+        // directly: a cache entry with a wrong-but-consistent size is rejected, a real one is not.
+        let second = ShareRegistry::default();
+        let again = second.add_file_cached(path.clone(), &cache).await.unwrap();
+        assert_eq!(again.hash, info.hash);
+        assert_eq!(again.link, info.link);
+        assert!(SharedFile::from_cache(&path, &cache[0]).is_some());
+
+        // A tampered cache (hash that does not match the part hashes) is ignored.
+        let mut forged = cache[0].clone();
+        forged.hash = "00".repeat(16);
+        assert!(SharedFile::from_cache(&path, &forged).is_none());
+        let third = ShareRegistry::default();
+        let rehashed = third
+            .add_file_cached(path.clone(), &[forged])
+            .await
+            .unwrap();
+        assert_eq!(
+            rehashed.hash, info.hash,
+            "falls back to hashing the real content"
+        );
+
+        // Modified content (same size, later mtime) invalidates the cache entry.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&path, vec![9u8; 100_000]).unwrap();
+        assert!(SharedFile::from_cache(&path, &cache[0]).is_none());
+        let fourth = ShareRegistry::default();
+        let changed = fourth.add_file_cached(path, &cache).await.unwrap();
+        assert_ne!(changed.hash, info.hash);
+    }
+
+    #[tokio::test]
+    async fn rescan_drops_vanished_files_and_rehashes_modified_ones() {
+        let root = tempfile::tempdir().unwrap();
+        let (keep, edit, gone) = (
+            root.path().join("keep.bin"),
+            root.path().join("edit.bin"),
+            root.path().join("gone.bin"),
+        );
+        for (p, b) in [(&keep, 1u8), (&edit, 2), (&gone, 3)] {
+            std::fs::write(p, vec![b; 5000]).unwrap();
+        }
+        let registry = ShareRegistry::default();
+        for p in [&keep, &edit, &gone] {
+            registry.add_file(p.clone()).await.unwrap();
+        }
+        let edit_hash = registry
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|f| f.name == "edit.bin")
+            .unwrap()
+            .hash;
+        registry
+            .set_priority(super::super::server::file_hash(&edit_hash).unwrap(), 4)
+            .unwrap();
+        assert!(registry.set_priority([0; 16], 9).is_err());
+        assert!(!registry.set_priority([0; 16], 1).unwrap());
+
+        std::fs::remove_file(&gone).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&edit, vec![8u8; 6000]).unwrap();
+        let report = registry.rescan().await.unwrap();
+        assert_eq!(
+            report,
+            RescanReport {
+                unchanged: 1,
+                rehashed: 1,
+                removed: 1
+            }
+        );
+        let list = registry.list().unwrap();
+        assert_eq!(list.len(), 2);
+        let edited = list.iter().find(|f| f.name == "edit.bin").unwrap();
+        assert_ne!(edited.hash, edit_hash);
+        assert_eq!(edited.size, 6000);
+        assert_eq!(edited.priority, 4, "priority survives a re-hash");
     }
 }

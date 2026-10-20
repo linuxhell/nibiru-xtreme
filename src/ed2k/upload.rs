@@ -70,6 +70,7 @@ struct Waiting {
     file: [u8; 16],
     since: Instant,
     connected: bool,
+    priority: u8,
 }
 
 #[derive(Default)]
@@ -221,7 +222,7 @@ impl UploadManager {
         }
     }
 
-    fn request(&self, key: Key, name: &str, file: [u8; 16]) -> Admission {
+    fn request(&self, key: Key, name: &str, file: [u8; 16], priority: u8) -> Admission {
         let config = self.config();
         let Ok(mut state) = self.inner.state.lock() else {
             return Admission::Refused;
@@ -238,15 +239,17 @@ impl UploadManager {
         if let Some(w) = state.waiting.iter_mut().find(|w| w.key == key) {
             w.file = file;
             w.connected = true;
+            w.priority = priority;
         } else {
             if state.waiting.len() >= config.max_waiting {
                 return Admission::Refused;
             }
             let since = state.remembered.remove(&key).unwrap_or(now);
+            // Higher priority first; within a priority, the longest wait first.
             let position = state
                 .waiting
                 .iter()
-                .position(|w| w.since > since)
+                .position(|w| w.priority < priority || (w.priority == priority && w.since > since))
                 .unwrap_or(state.waiting.len());
             state.waiting.insert(
                 position,
@@ -256,6 +259,7 @@ impl UploadManager {
                     file,
                     since,
                     connected: true,
+                    priority,
                 },
             );
         }
@@ -586,10 +590,12 @@ pub(crate) async fn serve(
                     }
                     (0xe3, 0x54) if data.len() >= 16 => {
                         let hash: [u8; 16] = data[..16].try_into()?;
-                        if shares.get(&hash).is_none() {
+                        let Some(file) = shares.get(&hash) else {
                             peer::send(&mut writer, 0xe3, 0x48, &hash).await?;
-                        } else {
-                            let admission = manager.request(key, &hello.name, hash);
+                            continue;
+                        };
+                        {
+                            let admission = manager.request(key, &hello.name, hash, file.priority());
                             last_sent = Some(admission);
                             send_status(&mut writer, admission).await?;
                             if admission == Admission::Refused {
@@ -690,47 +696,70 @@ mod tests {
     #[test]
     fn slots_fill_then_queue_in_arrival_order() {
         let m = manager(1, 10);
-        assert_eq!(m.request(key(1), "a", [9; 16]), Admission::Granted);
-        assert_eq!(m.request(key(2), "b", [9; 16]), Admission::Queued(1));
-        assert_eq!(m.request(key(3), "c", [9; 16]), Admission::Queued(2));
+        assert_eq!(m.request(key(1), "a", [9; 16], 2), Admission::Granted);
+        assert_eq!(m.request(key(2), "b", [9; 16], 2), Admission::Queued(1));
+        assert_eq!(m.request(key(3), "c", [9; 16], 2), Admission::Queued(2));
         // Asking again does not lose the place.
-        assert_eq!(m.request(key(3), "c", [9; 16]), Admission::Queued(2));
+        assert_eq!(m.request(key(3), "c", [9; 16], 2), Admission::Queued(2));
         m.release(key(1));
         assert_eq!(m.status(key(2)), Some(Admission::Granted));
         assert_eq!(m.status(key(3)), Some(Admission::Queued(1)));
     }
 
     #[test]
+    fn higher_priority_files_are_served_first_and_ties_go_to_the_longest_wait() {
+        let m = manager(1, 10);
+        m.request(key(1), "a", [1; 16], 2);
+        m.request(key(2), "normal-1", [1; 16], 2);
+        m.request(key(3), "normal-2", [1; 16], 2);
+        // A "release" priority client overtakes both normal ones, but not the active slot.
+        assert_eq!(
+            m.request(key(4), "release", [2; 16], 4),
+            Admission::Queued(1)
+        );
+        assert_eq!(m.status(key(2)), Some(Admission::Queued(2)));
+        // A low priority client goes to the back.
+        assert_eq!(m.request(key(5), "low", [3; 16], 0), Admission::Queued(4));
+        m.release(key(1));
+        assert_eq!(m.status(key(4)), Some(Admission::Granted));
+        m.release(key(4));
+        assert_eq!(m.status(key(2)), Some(Admission::Granted));
+    }
+
+    #[test]
     fn waiting_list_is_bounded() {
         let m = manager(1, 1);
-        assert_eq!(m.request(key(1), "a", [1; 16]), Admission::Granted);
-        assert_eq!(m.request(key(2), "b", [1; 16]), Admission::Queued(1));
-        assert_eq!(m.request(key(3), "c", [1; 16]), Admission::Refused);
+        assert_eq!(m.request(key(1), "a", [1; 16], 2), Admission::Granted);
+        assert_eq!(m.request(key(2), "b", [1; 16], 2), Admission::Queued(1));
+        assert_eq!(m.request(key(3), "c", [1; 16], 2), Admission::Refused);
     }
 
     #[test]
     fn a_disconnected_client_keeps_its_place_in_line() {
         let m = manager(1, 10);
-        m.request(key(1), "a", [1; 16]);
-        m.request(key(2), "early", [1; 16]);
-        m.request(key(3), "late", [1; 16]);
+        m.request(key(1), "a", [1; 16], 2);
+        m.request(key(2), "early", [1; 16], 2);
+        m.request(key(3), "late", [1; 16], 2);
         m.disconnect(key(2));
         // The absent client is skipped when the slot frees up...
         m.release(key(1));
         assert_eq!(m.status(key(3)), Some(Admission::Granted));
         m.release(key(3));
         // ...but when it returns it is ahead of anyone who joined after it left.
-        assert_eq!(m.request(key(4), "newer", [1; 16]), Admission::Granted);
-        assert_eq!(m.request(key(5), "newest", [1; 16]), Admission::Queued(1));
-        assert_eq!(m.request(key(2), "early", [1; 16]), Admission::Queued(1));
+        assert_eq!(m.request(key(4), "newer", [1; 16], 2), Admission::Granted);
+        assert_eq!(
+            m.request(key(5), "newest", [1; 16], 2),
+            Admission::Queued(1)
+        );
+        assert_eq!(m.request(key(2), "early", [1; 16], 2), Admission::Queued(1));
         assert_eq!(m.status(key(5)), Some(Admission::Queued(2)));
     }
 
     #[test]
     fn raising_the_limit_promotes_waiting_clients() {
         let m = manager(1, 10);
-        m.request(key(1), "a", [1; 16]);
-        m.request(key(2), "b", [1; 16]);
+        m.request(key(1), "a", [1; 16], 2);
+        m.request(key(2), "b", [1; 16], 2);
         m.set_config(UploadConfig {
             max_active: 2,
             ..m.config()
@@ -742,7 +771,7 @@ mod tests {
     #[test]
     fn statistics_are_tracked_per_file() {
         let m = manager(2, 10);
-        m.request(key(1), "a", [7; 16]);
+        m.request(key(1), "a", [7; 16], 2);
         m.account(key(1), [7; 16], 500);
         let s = m.snapshot();
         assert_eq!(s.total_uploaded, 500);

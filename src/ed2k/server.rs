@@ -188,6 +188,95 @@ fn results(data: &[u8]) -> Result<Vec<SearchResult>> {
     Ok(results)
 }
 
+/// A complete local file offered to the server so other clients can find this one as a source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OfferedFile {
+    pub hash: [u8; 16],
+    pub name: String,
+    pub size: u64,
+}
+
+/// Server TCP flags (from `OP_IDCHANGE`).
+const SRV_NEWTAGS: u32 = 0x0000_0008;
+const SRV_LARGEFILES: u32 = 0x0000_0100;
+/// Marker ID/port eMule sends for complete files to servers that understand new tags.
+const FILE_COMPLETE_ID: u32 = 0xFBFB_FBFB;
+const FILE_COMPLETE_PORT: u16 = 0xFBFB;
+/// Files per `OP_OFFERFILES` packet and per connection, so a server is never flooded.
+pub const OFFER_BATCH: usize = 50;
+pub const OFFER_LIMIT: usize = 5000;
+
+fn file_type(name: &str) -> Option<&'static str> {
+    let extension = name.rsplit_once('.')?.1.to_ascii_lowercase();
+    Some(match extension.as_str() {
+        "mp3" | "flac" | "ogg" | "opus" | "wav" | "m4a" | "aac" | "wma" | "ape" | "mka" => "Audio",
+        "avi" | "mkv" | "mp4" | "mov" | "wmv" | "mpg" | "mpeg" | "flv" | "webm" | "m4v" | "ts" => {
+            "Video"
+        }
+        "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" | "tif" | "tiff" => "Image",
+        "pdf" | "doc" | "docx" | "txt" | "epub" | "rtf" | "odt" | "xls" | "xlsx" | "ppt"
+        | "pptx" => "Doc",
+        "zip" | "rar" | "7z" | "tar" | "gz" | "bz2" | "xz" => "Arc",
+        "iso" | "bin" | "img" | "nrg" | "cue" => "Iso",
+        "exe" | "msi" | "apk" | "dmg" | "deb" | "rpm" | "appimage" => "Pro",
+        _ => return None,
+    })
+}
+
+/// Builds the body of `OP_OFFERFILES`. Files that the server cannot represent (over 4 GiB when
+/// it lacks large-file support) are left out; the second value is how many were included.
+pub(crate) fn offer_packet(
+    files: &[OfferedFile],
+    client_id: u32,
+    port: u16,
+    server_flags: u32,
+) -> Result<(Vec<u8>, usize)> {
+    if files.len() > OFFER_BATCH {
+        bail!("too many files in one offer");
+    }
+    let (id, port) = if server_flags & SRV_NEWTAGS != 0 {
+        (FILE_COMPLETE_ID, FILE_COMPLETE_PORT)
+    } else if client_id >= 0x0100_0000 {
+        (client_id, port)
+    } else {
+        // A Low-ID client cannot be reached through its ID.
+        (0, 0)
+    };
+    let mut body = Vec::new();
+    let mut count = 0u32;
+    for file in files {
+        if file.name.is_empty()
+            || file.name.len() > 255
+            || file.name.chars().any(char::is_control)
+            || file.size == 0
+        {
+            continue;
+        }
+        let large = file.size > u32::MAX as u64;
+        if large && server_flags & SRV_LARGEFILES == 0 {
+            continue;
+        }
+        let kind = file_type(&file.name);
+        body.extend(file.hash);
+        body.extend(id.to_le_bytes());
+        body.extend(port.to_le_bytes());
+        let tags = 2 + u32::from(large) + u32::from(kind.is_some());
+        body.extend(tags.to_le_bytes());
+        string_tag(&mut body, 0x01, &file.name);
+        number_tag(&mut body, 0x02, file.size as u32);
+        if large {
+            number_tag(&mut body, 0x3a, (file.size >> 32) as u32);
+        }
+        if let Some(kind) = kind {
+            string_tag(&mut body, 0x03, kind);
+        }
+        count += 1;
+    }
+    let mut packet = count.to_le_bytes().to_vec();
+    packet.extend(body);
+    Ok((packet, count as usize))
+}
+
 type SourceReply = oneshot::Sender<Result<Vec<FileSource>>>;
 type PendingSources = ([u8; 16], SourceReply);
 
@@ -195,6 +284,7 @@ enum Command {
     Search(String, oneshot::Sender<Result<Vec<SearchResult>>>),
     Sources([u8; 16], SourceReply),
     Callback(u32, oneshot::Sender<Result<()>>),
+    Offer(Vec<u8>, oneshot::Sender<Result<()>>),
 }
 struct Inner {
     commands: mpsc::Sender<Command>,
@@ -212,6 +302,9 @@ pub struct ServerConnection {
     inner: Arc<Inner>,
     pub server: Server,
     pub client_id: u32,
+    /// Capability flags the server reported in `OP_IDCHANGE` (zero when it sent none).
+    pub tcp_flags: u32,
+    tcp_port: u16,
 }
 impl ServerConnection {
     pub async fn connect(
@@ -220,7 +313,7 @@ impl ServerConnection {
         nickname: &str,
         tcp_port: u16,
     ) -> Result<Self> {
-        let (stream, client_id) = tokio::time::timeout(Duration::from_secs(15), async {
+        let (stream, client_id, tcp_flags) = tokio::time::timeout(Duration::from_secs(15), async {
             let mut stream = TcpStream::connect((server.host.as_str(), server.port))
                 .await
                 .context("cannot connect to ED2K server")?;
@@ -230,11 +323,13 @@ impl ServerConnection {
                 let (opcode, bytes) = frame(&mut stream).await?;
                 match opcode {
                     0x40 => {
-                        let id = Reader::new(&bytes).u32()?;
+                        let mut reader = Reader::new(&bytes);
+                        let id = reader.u32()?;
                         if id == 0 {
                             bail!("ED2K server rejected login");
                         }
-                        return Ok((stream, id));
+                        let flags = reader.u32().unwrap_or(0);
+                        return Ok((stream, id, flags));
                     }
                     0x05 => bail!("ED2K server rejected login"),
                     _ => {}
@@ -308,6 +403,12 @@ impl ServerConnection {
                                 error=>{let _=reply.send(Err(anyhow!("cannot request ED2K callback: {error:?}")));break;},
                             }
                         },
+                        Some(Command::Offer(packet,reply)) => {
+                            match tokio::time::timeout(Duration::from_secs(10),send(&mut writer,0x15,&packet)).await {
+                                Ok(Ok(()))=>{let _=reply.send(Ok(()));},
+                                error=>{let _=reply.send(Err(anyhow!("cannot offer files to the ED2K server: {error:?}")));break;},
+                            }
+                        },
                         None => break,
                     },
                     packet = incoming.recv() => match packet {
@@ -342,6 +443,8 @@ impl ServerConnection {
         Ok(Self {
             server,
             client_id,
+            tcp_flags,
+            tcp_port,
             inner: Arc::new(Inner {
                 commands,
                 alive,
@@ -349,6 +452,44 @@ impl ServerConnection {
             }),
         })
     }
+    /// Offers complete local files to the server (`OP_OFFERFILES`), in small batches, so other
+    /// clients can find this one as a source. ED2K has no "withdraw" packet: to remove files from
+    /// the server's index, reconnect and publish the new list. Returns how many files were sent.
+    pub async fn offer_files(&self, files: &[OfferedFile]) -> Result<usize> {
+        if !self.is_connected() {
+            bail!("ED2K server is disconnected");
+        }
+        let mut sent = 0;
+        for (index, batch) in files
+            .iter()
+            .take(OFFER_LIMIT)
+            .collect::<Vec<_>>()
+            .chunks(OFFER_BATCH)
+            .enumerate()
+        {
+            if index > 0 {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            let batch: Vec<OfferedFile> = batch.iter().map(|f| (*f).clone()).collect();
+            let (packet, count) =
+                offer_packet(&batch, self.client_id, self.tcp_port, self.tcp_flags)?;
+            if count == 0 {
+                continue;
+            }
+            let (reply, response) = oneshot::channel();
+            self.inner
+                .commands
+                .send(Command::Offer(packet, reply))
+                .await
+                .context("ED2K server disconnected")?;
+            response
+                .await
+                .context("ED2K server disconnected while offering files")??;
+            sent += count;
+        }
+        Ok(sent)
+    }
+
     pub fn disconnect(&self) {
         self.inner.alive.store(false, Ordering::Release);
         self.inner.task.abort();
@@ -457,6 +598,128 @@ mod tests {
         assert!(results[0].link.contains("ed2k://|file|example"));
         fixture.await.unwrap();
     }
+    /// Parses an OP_OFFERFILES body back into (hash, id, port, name, size, type) rows.
+    #[allow(clippy::type_complexity)]
+    fn parse_offer(body: &[u8]) -> Vec<([u8; 16], u32, u16, String, u64, Option<String>)> {
+        let mut r = Reader::new(body);
+        let count = r.u32().unwrap();
+        let mut rows = Vec::new();
+        for _ in 0..count {
+            let hash: [u8; 16] = r.take(16).unwrap().try_into().unwrap();
+            let id = r.u32().unwrap();
+            let port = r.u16().unwrap();
+            let tags = r.u32().unwrap();
+            let (mut name, mut size, mut high, mut kind) = (String::new(), 0u64, 0u64, None);
+            for _ in 0..tags {
+                match tag(&mut r).unwrap() {
+                    (1, Value::Text(t)) => name = t,
+                    (2, Value::Number(n)) => size = n,
+                    (0x3a, Value::Number(n)) => high = n,
+                    (3, Value::Text(t)) => kind = Some(t),
+                    (id, _) => panic!("unexpected tag {id}"),
+                }
+            }
+            rows.push((hash, id, port, name, size | (high << 32), kind));
+        }
+        assert_eq!(r.pos, body.len(), "no trailing bytes");
+        rows
+    }
+
+    fn offered(n: u8, name: &str, size: u64) -> OfferedFile {
+        OfferedFile {
+            hash: [n; 16],
+            name: name.into(),
+            size,
+        }
+    }
+
+    #[test]
+    fn offer_packets_use_complete_file_markers_or_the_real_id_by_server_capability() {
+        let files = [offered(1, "song.mp3", 5_000_000)];
+        // Server with NEWTAGS: complete-file markers.
+        let (packet, n) = offer_packet(&files, 0x0200_0001, 4662, SRV_NEWTAGS).unwrap();
+        assert_eq!(n, 1);
+        let rows = parse_offer(&packet);
+        assert_eq!(
+            (rows[0].1, rows[0].2),
+            (FILE_COMPLETE_ID, FILE_COMPLETE_PORT)
+        );
+        assert_eq!(
+            (rows[0].3.as_str(), rows[0].4, rows[0].5.as_deref()),
+            ("song.mp3", 5_000_000, Some("Audio"))
+        );
+        // Older server, High ID: the real ID and port.
+        let rows = parse_offer(&offer_packet(&files, 0x0200_0001, 4662, 0).unwrap().0);
+        assert_eq!((rows[0].1, rows[0].2), (0x0200_0001, 4662));
+        // Low ID cannot be reached through its ID, so none is advertised.
+        let rows = parse_offer(&offer_packet(&files, 1234, 4662, 0).unwrap().0);
+        assert_eq!((rows[0].1, rows[0].2), (0, 0));
+    }
+
+    #[test]
+    fn offers_skip_unrepresentable_files_and_encode_large_sizes() {
+        let big = 5_000_000_000u64;
+        let files = [
+            offered(1, "movie.mkv", big),
+            offered(2, "noname", 10),
+            offered(3, "", 10),
+            offered(4, "bad\nname.txt", 10),
+            offered(5, "empty.txt", 0),
+            offered(6, &"x".repeat(300), 10),
+        ];
+        // Without large-file support only the plain file survives.
+        let (packet, n) = offer_packet(&files, 0x0200_0001, 1, 0).unwrap();
+        let rows = parse_offer(&packet);
+        assert_eq!(n, 1);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].3, "noname");
+        assert_eq!(rows[0].5, None);
+        // With large-file support the 64-bit size is split across two tags.
+        let (packet, n) = offer_packet(&files[..1], 0x0200_0001, 1, SRV_LARGEFILES).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(parse_offer(&packet)[0].4, big);
+        assert!(offer_packet(&vec![offered(1, "a.txt", 1); OFFER_BATCH + 1], 1, 1, 0).is_err());
+    }
+
+    #[tokio::test]
+    async fn files_are_published_in_batches_on_the_wire() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let fixture = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            assert_eq!(frame(&mut stream).await.unwrap().0, 1);
+            // IDCHANGE: High ID plus server flags (NEWTAGS).
+            let mut id = 0x0300_0001u32.to_le_bytes().to_vec();
+            id.extend(SRV_NEWTAGS.to_le_bytes());
+            send(&mut stream, 0x40, &id).await.unwrap();
+            let mut seen = Vec::new();
+            for _ in 0..3 {
+                let (opcode, body) = frame(&mut stream).await.unwrap();
+                assert_eq!(opcode, 0x15);
+                seen.push(parse_offer(&body).len());
+            }
+            seen
+        });
+        let server = Server {
+            host: "127.0.0.1".into(),
+            port: address.port(),
+            name: "fixture".into(),
+            description: String::new(),
+        };
+        let connection = ServerConnection::connect(server, [7; 16], "Nibiru", 4662)
+            .await
+            .unwrap();
+        assert!(!connection.is_low_id());
+        assert_eq!(connection.tcp_flags, SRV_NEWTAGS);
+        let files: Vec<_> = (0..120u8)
+            .map(|n| offered(n, &format!("file{n}.bin"), 100 + n as u64))
+            .collect();
+        assert_eq!(connection.offer_files(&files).await.unwrap(), 120);
+        assert_eq!(fixture.await.unwrap(), vec![50, 50, 20]);
+        connection.disconnect();
+        assert!(connection.offer_files(&files).await.is_err());
+    }
+
     #[test]
     fn source_packets_validate_hash_length_duplicates_and_low_ids() {
         assert!(file_hash("é").is_err());

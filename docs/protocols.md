@@ -60,16 +60,51 @@ and resume by rehashing saved parts. Hashsets must match the ED2K root before
 parts are trusted. Files stay under a partial name until sync and no-clobber
 finalization. Names are validated as a single Windows-compatible filename.
 
-An incoming TCP hello/probe service advertises its real bound port. Server-mediated
+An incoming TCP service advertises its real bound port. Server-mediated
 Low-ID callbacks can feed verified downloads when the requester has a reachable
 High-ID session. Pending callbacks are bounded, correlated to the peer client ID,
 and removed on cancellation. This does not solve two firewalled peers or NAT
-traversal. Incoming file requests do not share arbitrary local files.
+traversal.
 
-Kad bootstrap is **not** persistent Kad routing. Uploads, upload
-queues, credits, AICH, peer obfuscation, Kad lookup/publishing, messaging and
-full aMule parity are not implemented. BitTorrent/Magnet, DHT/PEX/uTP and hole
-punching also remain pending. The alpha must not be advertised as complete.
+### Sharing and uploading
+
+Nothing is shared implicitly. Only files placed in a `ShareRegistry` (explicit
+files, or a chosen directory with optional recursion) are ever served: paths are
+canonicalised, symlinks and empty files are refused, the ED2K MD4 part hashes
+are computed, and every served range re-checks that the file is still the same
+regular file with the same size.
+
+- **Uploader.** Answers filename, file status (a part count of zero means a
+  complete file, as eMule reports it), hashset and `OP_STARTUPLOADREQ`; accepts
+  eMule's extended `OP_REQUESTFILENAME`; serves `OP_REQUESTPARTS` and the 64-bit
+  `OP_REQUESTPARTS_I64` in packets of at most 10,240 bytes. Ranges are bounded
+  (256 KiB each, 3 per request); ranges past the end of the file or a file
+  changed on disk end the session.
+- **Queue.** `UploadManager` keeps a configurable number of active slots and a
+  bounded waiting list ordered by file priority (0-4) and then by waiting time.
+  A queued client receives `OP_QUEUERANKING` and is promoted with
+  `OP_ACCEPTUPLOADREQ` when a slot opens; a client that disconnects keeps its
+  place for 30 minutes. `OP_CANCELTRANSFER`/`OP_END_OF_DOWNLOAD` and idle timeouts
+  free slots. Connections are capped in total and per IP.
+- **Bandwidth.** One token-bucket limit is shared by all uploads.
+- **Statistics.** Per-client and per-file requests, accepted slots and bytes.
+- **Publication.** `ServerConnection::offer_files` sends `OP_OFFERFILES` in
+  batches of 50 (at most 5,000 files), using the complete-file markers for
+  servers that report new-tag support and the real ID/port otherwise; files over
+  4 GiB are only offered to servers that report large-file support. ED2K has no
+  withdraw packet: reconnect and publish the new list to remove files.
+- **Persistence helpers.** `ShareRegistry::export_cache`/`add_file_cached` reuse
+  stored hashes only when path, size and modification time still match and the
+  hashes are internally consistent; `rescan` drops vanished files and re-hashes
+  modified ones.
+
+Verified with real-socket tests, including Nibiru downloading a two-part file
+from a Nibiru listener. Not interoperability-tested against eMule/aMule yet.
+
+Kad bootstrap is **not** persistent Kad routing. Credits, AICH, peer
+obfuscation, secure identification, source exchange, Kad lookup/publishing and
+messaging are not implemented; the hello deliberately does not advertise them.
+The alpha must not be advertised as complete.
 
 ## Reference research
 
