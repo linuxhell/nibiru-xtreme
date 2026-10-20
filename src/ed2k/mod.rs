@@ -6,12 +6,14 @@ mod listener;
 pub mod metadata;
 mod peer;
 mod server;
+mod share;
 mod transfer;
 
 pub use file::FileLink;
 pub use kad::{BootstrapResult, bootstrap};
 pub use listener::{CallbackClient, CallbackRegistry, IncomingListener, IncomingStatus};
 pub use server::{FileSource, SearchResult, ServerConnection};
+pub use share::{ShareRegistry, SharedFileInfo, hash_shared_file};
 pub use transfer::{
     TransferOptions, TransferProgress, TransferStage, download_from_sources, download_with_options,
 };
