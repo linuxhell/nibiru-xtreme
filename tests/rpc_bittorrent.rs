@@ -240,7 +240,11 @@ async fn add_torrent_with_one_based_select_file_downloads_only_those_files() {
     assert_eq!(files[1]["selected"], "true");
     assert_eq!(files[1]["length"], "450000");
     assert!(
-        files[1]["path"].as_str().unwrap().ends_with("Show/ep2.mkv"),
+        files[1]["path"]
+            .as_str()
+            .unwrap()
+            .replace('\\', "/")
+            .ends_with("Show/ep2.mkv"),
         "{}",
         files[1]["path"]
     );
