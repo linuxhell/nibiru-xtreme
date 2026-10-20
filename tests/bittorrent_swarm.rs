@@ -291,3 +291,146 @@ async fn adding_the_same_torrent_twice_returns_the_running_one() {
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
+
+// ---- HTTP streaming ---------------------------------------------------------------------------
+
+async fn http(port: u16, request: &str) -> (String, Vec<u8>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut raw = Vec::new();
+    tokio::time::timeout(Duration::from_secs(30), stream.read_to_end(&mut raw))
+        .await
+        .expect("response in time")
+        .unwrap();
+    let split = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("header end")
+        + 4;
+    (
+        String::from_utf8_lossy(&raw[..split]).into_owned(),
+        raw[split..].to_vec(),
+    )
+}
+
+fn port_of(url: &str) -> u16 {
+    url.split("127.0.0.1:")
+        .nth(1)
+        .unwrap()
+        .split('/')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn http_range_server_streams_a_file_that_is_still_downloading() {
+    use nibiru_xtreme::bittorrent::stream::StreamServer;
+    let fx = fixture();
+    let (seed, _seed_dir) = seeder(&fx).await;
+    let out = tempfile::tempdir().unwrap();
+    let leech = session().await;
+    let mut settings = local_settings(out.path());
+    settings.peers.push(addr(&seed));
+    settings.selected = Some(vec![]);
+    let handle = leech.add_torrent(fx.torrent.clone(), settings);
+    handle.wait_metadata(Duration::from_secs(20)).await.unwrap();
+    let server = StreamServer::start(&leech).await.unwrap();
+    let url = server.url(&handle.info_hash(), 0);
+    let port = port_of(&url);
+    let path = url
+        .split(&format!("127.0.0.1:{port}"))
+        .nth(1)
+        .unwrap()
+        .to_owned();
+    let video = &fx.files[0].1;
+
+    // HEAD: size and range support, no body.
+    let (head, body) = http(
+        port,
+        &format!("HEAD {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
+    )
+    .await;
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    assert!(head.contains("Content-Length: 700000"), "{head}");
+    assert!(head.contains("Accept-Ranges: bytes") && head.contains("video/mp4"));
+    assert!(body.is_empty());
+
+    // The player first asks for the tail (index), then seeks around.
+    let (head, body) = http(
+        port,
+        &format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nRange: bytes=-4096\r\n\r\n"),
+    )
+    .await;
+    assert!(head.starts_with("HTTP/1.1 206"), "{head}");
+    assert!(
+        head.contains("Content-Range: bytes 695904-699999/700000"),
+        "{head}"
+    );
+    assert_eq!(body, video[695_904..]);
+
+    let (head, body) = http(
+        port,
+        &format!(
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nRange: bytes=250000-349999\r\n\r\n"
+        ),
+    )
+    .await;
+    assert!(head.starts_with("HTTP/1.1 206"), "{head}");
+    assert_eq!(body, video[250_000..350_000]);
+
+    // Whole file.
+    let (head, body) = http(
+        port,
+        &format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
+    )
+    .await;
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    assert_eq!(body, *video);
+
+    // Errors.
+    let (head, _) = http(
+        port,
+        &format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nRange: bytes=900000-\r\n\r\n"),
+    )
+    .await;
+    assert!(
+        head.starts_with("HTTP/1.1 416") && head.contains("bytes */700000"),
+        "{head}"
+    );
+    let (head, _) = http(
+        port,
+        &format!(
+            "GET {} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n",
+            path.replace("/stream/", "/stream/wrong")
+        ),
+    )
+    .await;
+    assert!(head.starts_with("HTTP/1.1 403"), "{head}");
+    let (head, _) = http(
+        port,
+        &format!("GET {path} HTTP/1.1\r\nHost: attacker.example:{port}\r\n\r\n"),
+    )
+    .await;
+    assert!(head.starts_with("HTTP/1.1 421"), "{head}");
+    let (head, _) = http(
+        port,
+        &format!("POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
+    )
+    .await;
+    assert!(head.starts_with("HTTP/1.1 405"), "{head}");
+    let bad = path.rsplit_once('/').unwrap().0.to_owned() + "/9";
+    let (head, _) = http(
+        port,
+        &format!("GET {bad} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
+    )
+    .await;
+    assert!(head.starts_with("HTTP/1.1 404"), "{head}");
+    // Streaming selected only the video; the other files were never requested.
+    let status = handle.status();
+    assert!(status.files[0].selected && !status.files[2].selected);
+}

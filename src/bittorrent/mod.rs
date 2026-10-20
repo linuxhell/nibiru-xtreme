@@ -10,5 +10,6 @@ pub mod peer;
 pub mod picker;
 pub mod session;
 pub mod storage;
+pub mod stream;
 pub mod torrent;
 pub mod tracker;
