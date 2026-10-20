@@ -610,11 +610,23 @@ impl Peer {
                 }
             }
             Message::Bitfield(bytes) => {
-                if self.theirs.is_empty() || self.early_pending() {
+                self.settle_early()?;
+                if self.theirs.is_empty() {
+                    // Metadata is not known yet; applied when it arrives.
                     self.early.bitfield = Some(bytes);
-                    self.settle_early()?;
                 } else {
-                    bail!("bitfield sent twice");
+                    // Some clients (aria2) announce a bitfield again after the first pieces, so a
+                    // later one simply replaces what we knew.
+                    let fresh = Bitfield::from_wire(&bytes, self.theirs.len())?;
+                    let old = std::mem::replace(&mut self.theirs, fresh.clone());
+                    let mut core = self.shared.lock();
+                    if let Some(entry) = core.peers.get_mut(&self.key) {
+                        entry.bitfield = fresh.clone();
+                    }
+                    if let Some(r) = core.ready_mut() {
+                        r.picker.peer_left(&old);
+                        r.picker.peer_joined(&fresh);
+                    }
                 }
                 self.update_interest().await?;
                 self.fill_requests().await?;
