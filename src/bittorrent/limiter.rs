@@ -41,27 +41,27 @@ impl RateLimiter {
     /// Waits until `bytes` may be transferred. A request larger than one second's budget is
     /// still allowed, but pays for itself by going into debt.
     pub async fn acquire(&self, bytes: u64) {
-        loop {
-            let wait = {
-                let Ok(mut bucket) = self.inner.lock() else {
-                    return;
-                };
-                if bucket.rate == 0 {
-                    return;
-                }
-                let now = Instant::now();
-                let refill = now.duration_since(bucket.last).as_secs_f64() * bucket.rate as f64;
-                bucket.last = now;
-                // Allow at most one second of burst.
-                bucket.tokens = (bucket.tokens + refill).min(bucket.rate as f64);
-                if bucket.tokens > 0.0 {
-                    bucket.tokens -= bytes as f64;
-                    return;
-                }
-                Duration::from_secs_f64((-bucket.tokens / bucket.rate as f64).clamp(0.005, 1.0))
+        // Take the bytes now (possibly going into debt), then wait out the debt, so one huge
+        // chunk is paced as well as many small ones.
+        let wait = {
+            let Ok(mut bucket) = self.inner.lock() else {
+                return;
             };
-            tokio::time::sleep(wait).await;
-        }
+            if bucket.rate == 0 {
+                return;
+            }
+            let now = Instant::now();
+            let refill = now.duration_since(bucket.last).as_secs_f64() * bucket.rate as f64;
+            bucket.last = now;
+            // At most one second of burst.
+            bucket.tokens = (bucket.tokens + refill).min(bucket.rate as f64);
+            bucket.tokens -= bytes as f64;
+            if bucket.tokens >= 0.0 {
+                return;
+            }
+            Duration::from_secs_f64(-bucket.tokens / bucket.rate as f64)
+        };
+        tokio::time::sleep(wait).await;
     }
 }
 
