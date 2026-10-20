@@ -1,3 +1,4 @@
+#![allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
 #![forbid(unsafe_code)]
 
 pub mod bittorrent;
