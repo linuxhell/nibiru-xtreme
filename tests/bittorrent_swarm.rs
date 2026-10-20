@@ -240,6 +240,8 @@ async fn pause_and_resume_work() {
     verify(out.path(), &fx);
 }
 
+// Bans are per IP, so the bad seeder needs its own loopback address (Linux has all of 127/8).
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_peer_serving_corrupt_data_is_rejected_and_the_download_still_completes() {
     let fx = fixture();
@@ -570,12 +572,13 @@ fn percent_decode(text: &str) -> String {
     let mut out = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() + 0 && i + 2 <= bytes.len() - 1 {
-            if let Ok(v) = u8::from_str_radix(&text[i + 1..i + 3], 16) {
-                out.push(v);
-                i += 3;
-                continue;
-            }
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(v) = u8::from_str_radix(&text[i + 1..i + 3], 16)
+        {
+            out.push(v);
+            i += 3;
+            continue;
         }
         out.push(bytes[i]);
         i += 1;

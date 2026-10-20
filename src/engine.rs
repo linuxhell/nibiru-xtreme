@@ -23,7 +23,7 @@ use tokio::{
 };
 use url::Url;
 
-use crate::{logging::LogSink, storage};
+use crate::{bittorrent::limiter::RateLimiter, logging::LogSink, storage};
 
 mod adaptive;
 
@@ -158,6 +158,22 @@ pub struct Progress {
     pub speed_bytes_per_second: u64,
 }
 
+/// Per-request HTTP settings (what a browser extension or the download manager passes along).
+#[derive(Debug, Clone, Default)]
+pub struct RequestOptions {
+    /// Extra request headers: cookies, referer, user agent, authorization...
+    pub headers: Vec<(String, String)>,
+    /// `http://`, `https://` or `socks5://` proxy for every request.
+    pub proxy: Option<ProxyOptions>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProxyOptions {
+    pub url: String,
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct DownloadRequest {
     pub url: String,
@@ -167,6 +183,9 @@ pub struct DownloadRequest {
 #[derive(Clone)]
 pub struct Engine {
     client: Client,
+    http1_only: bool,
+    request_options: RequestOptions,
+    limiters: Vec<Arc<RateLimiter>>,
     log: Arc<LogSink>,
     sync_interval_bytes: u64,
     adaptive: bool,
@@ -189,6 +208,9 @@ impl Engine {
             .context("failed to build HTTP client")?;
         Ok(Self {
             client,
+            http1_only,
+            request_options: RequestOptions::default(),
+            limiters: Vec::new(),
             log,
             sync_interval_bytes: 0,
             adaptive: false,
@@ -212,6 +234,55 @@ impl Engine {
     pub fn with_http3_only(mut self, enabled: bool) -> Self {
         self.http3_only = enabled;
         self
+    }
+
+    /// Applies headers and a proxy to every HTTP request of this engine.
+    pub fn with_request_options(mut self, options: RequestOptions) -> Result<Self> {
+        let mut builder = Self::client_builder(self.http1_only);
+        let mut headers = reqwest::header::HeaderMap::new();
+        for (name, value) in &options.headers {
+            let name = reqwest::header::HeaderName::from_bytes(name.trim().as_bytes())
+                .with_context(|| format!("invalid header name {name:?}"))?;
+            // Range and framing headers belong to the engine.
+            if matches!(
+                name.as_str(),
+                "range" | "content-length" | "host" | "transfer-encoding"
+            ) {
+                continue;
+            }
+            let mut value = reqwest::header::HeaderValue::from_str(value.trim())
+                .with_context(|| format!("invalid value for header {name}"))?;
+            if matches!(name.as_str(), "cookie" | "authorization") {
+                value.set_sensitive(true);
+            }
+            headers.append(name, value);
+        }
+        if let Some(agent) = headers.remove(reqwest::header::USER_AGENT) {
+            builder = builder.user_agent(agent);
+        }
+        builder = builder.default_headers(headers);
+        if let Some(proxy) = &options.proxy {
+            let mut p = reqwest::Proxy::all(&proxy.url).context("invalid proxy URL")?;
+            if let (Some(user), Some(password)) = (&proxy.username, &proxy.password) {
+                p = p.basic_auth(user, password);
+            }
+            builder = builder.proxy(p);
+        }
+        self.client = builder.build().context("failed to build HTTP client")?;
+        self.request_options = options;
+        Ok(self)
+    }
+
+    /// Token buckets every received byte must pass (one per task, one global).
+    pub fn with_limiters(mut self, limiters: Vec<Arc<RateLimiter>>) -> Self {
+        self.limiters = limiters;
+        self
+    }
+
+    async fn throttle(limiters: &[Arc<RateLimiter>], bytes: usize) {
+        for limiter in limiters {
+            limiter.acquire(bytes as u64).await;
+        }
     }
 
     pub fn with_transport_options(mut self, options: crate::protocols::TransportOptions) -> Self {
@@ -431,6 +502,7 @@ impl Engine {
                 return Err(anyhow!("cancelled"));
             }
             let chunk = chunk.context("HTTP body read failed")?;
+            Self::throttle(&self.limiters, chunk.len()).await;
             file.write_all(&chunk).await?;
             downloaded = downloaded.saturating_add(chunk.len() as u64);
 
@@ -551,6 +623,7 @@ impl Engine {
             let cancelled = cancelled.clone();
             let metrics = metrics.clone();
             let log = self.log.clone();
+            let limiters = self.limiters.clone();
             let mut gate = self.adaptive.then(|| adaptive::Gate {
                 limit: adaptive_limit.subscribe(),
                 wake_all: adaptive_limit.clone(),
@@ -653,6 +726,7 @@ impl Engine {
                                 "range worker {worker_id} body exceeds expected length {expected}"
                             );
                         }
+                        Self::throttle(&limiters, chunk.len()).await;
                         received += chunk.len() as u64;
                         let mut part = chunk.as_ref();
                         while !part.is_empty() {

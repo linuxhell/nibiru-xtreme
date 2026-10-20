@@ -172,6 +172,9 @@ async fn run_fixture(flow: Flow, size: usize, rtt: Duration) -> f64 {
         adaptive: false,
         http3_only: false,
         transport_options: Default::default(),
+        http1_only: false,
+        request_options: Default::default(),
+        limiters: Vec::new(),
         client: match flow {
             Flow::Default => Client::builder(),
             Flow::Adaptive => Client::builder().http2_adaptive_window(true),

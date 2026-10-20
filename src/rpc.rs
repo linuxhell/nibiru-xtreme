@@ -18,7 +18,8 @@ pub mod bt;
 
 use crate::{
     VERSION,
-    engine::{DownloadRequest, Engine, Progress, safe_output_name},
+    bittorrent::limiter::RateLimiter,
+    engine::{DownloadRequest, Engine, Progress, ProxyOptions, RequestOptions, safe_output_name},
     logging::LogSink,
 };
 
@@ -32,6 +33,9 @@ struct Task {
     cancel: Arc<AtomicBool>,
     request: DownloadRequest,
     transport: crate::protocols::TransportOptions,
+    http: RequestOptions,
+    /// This task's own speed cap (`max-download-limit`).
+    limit: Arc<RateLimiter>,
 }
 
 #[derive(Clone)]
@@ -41,6 +45,8 @@ pub struct RpcServer {
     secret: String,
     tasks: Arc<RwLock<HashMap<String, Task>>>,
     bt: Option<Arc<bt::BtService>>,
+    /// `max-overall-download-limit` for HTTP/FTP tasks (BitTorrent has its own session limit).
+    global_limit: Arc<RateLimiter>,
 }
 
 impl RpcServer {
@@ -51,6 +57,7 @@ impl RpcServer {
             secret,
             tasks: Arc::new(RwLock::new(HashMap::new())),
             bt: None,
+            global_limit: Arc::new(RateLimiter::new(0)),
         }
     }
 
@@ -260,12 +267,29 @@ impl RpcServer {
             "aria2.changeOption" => {
                 if let (Some(bt), Some(options)) = (bt_gid, options_at(1)) {
                     bt.change_option(gid, options)?;
+                } else if let Some(options) = options_at(1)
+                    && let Some(limit) = options
+                        .get("max-download-limit")
+                        .and_then(Value::as_str)
+                        .and_then(bt::parse_size)
+                    && let Some(task) = self.tasks.read().await.get(gid)
+                {
+                    task.limit.set_rate(limit);
                 }
                 Ok(Value::String("OK".into()))
             }
             "aria2.changeGlobalOption" => {
-                if let (Some(bt), Some(options)) = (self.bt.as_ref(), options_at(0)) {
-                    bt.change_global_option(options);
+                if let Some(options) = options_at(0) {
+                    if let Some(limit) = options
+                        .get("max-overall-download-limit")
+                        .and_then(Value::as_str)
+                        .and_then(bt::parse_size)
+                    {
+                        self.global_limit.set_rate(limit);
+                    }
+                    if let Some(bt) = self.bt.as_ref() {
+                        bt.change_global_option(options);
+                    }
                 }
                 Ok(Value::String("OK".into()))
             }
@@ -350,6 +374,12 @@ impl RpcServer {
             ssh_host_key: value("ssh-host-key").map(str::to_owned),
             ssh_identity: value("ssh-identity").map(PathBuf::from),
         };
+        let http = request_options(options)?;
+        let limit = Arc::new(RateLimiter::new(
+            value("max-download-limit")
+                .and_then(bt::parse_size)
+                .unwrap_or(0),
+        ));
         let gid = uuid::Uuid::new_v4().simple().to_string();
         let cancel = Arc::new(AtomicBool::new(false));
         self.tasks.write().await.insert(
@@ -363,9 +393,11 @@ impl RpcServer {
                 cancel: cancel.clone(),
                 request: request.clone(),
                 transport: transport.clone(),
+                http: http.clone(),
+                limit: limit.clone(),
             },
         );
-        self.spawn_download(gid.clone(), request, cancel, transport);
+        self.spawn_download(gid.clone(), request, cancel, transport, http, limit);
         Ok(Value::String(gid))
     }
 
@@ -375,8 +407,27 @@ impl RpcServer {
         request: DownloadRequest,
         cancel: Arc<AtomicBool>,
         transport: crate::protocols::TransportOptions,
+        http: RequestOptions,
+        limit: Arc<RateLimiter>,
     ) {
-        let engine = self.engine.clone().with_transport_options(transport);
+        let engine = match self
+            .engine
+            .clone()
+            .with_transport_options(transport)
+            .with_request_options(http)
+        {
+            Ok(engine) => engine.with_limiters(vec![limit, self.global_limit.clone()]),
+            Err(error) => {
+                let tasks = self.tasks.clone();
+                tokio::spawn(async move {
+                    if let Some(task) = tasks.write().await.get_mut(&gid) {
+                        task.status = "error".into();
+                        task.error = Some(error.to_string());
+                    }
+                });
+                return;
+            }
+        };
         let tasks = self.tasks.clone();
         let log = self.log.clone();
         tokio::spawn(async move {
@@ -472,7 +523,7 @@ impl RpcServer {
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("missing gid"))?
             .to_owned();
-        let (request, cancel, transport) = {
+        let (request, cancel, transport, http, limit) = {
             let mut guard = self.tasks.write().await;
             let task = guard.get_mut(&gid).ok_or_else(|| anyhow!("unknown gid"))?;
             if task.status != "paused" && task.status != "error" {
@@ -482,9 +533,15 @@ impl RpcServer {
             task.cancel = cancel.clone();
             task.status = "active".into();
             task.error = None;
-            (task.request.clone(), cancel, task.transport.clone())
+            (
+                task.request.clone(),
+                cancel,
+                task.transport.clone(),
+                task.http.clone(),
+                task.limit.clone(),
+            )
         };
-        self.spawn_download(gid.clone(), request, cancel, transport);
+        self.spawn_download(gid.clone(), request, cancel, transport, http, limit);
         Ok(Value::String(gid))
     }
 
@@ -499,6 +556,62 @@ impl RpcServer {
         }
         Ok(Value::String(gid))
     }
+}
+
+/// aria2-style HTTP options: `header`, `referer`, `user-agent`, `all-proxy*`.
+fn request_options(options: Option<&serde_json::Map<String, Value>>) -> Result<RequestOptions> {
+    let mut out = RequestOptions::default();
+    let Some(options) = options else {
+        return Ok(out);
+    };
+    let text = |key: &str| {
+        options
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|v| !v.is_empty())
+    };
+    match options.get("header") {
+        Some(Value::Array(lines)) => {
+            for line in lines.iter().filter_map(Value::as_str) {
+                push_header(&mut out, line)?;
+            }
+        }
+        Some(Value::String(line)) => push_header(&mut out, line)?,
+        _ => {}
+    }
+    if let Some(referer) = text("referer") {
+        out.headers.push(("Referer".into(), referer.into()));
+    }
+    if let Some(agent) = text("user-agent") {
+        out.headers.push(("User-Agent".into(), agent.into()));
+    }
+    if let Some(url) = text("all-proxy")
+        .or_else(|| text("http-proxy"))
+        .or_else(|| text("https-proxy"))
+    {
+        out.proxy = Some(ProxyOptions {
+            url: url.into(),
+            username: text("all-proxy-user").map(str::to_owned),
+            password: text("all-proxy-passwd").map(str::to_owned),
+        });
+    }
+    Ok(out)
+}
+
+fn push_header(out: &mut RequestOptions, line: &str) -> Result<()> {
+    let (name, value) = line
+        .split_once(':')
+        .ok_or_else(|| anyhow!("malformed header line"))?;
+    if name.trim().is_empty()
+        || name.len() > 100
+        || value.len() > 16 * 1024
+        || out.headers.len() >= 64
+    {
+        return Err(anyhow!("header line rejected"));
+    }
+    out.headers
+        .push((name.trim().to_owned(), value.trim().to_owned()));
+    Ok(())
 }
 
 fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {

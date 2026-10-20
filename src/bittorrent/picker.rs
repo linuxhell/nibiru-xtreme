@@ -256,12 +256,17 @@ impl Picker {
     /// Reserves one whole untouched piece for a source that fetches complete pieces (a web seed).
     /// The caller finishes it through `mark_have` / `piece_failed` / `release_peer`.
     pub fn claim_piece(&mut self, peer: PeerId) -> Option<usize> {
-        let allow = |s: &Self, p: usize| s.wanted.get(p) && !s.have.get(p);
-        let piece = self
-            .pick_window(&allow)
-            .map(|(p, _)| p)
-            .filter(|p| !self.progress.contains_key(p))
-            .or_else(|| self.pick_new(&allow).map(|(p, _)| p))?;
+        // Untouched: not started, or started and fully given back.
+        let untouched = |s: &Self, p: usize| {
+            s.wanted.get(p)
+                && !s.have.get(p)
+                && s.progress
+                    .get(&p)
+                    .is_none_or(|pr| pr.blocks.iter().all(|b| *b == Block::Missing))
+        };
+        let piece = (0..self.count)
+            .filter(|&p| untouched(self, p))
+            .min_by_key(|&p| (self.priority_key(p), p))?;
         let blocks = self.block_count(piece);
         self.progress.insert(
             piece,
