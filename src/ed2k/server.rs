@@ -35,7 +35,7 @@ pub struct FileSource {
     pub requires_callback: bool,
 }
 
-fn file_hash(value: &str) -> Result<[u8; 16]> {
+pub(crate) fn file_hash(value: &str) -> Result<[u8; 16]> {
     if value.len() != 32 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
         bail!("invalid ED2K file hash");
     }

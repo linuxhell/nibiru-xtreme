@@ -1,0 +1,481 @@
+//! Baseline ED2K peer transport, with bounded frames and verified part hashsets.
+use super::{
+    FileLink, FileSource,
+    file::{BLOCK_SIZE, PART_SIZE},
+    metadata::{Reader, Value, tag},
+};
+use anyhow::{Context, Result, bail};
+use std::{
+    io::Read,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
+
+const MAX_PACKET: usize = 4 * 1024 * 1024;
+pub(crate) async fn cancelled(cancel: &AtomicBool) {
+    loop {
+        if cancel.load(Ordering::Acquire) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+pub(crate) fn check_cancel(cancel: &AtomicBool) -> Result<()> {
+    if cancel.load(Ordering::Acquire) {
+        bail!("ED2K transfer cancelled");
+    }
+    Ok(())
+}
+async fn frame(stream: &mut TcpStream) -> Result<(u8, u8, Vec<u8>)> {
+    let mut protocol = stream.read_u8().await?;
+    if !matches!(protocol, 0xe3 | 0xc5 | 0xd4) {
+        bail!("unsupported ED2K peer protocol");
+    }
+    let len = stream.read_u32_le().await? as usize;
+    if len == 0 || len > MAX_PACKET {
+        bail!("ED2K peer packet exceeds size limit");
+    }
+    let opcode = stream.read_u8().await?;
+    let mut bytes = vec![0; len - 1];
+    stream.read_exact(&mut bytes).await?;
+    if protocol == 0xd4 {
+        let mut decoded = Vec::new();
+        flate2::read::ZlibDecoder::new(&bytes[..])
+            .take((MAX_PACKET + 1) as u64)
+            .read_to_end(&mut decoded)?;
+        if decoded.len() > MAX_PACKET {
+            bail!("ED2K peer decompression exceeds limit");
+        }
+        bytes = decoded;
+        protocol = 0xc5;
+    }
+    Ok((protocol, opcode, bytes))
+}
+pub(crate) async fn send(
+    stream: &mut TcpStream,
+    protocol: u8,
+    opcode: u8,
+    bytes: &[u8],
+) -> Result<()> {
+    if bytes.len() >= MAX_PACKET {
+        bail!("ED2K peer packet exceeds size limit");
+    }
+    tokio::time::timeout(Duration::from_secs(10), async {
+        stream.write_u8(protocol).await?;
+        stream.write_u32_le((bytes.len() + 1) as u32).await?;
+        stream.write_u8(opcode).await?;
+        stream.write_all(bytes).await
+    })
+    .await
+    .context("ED2K peer write timed out")??;
+    Ok(())
+}
+fn number(data: &mut Vec<u8>, id: u8, value: u32) {
+    data.extend([3, 1, 0, id]);
+    data.extend(value.to_le_bytes());
+}
+fn hello(hash: [u8; 16], client_id: u32) -> Vec<u8> {
+    let mut data = vec![16];
+    data.extend(hash);
+    data.extend(client_id.to_le_bytes());
+    data.extend(0u16.to_le_bytes());
+    data.extend(4u32.to_le_bytes());
+    let name = b"Apocalipse Nibiru";
+    data.extend([2, 1, 0, 1]);
+    data.extend((name.len() as u16).to_le_bytes());
+    data.extend(name);
+    number(&mut data, 0x11, 60);
+    // Unicode + compression + no shared-file listing. Do not advertise Kad,
+    // secure identification, obfuscation, source exchange or multipackets.
+    number(&mut data, 0xfa, (1 << 28) | (1 << 20) | 4);
+    number(&mut data, 0xfe, 1 << 4); // 64-bit file offsets.
+    data.extend([0; 6]);
+    data
+}
+fn hello_answer(data: &[u8]) -> Result<bool> {
+    let mut reader = Reader::new(data);
+    reader.take(22)?;
+    let count = reader.u32()?;
+    if count > 64 {
+        bail!("too many peer hello tags");
+    }
+    let mut large = false;
+    for _ in 0..count {
+        if let (0xfe, Value::Number(bits)) = tag(&mut reader)? {
+            large = bits & (1 << 4) != 0;
+        }
+    }
+    reader.take(6)?;
+    if data.len() - reader.pos > 4 {
+        bail!("invalid peer hello trailer");
+    }
+    Ok(large)
+}
+
+pub(crate) struct Peer {
+    stream: TcpStream,
+    file: FileLink,
+    pub hashes: Vec<[u8; 16]>,
+    parts: Vec<bool>,
+    large: bool,
+    cancel: Arc<AtomicBool>,
+}
+impl Peer {
+    pub async fn connect(
+        source: &FileSource,
+        file: &FileLink,
+        identity: [u8; 16],
+        client_id: u32,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Self> {
+        check_cancel(&cancel)?;
+        let host = source.host.context("Low-ID peer needs a callback")?;
+        if source.requires_callback || source.port == 0 {
+            bail!("peer requires an incoming callback");
+        }
+        let open = async {
+            let mut stream = TcpStream::connect((host, source.port)).await?;
+            stream.set_nodelay(true)?;
+            send(&mut stream, 0xe3, 1, &hello(identity, client_id)).await?;
+            let large = loop {
+                let (protocol, op, data) = frame(&mut stream).await?;
+                match (protocol, op) {
+                    (0xe3, 0x4c) => break hello_answer(&data)?,
+                    (0xc5, 1) => send(&mut stream, 0xc5, 2, &[60, 1, 0, 0, 0, 0]).await?,
+                    _ => {}
+                }
+            };
+            send(&mut stream, 0xe3, 0x58, &file.hash).await?;
+            if file.part_count() > 1 {
+                send(&mut stream, 0xe3, 0x4f, &file.hash).await?;
+            }
+            if file.size >= PART_SIZE {
+                send(&mut stream, 0xe3, 0x51, &file.hash).await?;
+            }
+            let mut named = false;
+            let mut status = file.part_count() == 1;
+            let mut parts = vec![true; file.part_count()];
+            let mut hashes = (file.size < PART_SIZE).then(|| vec![file.hash]);
+            while !named || !status || hashes.is_none() {
+                let (protocol, op, data) = frame(&mut stream).await?;
+                if protocol == 0xc5 && op == 1 {
+                    send(&mut stream, 0xc5, 2, &[60, 1, 0, 0, 0, 0]).await?;
+                    continue;
+                }
+                if protocol != 0xe3 {
+                    continue;
+                }
+                match op {
+                    0x48 => bail!("peer does not share the requested file"),
+                    0x59 => {
+                        let mut r = Reader::new(&data);
+                        if r.take(16)? != file.hash {
+                            bail!("peer filename response hash mismatch");
+                        }
+                        let len = r.u16()? as usize;
+                        r.take(len)?;
+                        if r.pos != data.len() {
+                            bail!("invalid filename response length");
+                        }
+                        named = true;
+                    }
+                    0x50 => {
+                        let mut r = Reader::new(&data);
+                        if r.take(16)? != file.hash {
+                            bail!("peer status response hash mismatch");
+                        }
+                        let count = r.u16()? as usize;
+                        if count != 0 && count != parts.len() {
+                            bail!("peer part count does not match file");
+                        }
+                        let bits = r.take(count.div_ceil(8))?;
+                        if r.pos != data.len() {
+                            bail!("invalid peer status length");
+                        }
+                        if count != 0 {
+                            for (i, part) in parts.iter_mut().enumerate() {
+                                *part = bits[i / 8] & (1 << (i % 8)) != 0;
+                            }
+                        }
+                        status = true;
+                    }
+                    0x52 => {
+                        let mut r = Reader::new(&data);
+                        if r.take(16)? != file.hash {
+                            bail!("peer hashset response hash mismatch");
+                        }
+                        let count = r.u16()? as usize;
+                        if data.len() != 18 + count * 16 {
+                            bail!("invalid peer hashset length");
+                        }
+                        let mut values = Vec::with_capacity(count);
+                        for _ in 0..count {
+                            values.push(r.take(16)?.try_into()?);
+                        }
+                        hashes = Some(file.validate_hashset(values)?);
+                    }
+                    _ => {}
+                }
+            }
+            Ok::<_, anyhow::Error>((
+                stream,
+                large,
+                parts,
+                hashes.context("missing peer hashset")?,
+            ))
+        };
+        let (stream, large, parts, hashes) = tokio::select! {
+            result=tokio::time::timeout(Duration::from_secs(30),open)=>result.context("ED2K peer handshake timed out")??,
+            _=cancelled(&cancel)=>bail!("ED2K transfer cancelled"),
+        };
+        Ok(Self {
+            stream,
+            file: file.clone(),
+            hashes,
+            parts,
+            large,
+            cancel,
+        })
+    }
+    async fn receive(&mut self) -> Result<(u8, u8, Vec<u8>)> {
+        tokio::select! {
+            result=tokio::time::timeout(Duration::from_secs(30),frame(&mut self.stream))=>result.context("ED2K peer read timed out")?,
+            _=cancelled(&self.cancel)=>bail!("ED2K transfer cancelled"),
+        }
+    }
+    pub fn has_part(&self, index: usize) -> bool {
+        self.parts.get(index).copied().unwrap_or(false)
+    }
+    pub async fn acquire_slot(&mut self, mut queued: impl FnMut(u32)) -> Result<()> {
+        send(&mut self.stream, 0xe3, 0x54, &self.file.hash).await?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+        loop {
+            let (protocol, op, data) = tokio::time::timeout_at(deadline, self.receive())
+                .await
+                .context("peer queue wait timed out")??;
+            match (protocol, op) {
+                (0xe3, 0x55) => return Ok(()),
+                (0xe3, 0x48 | 0x57) => bail!("peer upload slot unavailable"),
+                (0xe3, 0x5c) => {
+                    let mut r = Reader::new(&data);
+                    queued(r.u32()?);
+                }
+                (0xc5, 0x60) => {
+                    let mut r = Reader::new(&data);
+                    queued(r.u16()? as u32);
+                }
+                _ => {}
+            }
+        }
+    }
+    pub async fn part(&mut self, index: usize) -> Result<Vec<u8>> {
+        check_cancel(&self.cancel)?;
+        if !self.has_part(index) {
+            bail!("peer does not have this part");
+        }
+        let start = index as u64 * PART_SIZE;
+        let mut part = Vec::with_capacity(self.file.part_len(index));
+        while part.len() < self.file.part_len(index) {
+            let from = start + part.len() as u64;
+            let end = (from + BLOCK_SIZE).min(start + self.file.part_len(index) as u64);
+            let wide = end > u32::MAX as u64;
+            if wide && !self.large {
+                bail!("peer does not support 64-bit file offsets");
+            }
+            let mut request = self.file.hash.to_vec();
+            if wide {
+                for offset in [from, 0, 0, end, 0, 0] {
+                    request.extend(offset.to_le_bytes());
+                }
+            } else {
+                for offset in [from, 0, 0, end, 0, 0] {
+                    request.extend((offset as u32).to_le_bytes());
+                }
+            }
+            send(
+                &mut self.stream,
+                if wide { 0xc5 } else { 0xe3 },
+                if wide { 0xa3 } else { 0x47 },
+                &request,
+            )
+            .await?;
+            let mut block = vec![0; (end - from) as usize];
+            let mut covered = vec![false; block.len()];
+            let mut remaining = block.len();
+            let mut compressed = Vec::new();
+            let mut compressed_size = None;
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+            while remaining > 0 {
+                let (protocol, op, data) = tokio::time::timeout_at(deadline, self.receive())
+                    .await
+                    .context("peer block timed out")??;
+                match (protocol, op) {
+                    (0xe3, 0x48 | 0x57) => bail!("peer stopped the transfer"),
+                    (0xe3, 0x46) | (0xc5, 0xa2) => {
+                        let mut r = Reader::new(&data);
+                        if r.take(16)? != self.file.hash {
+                            bail!("peer block hash mismatch");
+                        }
+                        let (a, b) = if op == 0xa2 {
+                            (r.u64()?, r.u64()?)
+                        } else {
+                            (r.u32()? as u64, r.u32()? as u64)
+                        };
+                        if a < from
+                            || b > end
+                            || b <= a
+                            || data.len() - r.pos != (b - a) as usize
+                            || !compressed.is_empty()
+                        {
+                            bail!("peer block exceeds requested range");
+                        }
+                        let range = (a - from) as usize..(b - from) as usize;
+                        if covered[range.clone()].iter().any(|b| *b) {
+                            bail!("peer sent overlapping data");
+                        }
+                        remaining -= range.len();
+                        block[range.clone()].copy_from_slice(&data[r.pos..]);
+                        covered[range].fill(true);
+                    }
+                    (0xc5, 0x40 | 0xa1) => {
+                        let mut r = Reader::new(&data);
+                        if r.take(16)? != self.file.hash {
+                            bail!("compressed peer block hash mismatch");
+                        }
+                        let offset = if op == 0xa1 {
+                            r.u64()?
+                        } else {
+                            r.u32()? as u64
+                        };
+                        let total = r.u32()? as usize;
+                        if offset != from
+                            || total == 0
+                            || total > block.len() + 65536
+                            || compressed_size.is_some_and(|n| n != total)
+                            || remaining != block.len()
+                        {
+                            bail!("invalid compressed peer block");
+                        }
+                        compressed_size = Some(total);
+                        if compressed.len() + data.len() - r.pos > total {
+                            bail!("compressed peer block exceeds declared length");
+                        }
+                        compressed.extend(&data[r.pos..]);
+                        if compressed.len() == total {
+                            let mut decoded = Vec::new();
+                            flate2::read::ZlibDecoder::new(&compressed[..])
+                                .take(block.len() as u64 + 1)
+                                .read_to_end(&mut decoded)?;
+                            if decoded.len() != block.len() {
+                                bail!("compressed peer block size mismatch");
+                            }
+                            block = decoded;
+                            remaining = 0;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            part.extend(block);
+        }
+        if super::file::digest(&part) != self.hashes[index] {
+            bail!("ED2K part failed MD4 verification");
+        }
+        Ok(part)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ed2k::file::digest;
+    #[tokio::test]
+    async fn large_file_peer_uses_64_bit_requests_and_responses() {
+        let index = 442usize;
+        let offset = index as u64 * PART_SIZE;
+        assert!(offset > u32::MAX as u64);
+        let bytes = b"abc";
+        let mut hashes = vec![[1; 16]; index];
+        hashes.push(digest(bytes));
+        let file = FileLink {
+            name: "large.bin".into(),
+            size: offset + 3,
+            hash: digest(&hashes.concat()),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let served = file.clone();
+        let fixture = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            assert_eq!(frame(&mut stream).await.unwrap().1, 1);
+            let answer = hello([7; 16], 123);
+            send(&mut stream, 0xe3, 0x4c, &answer[1..]).await.unwrap();
+            for _ in 0..3 {
+                let (_, op, _) = frame(&mut stream).await.unwrap();
+                let mut answer = served.hash.to_vec();
+                let reply = match op {
+                    0x58 => {
+                        answer.extend(1u16.to_le_bytes());
+                        answer.push(b'x');
+                        0x59
+                    }
+                    0x4f => {
+                        answer.extend((served.part_count() as u16).to_le_bytes());
+                        answer.extend(vec![255; served.part_count().div_ceil(8)]);
+                        0x50
+                    }
+                    0x51 => {
+                        answer.extend((hashes.len() as u16).to_le_bytes());
+                        answer.extend(hashes.concat());
+                        0x52
+                    }
+                    _ => panic!("unexpected peer request"),
+                };
+                send(&mut stream, 0xe3, reply, &answer).await.unwrap();
+            }
+            assert_eq!(frame(&mut stream).await.unwrap().1, 0x54);
+            send(&mut stream, 0xe3, 0x55, &[]).await.unwrap();
+            let (protocol, op, request) = frame(&mut stream).await.unwrap();
+            assert_eq!((protocol, op), (0xc5, 0xa3));
+            assert_eq!(request.len(), 64);
+            assert_eq!(
+                u64::from_le_bytes(request[16..24].try_into().unwrap()),
+                offset
+            );
+            assert_eq!(
+                u64::from_le_bytes(request[40..48].try_into().unwrap()),
+                offset + 3
+            );
+            let mut answer = served.hash.to_vec();
+            answer.extend(offset.to_le_bytes());
+            answer.extend((offset + 3).to_le_bytes());
+            answer.extend(bytes);
+            send(&mut stream, 0xc5, 0xa2, &answer).await.unwrap();
+        });
+        let source = FileSource {
+            client_id: 0x0100007f,
+            host: Some(std::net::Ipv4Addr::LOCALHOST),
+            port,
+            requires_callback: false,
+        };
+        let mut peer = Peer::connect(
+            &source,
+            &file,
+            [2; 16],
+            123,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+        peer.acquire_slot(|_| {}).await.unwrap();
+        assert_eq!(peer.part(index).await.unwrap(), bytes);
+        fixture.await.unwrap();
+    }
+}

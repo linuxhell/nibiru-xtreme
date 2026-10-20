@@ -50,11 +50,17 @@ The HTTP and ED2K/Kad foundations remain available.
 
 The `ed2k` Rust module implements bounded `server.met` and Kad2 `nodes.dat`
 parsers, HTTPS-only list fetching, ED2K login acknowledged by OP_IDCHANGE,
-server search and a Kad2 UDP bootstrap probe. Tests exchange actual wire packets
+server search, correlated source discovery and a Kad2 UDP bootstrap probe. Tests exchange actual wire packets
 with local TCP/UDP fixtures. Connection state is not inferred from a TCP connect
 alone. Packet sizes, decompression and result counts have explicit limits.
 
-Kad bootstrap is **not** persistent Kad routing. Peer downloads/uploads, upload
+Native high-ID peer downloads support baseline hello/file/status/hashset/queue
+and 32-bit or 64-bit block packets, split compressed blocks, MD4 part verification
+and resume by rehashing saved parts. Hashsets must match the ED2K root before
+parts are trusted. Files stay under a partial name until sync and no-clobber
+finalization. Names are validated as a single Windows-compatible filename.
+
+Kad bootstrap is **not** persistent Kad routing. Low-ID peer callbacks, uploads, upload
 queues, credits, AICH, peer obfuscation, Kad lookup/publishing, messaging and
 full aMule parity are not implemented. BitTorrent/Magnet, DHT/PEX/uTP and hole
 punching also remain pending. The alpha must not be advertised as complete.
@@ -85,3 +91,13 @@ Rustls trust checks are not disabled to accommodate it.
 Primary implementation API references:
 [SuppaFTP](https://docs.rs/suppaftp/), [Russh](https://docs.rs/russh/),
 [russh-sftp](https://docs.rs/russh-sftp/), [Reqwest](https://docs.rs/reqwest/).
+
+
+Peer transfer validation uses real local TCP sockets: compressed and fragmented
+blocks, an out-of-order raw response, a resumed multipart file, an independently
+verified MD4 test vector, exact ED2K part-boundary hashing, corrupted data and
+hashsets, cancellation during a stalled handshake, 64-bit offsets beyond 4 GiB,
+and a destination-created-during-finalization race. These fixtures do not prove
+interoperability with every public client or server. Transfers currently use
+one peer and one bounded block request at a time, rotate across up to 16 supplied
+direct sources and retain verified partial data on incomplete attempts.
