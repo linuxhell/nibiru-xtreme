@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod bittorrent;
 pub mod ed2k;
 pub mod engine;
 pub mod logging;
