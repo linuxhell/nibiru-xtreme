@@ -1,3 +1,13 @@
+# REPOSITÓRIOS (abrir estes 3 na nova tela)
+
+| # | Repositório | URL | Branch com o trabalho | Último commit enviado | Papel |
+|---|---|---|---|---|---|
+| 1 | nibiru-xtreme | https://github.com/linuxhell/nibiru-xtreme | `claude/amazing-newton-0qce70` | `dd8555a` (este arquivo está na raiz) | Motor: HTTP, ED2K, BitTorrent, RPC compatível com aria2 |
+| 2 | apocalipse-download-manager | https://github.com/linuxhell/apocalipse-download-manager | `claude/amazing-newton-0qce70` | `bb3f2d7` | ADM (Tauri v2) — onde a troca do aria2 será feita |
+| 3 | nibiru-m3u8 | https://github.com/linuxhell/nibiru-m3u8 | `claude/amazing-newton-0qce70` (release **v0.2.0** já publicada) | `6a95219` | Substituto do N_m3u8DL-RE |
+
+Tudo acima está **enviado ao GitHub** (nada só local). Comece pelo repo 1 (ler este arquivo) e abra os outros dois como diretórios adicionais. Nenhum PR foi aberto; o PR #109 do ADM é rascunho do ChatGPT.
+
 # Retomada completa — Claude → ChatGPT (Nibiru-Xtreme + ADM + nibiru-m3u8)
 
 Data: 2026-10-20. Objetivo do usuário: terminar o que o ChatGPT começou (ED2K/Kad), tornar o **Nibiru-Xtreme** o motor de download do ADM (HTTP, ED2K e Magnet/BitTorrent) no lugar do aria2-ultra, permitir **assistir vídeo enquanto baixa também em BitTorrent**, e só depois trocar o N_m3u8DL-RE pelo **nibiru-m3u8**. O usuário quer progresso prático, não relatórios; status alpha/beta deve continuar honesto (nada de "completo" sem teste).
