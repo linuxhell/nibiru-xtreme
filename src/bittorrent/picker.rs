@@ -253,6 +253,28 @@ impl Picker {
         None
     }
 
+    /// Reserves one whole untouched piece for a source that fetches complete pieces (a web seed).
+    /// The caller finishes it through `mark_have` / `piece_failed` / `release_peer`.
+    pub fn claim_piece(&mut self, peer: PeerId) -> Option<usize> {
+        let allow = |s: &Self, p: usize| s.wanted.get(p) && !s.have.get(p);
+        let piece = self
+            .pick_window(&allow)
+            .map(|(p, _)| p)
+            .filter(|p| !self.progress.contains_key(p))
+            .or_else(|| self.pick_new(&allow).map(|(p, _)| p))?;
+        let blocks = self.block_count(piece);
+        self.progress.insert(
+            piece,
+            Progress {
+                blocks: vec![Block::Requested; blocks],
+            },
+        );
+        for index in 0..blocks as u32 {
+            self.asked.insert((piece, index), vec![peer]);
+        }
+        Some(piece)
+    }
+
     // ---- results ------------------------------------------------------------------------
 
     /// A block arrived. Returns `Some(other peers to CANCEL)` the first time it is accepted,
@@ -512,6 +534,18 @@ mod tests {
         let mut allowed = Bitfield::new(3);
         allowed.set(2);
         assert_eq!(p.next_block(1, &all(3), &allowed).unwrap().piece, 2);
+    }
+
+    #[test]
+    fn a_claimed_piece_is_exclusive_until_released() {
+        let mut p = picker(2);
+        let first = p.claim_piece(9).unwrap();
+        let second = p.claim_piece(10).unwrap();
+        assert_ne!(first, second);
+        assert!(p.claim_piece(11).is_none(), "everything is reserved");
+        // Block-level peers do not get blocks of a reserved piece, except as endgame duplicates.
+        p.release_peer(9);
+        assert_eq!(p.claim_piece(11), Some(first));
     }
 
     #[test]

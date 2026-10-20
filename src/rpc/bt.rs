@@ -537,7 +537,10 @@ fn files_json(status: &TorrentStatus, task: &BtTask) -> Value {
                     "length": f.length.to_string(),
                     "completedLength": f.completed.to_string(),
                     "selected": f.selected.to_string(),
-                    "uris": [],
+                    "uris": status.web_seeds.iter().filter(|w| !w.failed).map(|w| json!({
+                        "uri": w.url,
+                        "status": if w.active { "used" } else { "waiting" },
+                    })).collect::<Vec<_>>(),
                 })
             })
             .collect(),

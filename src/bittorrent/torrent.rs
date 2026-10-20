@@ -110,6 +110,25 @@ pub struct PeerEntry {
     pub since: Instant,
 }
 
+pub struct WebSeedState {
+    pub url: String,
+    /// Workers currently transferring from it.
+    pub active: u32,
+    pub downloaded: u64,
+    pub failures: u32,
+    /// Given up on (wrong layout, repeated failures, bad data).
+    pub disabled: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSeedStatus {
+    pub url: String,
+    pub active: bool,
+    pub downloaded: u64,
+    pub failed: bool,
+}
+
 pub struct MetadataFetch {
     pub size: usize,
     pub pieces: Vec<Option<Vec<u8>>>,
@@ -159,6 +178,7 @@ pub struct Core {
     pub stream_touch: Option<Instant>,
     pub private: bool,
     pub paused: bool,
+    pub web_seeds: Vec<WebSeedState>,
     /// Peers we were connected to when paused; retried on resume.
     pub resume_peers: Vec<SocketAddr>,
 }
@@ -392,6 +412,7 @@ pub struct TorrentStatus {
     pub metadata_done: u64,
     pub files: Vec<FileStatus>,
     pub peers: Vec<PeerStatus>,
+    pub web_seeds: Vec<WebSeedStatus>,
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -457,6 +478,18 @@ impl TorrentHandle {
             stream_touch: None,
             private,
             paused: false,
+            web_seeds: start
+                .extras
+                .web_seeds
+                .iter()
+                .map(|url| WebSeedState {
+                    url: url.clone(),
+                    active: 0,
+                    downloaded: 0,
+                    failures: 0,
+                    disabled: false,
+                })
+                .collect(),
             resume_peers: Vec::new(),
         };
         for peer in &settings.peers {
@@ -537,6 +570,16 @@ impl TorrentHandle {
             metadata_done: 0,
             files: Vec::new(),
             peers: Vec::new(),
+            web_seeds: core
+                .web_seeds
+                .iter()
+                .map(|w| WebSeedStatus {
+                    url: w.url.clone(),
+                    active: w.active > 0,
+                    downloaded: w.downloaded,
+                    failed: w.disabled,
+                })
+                .collect(),
         };
         if let Phase::Checking { done, total } = &core.phase {
             status.checking = Some((*done, *total));
@@ -924,6 +967,7 @@ pub(crate) async fn install_metadata(shared: &Arc<Shared>, torrent: Torrent) {
     }
     shared.progress.notify_waiters();
     shared.wake.notify_one();
+    super::webseed::spawn_workers(shared);
 }
 
 fn fail(shared: &Arc<Shared>, message: String) {

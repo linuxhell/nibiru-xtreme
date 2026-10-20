@@ -99,7 +99,7 @@ pub(crate) fn is_private(ip: IpAddr) -> bool {
 }
 
 /// Resolves `host` and keeps only addresses the policy allows.
-async fn resolve(host: &str, port: u16, allow_private: bool) -> Result<Vec<SocketAddr>> {
+pub(crate) async fn resolve(host: &str, port: u16, allow_private: bool) -> Result<Vec<SocketAddr>> {
     // `Url::host_str` keeps the brackets of an IPv6 literal; the resolver wants the bare address.
     let host = host.trim_start_matches('[').trim_end_matches(']');
     let addresses: Vec<SocketAddr> = lookup_host((host, port)).await?.collect();
@@ -108,7 +108,7 @@ async fn resolve(host: &str, port: u16, allow_private: bool) -> Result<Vec<Socke
         .filter(|a| allow_private || !is_private(a.ip()))
         .collect();
     if allowed.is_empty() {
-        bail!("tracker {host} resolves only to local or private addresses");
+        bail!("{host} resolves only to local or private addresses");
     }
     Ok(allowed)
 }

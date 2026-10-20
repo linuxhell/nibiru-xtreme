@@ -494,3 +494,173 @@ async fn a_bare_magnet_link_finds_the_swarm_through_the_dht() {
     handle.wait_complete(Duration::from_secs(30)).await.unwrap();
     verify(out.path(), &fx);
 }
+
+// ---- BEP 19 web seeds ------------------------------------------------------------------------
+
+/// A tiny static file server with Range support. `corrupt` flips bytes in everything it serves.
+async fn web_server(root: std::path::PathBuf, corrupt: bool) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!(
+        "http://127.0.0.1:{}/files/",
+        listener.local_addr().unwrap().port()
+    );
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let root = root.clone();
+            tokio::spawn(async move {
+                let mut buffer = vec![0u8; 8192];
+                let n = stream.read(&mut buffer).await.unwrap_or(0);
+                let head = String::from_utf8_lossy(&buffer[..n]).into_owned();
+                let path = head.split_whitespace().nth(1).unwrap_or("/").to_owned();
+                let relative = percent_decode(path.trim_start_matches("/files/"));
+                let file = root.join(relative);
+                let Ok(mut data) = std::fs::read(&file) else {
+                    let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+                    return;
+                };
+                if corrupt {
+                    for b in data.iter_mut().step_by(997) {
+                        *b ^= 0x55;
+                    }
+                }
+                let range = head.lines().find_map(|l| {
+                    l.to_ascii_lowercase()
+                        .strip_prefix("range: bytes=")
+                        .map(str::to_owned)
+                });
+                let reply = match range.and_then(|r| {
+                    let (a, b) = r.trim().split_once('-')?;
+                    Some((a.parse::<usize>().ok()?, b.parse::<usize>().ok()?))
+                }) {
+                    Some((a, b)) if a < data.len() => {
+                        let b = b.min(data.len() - 1);
+                        let body = &data[a..=b];
+                        let mut out = format!(
+                            "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {a}-{b}/{}\r\nConnection: close\r\n\r\n",
+                            body.len(),
+                            data.len()
+                        )
+                        .into_bytes();
+                        out.extend_from_slice(body);
+                        out
+                    }
+                    _ => {
+                        let mut out = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            data.len()
+                        )
+                        .into_bytes();
+                        out.extend_from_slice(&data);
+                        out
+                    }
+                };
+                let _ = stream.write_all(&reply).await;
+            });
+        }
+    });
+    base
+}
+
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() + 0 && i + 2 <= bytes.len() - 1 {
+            if let Ok(v) = u8::from_str_radix(&text[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn with_web_seed(fx: &Fixture, url: &str) -> Torrent {
+    let with = Torrent::from_info(
+        &fx.torrent.info_bytes,
+        Extras {
+            trackers: vec![],
+            web_seeds: vec![url.to_owned()],
+        },
+    )
+    .unwrap();
+    Torrent::from_torrent_file(&with.to_torrent_file()).unwrap()
+}
+
+#[tokio::test]
+async fn a_web_seed_alone_can_deliver_a_multi_file_torrent() {
+    let fx = fixture();
+    let host = tempfile::tempdir().unwrap();
+    seed_files(host.path(), &fx);
+    let base = web_server(host.path().to_owned(), false).await;
+    let torrent = with_web_seed(&fx, &base);
+    assert_eq!(torrent.web_seeds, vec![base.clone()]);
+
+    let out = tempfile::tempdir().unwrap();
+    let leech = session().await; // no peers, no tracker, no DHT
+    let handle = leech.add_torrent(torrent, local_settings(out.path()));
+    handle.wait_complete(Duration::from_secs(30)).await.unwrap();
+    verify(out.path(), &fx);
+    let status = handle.status();
+    assert_eq!(status.web_seeds.len(), 1);
+    assert!(
+        status.web_seeds[0].downloaded >= 1_123_334,
+        "{:?}",
+        status.web_seeds
+    );
+    assert!(!status.web_seeds[0].failed);
+}
+
+#[tokio::test]
+async fn corrupt_web_seed_data_never_reaches_the_disk_and_the_seed_is_dropped() {
+    let fx = fixture();
+    let host = tempfile::tempdir().unwrap();
+    seed_files(host.path(), &fx);
+    let base = web_server(host.path().to_owned(), true).await;
+    let torrent = with_web_seed(&fx, &base);
+    let out = tempfile::tempdir().unwrap();
+    let leech = session().await;
+    let handle = leech.add_torrent(torrent, local_settings(out.path()));
+    for _ in 0..100 {
+        if handle.status().web_seeds[0].failed {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let status = handle.status();
+    assert!(
+        status.web_seeds[0].failed,
+        "the lying server was given up on"
+    );
+    assert_eq!(status.pieces_done, 0, "not one corrupt piece was accepted");
+}
+
+#[tokio::test]
+async fn web_seeds_on_private_addresses_are_refused_by_default() {
+    let fx = fixture();
+    let host = tempfile::tempdir().unwrap();
+    seed_files(host.path(), &fx);
+    let base = web_server(host.path().to_owned(), false).await;
+    let torrent = with_web_seed(&fx, &base);
+    let out = tempfile::tempdir().unwrap();
+    // Default policy: no loopback/private targets (a torrent must not probe the local network).
+    let leech = Session::start(SessionConfig {
+        bind: "127.0.0.1".parse().unwrap(),
+        allow_private_trackers: false,
+        ..SessionConfig::default()
+    })
+    .await
+    .unwrap();
+    let handle = leech.add_torrent(torrent, local_settings(out.path()));
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(handle.status().pieces_done, 0);
+    assert_eq!(handle.status().web_seeds[0].downloaded, 0);
+}

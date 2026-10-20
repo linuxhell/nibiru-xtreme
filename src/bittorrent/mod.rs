@@ -14,3 +14,4 @@ pub mod storage;
 pub mod stream;
 pub mod torrent;
 pub mod tracker;
+pub mod webseed;
