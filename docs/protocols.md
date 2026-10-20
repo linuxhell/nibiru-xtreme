@@ -60,7 +60,13 @@ and resume by rehashing saved parts. Hashsets must match the ED2K root before
 parts are trusted. Files stay under a partial name until sync and no-clobber
 finalization. Names are validated as a single Windows-compatible filename.
 
-Kad bootstrap is **not** persistent Kad routing. Low-ID peer callbacks, uploads, upload
+An incoming TCP hello/probe service advertises its real bound port. Server-mediated
+Low-ID callbacks can feed verified downloads when the requester has a reachable
+High-ID session. Pending callbacks are bounded, correlated to the peer client ID,
+and removed on cancellation. This does not solve two firewalled peers or NAT
+traversal. Incoming file requests do not share arbitrary local files.
+
+Kad bootstrap is **not** persistent Kad routing. Uploads, upload
 queues, credits, AICH, peer obfuscation, Kad lookup/publishing, messaging and
 full aMule parity are not implemented. BitTorrent/Magnet, DHT/PEX/uTP and hole
 punching also remain pending. The alpha must not be advertised as complete.
@@ -101,3 +107,8 @@ and a destination-created-during-finalization race. These fixtures do not prove
 interoperability with every public client or server. Transfers currently use
 one peer and one bounded block request at a time, rotate across up to 16 supplied
 direct sources and retain verified partial data on incomplete attempts.
+
+Incoming TCP tests exercise the advertised identity and no-file responses. A real
+TCP server/callback fixture requests a Low-ID source through OP_CALLBACKREQUEST,
+rejects routing an unrelated incoming client ID, then completes and verifies the
+requested file over the matching incoming connection.

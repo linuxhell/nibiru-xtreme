@@ -2,6 +2,7 @@
 //! Implemented independently against the on-wire formats; see docs/protocols.md.
 mod file;
 mod kad;
+mod listener;
 pub mod metadata;
 mod peer;
 mod server;
@@ -9,8 +10,11 @@ mod transfer;
 
 pub use file::FileLink;
 pub use kad::{BootstrapResult, bootstrap};
+pub use listener::{CallbackClient, CallbackRegistry, IncomingListener, IncomingStatus};
 pub use server::{FileSource, SearchResult, ServerConnection};
-pub use transfer::{TransferProgress, TransferStage, download_from_sources};
+pub use transfer::{
+    TransferOptions, TransferProgress, TransferStage, download_from_sources, download_with_options,
+};
 pub const SERVER_LIST_URL: &str = "https://upd.emule-security.org/server.met";
 pub const NODE_LIST_URL: &str = "https://upd.emule-security.org/nodes.dat";
 

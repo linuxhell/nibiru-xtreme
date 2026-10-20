@@ -28,6 +28,11 @@ pub struct TransferProgress {
     pub peer: Option<String>,
     pub queue_rank: Option<u32>,
 }
+pub struct TransferOptions {
+    pub identity: [u8; 16],
+    pub client_id: u32,
+    pub callbacks: Option<super::CallbackClient>,
+}
 
 /// Download from server-discovered high-ID peers. Successful parts survive
 /// interruption. Every resumed part is read and hashed again, without trusting
@@ -38,6 +43,28 @@ pub async fn download_from_sources(
     sources: &[FileSource],
     identity: [u8; 16],
     client_id: u32,
+    cancel: Arc<AtomicBool>,
+    progress: impl FnMut(TransferProgress),
+) -> Result<PathBuf> {
+    download_with_options(
+        file,
+        directory,
+        sources,
+        TransferOptions {
+            identity,
+            client_id,
+            callbacks: None,
+        },
+        cancel,
+        progress,
+    )
+    .await
+}
+pub async fn download_with_options(
+    file: &FileLink,
+    directory: &Path,
+    sources: &[FileSource],
+    options: TransferOptions,
     cancel: Arc<AtomicBool>,
     mut progress: impl FnMut(TransferProgress),
 ) -> Result<PathBuf> {
@@ -82,15 +109,18 @@ pub async fn download_from_sources(
     let mut scanned = false;
     let mut verified = 0u64;
     let mut last_error =
-        anyhow!("no directly reachable ED2K sources; Low-ID callbacks are not implemented yet");
+        anyhow!("no usable ED2K sources; a reachable callback route may be required");
     // Bounded attempt count avoids unbounded connections to a server-supplied list.
     for source in sources
         .iter()
-        .filter(|s| s.host.is_some() && !s.requires_callback)
+        .filter(|s| (s.host.is_some() && !s.requires_callback) || options.callbacks.is_some())
         .take(16)
     {
         check_cancel(&cancel)?;
-        let host = source.host.map(|h| format!("{h}:{}", source.port));
+        let host = source
+            .host
+            .map(|h| format!("{h}:{}", source.port))
+            .or_else(|| Some(format!("ID {}", source.client_id)));
         progress(TransferProgress {
             stage: TransferStage::Connecting,
             verified,
@@ -98,8 +128,22 @@ pub async fn download_from_sources(
             peer: host.clone(),
             queue_rank: None,
         });
-        let mut peer = match Peer::connect(source, file, identity, client_id, cancel.clone()).await
-        {
+        let connected = if source.requires_callback {
+            match &options.callbacks {
+                Some(callbacks) => callbacks.connect(source, file, cancel.clone()).await,
+                None => Err(anyhow!("source needs a callback route")),
+            }
+        } else {
+            Peer::connect(
+                source,
+                file,
+                options.identity,
+                options.client_id,
+                cancel.clone(),
+            )
+            .await
+        };
+        let mut peer = match connected {
             Ok(peer) => peer,
             Err(error) => {
                 last_error = error;

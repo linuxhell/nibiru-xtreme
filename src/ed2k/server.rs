@@ -194,6 +194,7 @@ type PendingSources = ([u8; 16], SourceReply);
 enum Command {
     Search(String, oneshot::Sender<Result<Vec<SearchResult>>>),
     Sources([u8; 16], SourceReply),
+    Callback(u32, oneshot::Sender<Result<()>>),
 }
 struct Inner {
     commands: mpsc::Sender<Command>,
@@ -301,6 +302,12 @@ impl ServerConnection {
                             pending_sources=Some((hash,reply));
                             source_deadline=tokio::time::Instant::now()+Duration::from_secs(20);
                         },
+                        Some(Command::Callback(id,reply)) => {
+                            match tokio::time::timeout(Duration::from_secs(10),send(&mut writer,0x1c,&id.to_le_bytes())).await {
+                                Ok(Ok(()))=>{let _=reply.send(Ok(()));},
+                                error=>{let _=reply.send(Err(anyhow!("cannot request ED2K callback: {error:?}")));break;},
+                            }
+                        },
                         None => break,
                     },
                     packet = incoming.recv() => match packet {
@@ -352,6 +359,23 @@ impl ServerConnection {
     }
     pub fn is_low_id(&self) -> bool {
         self.client_id < 0x0100_0000
+    }
+    pub async fn request_callback(&self, id: u32) -> Result<()> {
+        if id == 0 || id >= 0x0100_0000 || self.is_low_id() {
+            bail!("invalid ED2K callback route");
+        }
+        if !self.is_connected() {
+            bail!("ED2K server is disconnected");
+        }
+        let (reply, response) = oneshot::channel();
+        self.inner
+            .commands
+            .send(Command::Callback(id, reply))
+            .await
+            .context("ED2K server disconnected")?;
+        response
+            .await
+            .context("ED2K server disconnected during callback")?
     }
     /// Ask the connected server for sources using the baseline OP_GETSOURCES
     /// hash-only packet. This does not connect to peers or request callbacks.
