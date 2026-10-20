@@ -75,3 +75,44 @@ O ChatGPT deve acompanhar o CI até ficar **verde nas 3 plataformas** e só ent�
 5. Com o CI verde, disparar `release.yml` (input `tag` pré-lançamento) e conferir os 3 assets `nibiru-xtreme-<versão>-…` + `.sha256`. Só depois mexer no ADM para apontar para esse release.
 6. O mesmo vale para o CI do ADM (`test-build.yml`/`release.yml` e testes Rust/Node) após cada mudança de troca de motor: monitorar até o fim e avisar o usuário quando o release do ADM sair.
 7. Estado no momento desta nota: último run do Nibiru-Xtreme disparado às 12:33 UTC (commit "Test helper only used on Linux") ainda sem resultado confirmado; o Claude tem lembrete agendado para conferi-lo.
+
+---
+
+# Apêndice — Tudo que o Claude fez, em ordem, e o que falta (checklist consolidado)
+
+## A. Feito
+
+### A1. nibiru-m3u8 (repo `linuxhell/nibiru-m3u8`, release **v0.2.0** publicada)
+Binário Rust leve (Windows x64, Linux x64 tar.gz, macOS x64) que substitui o N_m3u8DL-RE. Entregue e testado: HLS (VOD/live, AES-128, **SAMPLE-AES** incl. AC-3/E-AC-3 em TS), **DASH** (SegmentTemplate/List/Base com sidx, multi-período), **ClearKey** (licença W3C e chaves do usuário), **legendas** (HLS WebVTT, DASH VTT/TTML/wvtt/stpp/tx3g, sidecars srt/vtt), **gravação de live contínua com retomada**, **modo progressivo** (assistir enquanto baixa), subcomando **`convert`** (m4a/aac sem perda, WAV/FLAC nativos, ffmpeg só para recodificar), READMEs em pt-BR/inglês/chinês simplificado, CI e release por `workflow_dispatch`. Commits-chave: `9cf89e9`, `39faf72`, `6a95219`. DRM Widevine/PlayReady/FairPlay (obtenção de chave) foi recusado deliberadamente.
+
+### A2. ED2K no Nibiru-Xtreme e no ADM (retomada do arquivo `RETOMADA_CLAUDE_APOCALIPSE_ED2K_NIBIRU.md`)
+- Nibiru: `030cf09` servir arquivos compartilhados; `cc27657` fila de upload (slots, rate limit, ranges 64-bit, estatísticas); `cc7693a` publicação `OP_OFFERFILES`, prioridades, cache de hash, rescan; `b36859f` `scan_directory` com progresso. Testes de socket real (`tests/ed2k_upload.rs`).
+- ADM (`bb3f2d7`, pin do Nibiru atualizado): backend `ed2k_ui/shares.rs` + comandos Tauri, abas **Compartilhados** e **Uploads**, persistência, i18n en/pt-BR/zh-CN, testes Node (vm) e Rust (5 unitários em `shares.rs`), doc `docs/ed2k-kad-native.md`.
+
+### A3. BitTorrent nativo no Nibiru-Xtreme (substitui a necessidade do aria2 para torrents)
+`e514a4a` bencode/metainfo/magnet/trackers · `f286f68` bitfield, codec de mensagens, storage multi-arquivo com retomada · `4e0d9ef` picker (rarest-first, janela de streaming, endgame) · `beeba84` engine de peers (BEP9/10/11, fast, choker, seeding, seleção de arquivos, leitura para streaming) · `4c862c4` interop com **aria2c real** · `7e64b60` servidor HTTP Range para **assistir enquanto baixa** · `d419bc1` RPC aria2-compatível para BT/magnet + modo de lançamento com os argumentos do ADM · `00c41d5` **DHT** (magnet sem tracker funciona) · `4d7149e` **web seeds** BEP19 (política SSRF) · `487b119` HTTP com headers/cookies/referer/UA/proxy/limites via RPC · `0aae349` workflow de release + notas · `35188f4`/`28ef723`/`b4db97f` correções de CI (clippy novo, caminhos Windows, helper só-Linux) · `e735ce0` este arquivo.
+
+### A4. Verificações reais já feitas
+- Binário `nibiru-xtreme` iniciado com os argumentos **exatos** do ADM: metadata-only + `bt-save-metadata` (gera `<infohash>.torrent`), download completo de magnet contra um seeder aria2c, arquivo idêntico bit a bit, `nibiru.streamUrl` com `Range` respondendo 206 correto.
+- Testes: ~115 unitários + `bittorrent_swarm` 13 + `bittorrent_interop` 3 + `dht_network` 3 + `rpc_bittorrent` 5 + `rpc_http_options` 4 + `ed2k_upload` 6, todos verdes no Linux (exceto o teste HTTP/3 ambiental do sandbox).
+
+## B. Falta fazer (o que o ChatGPT deve assumir)
+
+### B1. Imediato
+1. Confirmar CI verde (Linux/Windows/macOS) do run nº 70 em diante; corrigir o que falhar (ver seção de monitoramento acima).
+2. Rodar `release.yml` com tag pré-lançamento e validar os 3 binários + sha256; testar o binário Windows de verdade (compilação do `--stop-with-process` via `tasklist` nunca foi vista rodando no Windows).
+
+### B2. Troca do motor no ADM (tarefa #21 — **não iniciada no código do ADM**)
+Seguir o plano detalhado na seção "O que falta fazer" (repo/atualizador/nomes de executável/migração de configuração/UI/docs/CI de empacotamento) e reaproveitar os testes #14. Incluir botão/ação "assistir" para torrent usando `nibiru.streamUrl`. Verificar HTTP com cookies/referer do navegador e limite de velocidade pelo Nibiru (já suportados no RPC), e decidir se o número de conexões pedido (`split`) deve limitar os workers (hoje não limita).
+
+### B3. Nibiru-Xtreme (hardening BitTorrent)
+MSE/PE (criptografia), uTP, LSD, BitTorrent v2/híbrido, DHT IPv6 e BEP42, `addUri` de `.torrent` por URL (`follow-torrent`), `--save-session`/`--input-file`, Metalink. Sem MSE/uTP alguns peers públicos ficam inalcançáveis — avisar isso na UI/notas enquanto não existir.
+
+### B4. ED2K/Kad
+Kad persistente (routing table, lookup, busca, publicação, teste de firewall), créditos/identificação segura, AICH, ofuscação, filtro de IP, troca de fontes, multipackets; interoperar com aMule/eMule e só então anunciar as capacidades.
+
+### B5. N_m3u8DL-RE → nibiru-m3u8 (tarefa #16, depois dos itens acima)
+Instalador de ferramentas do ADM (bloco `"n-m3u8dl-re"`), adaptador de argumentos CLI, testes de HLS/DASH/legendas/live, atualização de UI/docs.
+
+### B6. Documentação e honestidade
+Atualizar README/CHANGELOG do ADM e `docs/protocols.md` do Nibiru à medida que cada item for concluído; manter "alpha" até haver teste com swarms públicos reais (nenhum teste contra a internet aberta foi feito — o sandbox não tem acesso a swarms/DNS públicos).
