@@ -8,6 +8,7 @@ mod peer;
 mod server;
 mod share;
 mod transfer;
+mod upload;
 
 pub use file::FileLink;
 pub use kad::{BootstrapResult, bootstrap};
@@ -16,6 +17,9 @@ pub use server::{FileSource, SearchResult, ServerConnection};
 pub use share::{ShareRegistry, SharedFileInfo, hash_shared_file};
 pub use transfer::{
     TransferOptions, TransferProgress, TransferStage, download_from_sources, download_with_options,
+};
+pub use upload::{
+    Admission, FileUploadStats, UploadClientInfo, UploadConfig, UploadManager, UploadSnapshot,
 };
 pub const SERVER_LIST_URL: &str = "https://upd.emule-security.org/server.met";
 pub const NODE_LIST_URL: &str = "https://upd.emule-security.org/nodes.dat";

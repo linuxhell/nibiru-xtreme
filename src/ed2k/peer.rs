@@ -14,7 +14,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
 };
 
@@ -33,7 +33,7 @@ pub(crate) fn check_cancel(cancel: &AtomicBool) -> Result<()> {
     }
     Ok(())
 }
-pub(crate) async fn frame(stream: &mut TcpStream) -> Result<(u8, u8, Vec<u8>)> {
+pub(crate) async fn frame<R: AsyncRead + Unpin>(stream: &mut R) -> Result<(u8, u8, Vec<u8>)> {
     let mut protocol = stream.read_u8().await?;
     if !matches!(protocol, 0xe3 | 0xc5 | 0xd4) {
         bail!("unsupported ED2K peer protocol");
@@ -58,8 +58,8 @@ pub(crate) async fn frame(stream: &mut TcpStream) -> Result<(u8, u8, Vec<u8>)> {
     }
     Ok((protocol, opcode, bytes))
 }
-pub(crate) async fn send(
-    stream: &mut TcpStream,
+pub(crate) async fn send<W: AsyncWrite + Unpin>(
+    stream: &mut W,
     protocol: u8,
     opcode: u8,
     bytes: &[u8],
@@ -99,24 +99,47 @@ pub(crate) fn hello(hash: [u8; 16], client_id: u32) -> Vec<u8> {
     data.extend([0; 6]);
     data
 }
-pub(crate) fn hello_answer(data: &[u8]) -> Result<bool> {
+/// What a peer told us about itself in its hello.
+#[derive(Clone, Debug)]
+pub(crate) struct HelloInfo {
+    pub user_hash: [u8; 16],
+    pub client_id: u32,
+    pub name: String,
+    pub large: bool,
+}
+
+/// Parses a hello body that starts at the user hash (after the hash-size byte).
+pub(crate) fn parse_hello(data: &[u8]) -> Result<HelloInfo> {
     let mut reader = Reader::new(data);
-    reader.take(22)?;
+    let user_hash: [u8; 16] = reader.take(16)?.try_into()?;
+    let client_id = reader.u32()?;
+    reader.take(2)?;
     let count = reader.u32()?;
     if count > 64 {
         bail!("too many peer hello tags");
     }
     let mut large = false;
+    let mut name = String::new();
     for _ in 0..count {
-        if let (0xfe, Value::Number(bits)) = tag(&mut reader)? {
-            large = bits & (1 << 4) != 0;
+        match tag(&mut reader)? {
+            (0xfe, Value::Number(bits)) => large = bits & (1 << 4) != 0,
+            (0x01, Value::Text(text)) => name = text.chars().take(64).collect(),
+            _ => {}
         }
     }
     reader.take(6)?;
     if data.len() - reader.pos > 4 {
         bail!("invalid peer hello trailer");
     }
-    Ok(large)
+    Ok(HelloInfo {
+        user_hash,
+        client_id,
+        name,
+        large,
+    })
+}
+pub(crate) fn hello_answer(data: &[u8]) -> Result<bool> {
+    Ok(parse_hello(data)?.large)
 }
 
 type PartMetadata = (Vec<bool>, Vec<[u8; 16]>);

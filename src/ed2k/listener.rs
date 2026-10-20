@@ -1,4 +1,4 @@
-use super::{FileLink, FileSource, ServerConnection, ShareRegistry, peer};
+use super::{FileLink, FileSource, ServerConnection, ShareRegistry, UploadManager, peer, upload};
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use std::{
@@ -116,6 +116,7 @@ pub struct IncomingListener {
     active: Arc<AtomicUsize>,
     handshakes: Arc<AtomicU64>,
     callbacks: CallbackRegistry,
+    uploads: UploadManager,
     task: tokio::task::AbortHandle,
 }
 impl Drop for IncomingListener {
@@ -137,6 +138,16 @@ impl IncomingListener {
         preferred_port: u16,
         shares: ShareRegistry,
     ) -> Result<Self> {
+        Self::bind_with_uploads(identity, preferred_port, shares, UploadManager::default()).await
+    }
+
+    /// Like [`Self::bind_with_shares`], with caller-owned upload limits and statistics.
+    pub async fn bind_with_uploads(
+        identity: [u8; 16],
+        preferred_port: u16,
+        shares: ShareRegistry,
+        uploads: UploadManager,
+    ) -> Result<Self> {
         let listener =
             match TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, preferred_port)).await {
                 Ok(listener) => listener,
@@ -157,6 +168,7 @@ impl IncomingListener {
         let callbacks = CallbackRegistry::default();
         let registry = callbacks.clone();
         let shared = shares.clone();
+        let upload_manager = uploads.clone();
         let task = tokio::spawn(async move {
             struct Offline(Arc<AtomicBool>);
             impl Drop for Offline {
@@ -166,16 +178,26 @@ impl IncomingListener {
             }
             let _offline = Offline(live);
             let mut sessions = JoinSet::new();
+            let per_ip: Arc<Mutex<HashMap<std::net::IpAddr, usize>>> = Arc::default();
             loop {
                 tokio::select! {
                     accepted=listener.accept()=>{
-                        let Ok((stream,_))=accepted else {break;};
-                        if sessions.len()>=16 {drop(stream);continue;}
-                        let active=peers.clone();let id=id.clone();let completed=completed.clone();let registry=registry.clone();let shared=shared.clone();
+                        let Ok((stream,remote))=accepted else {break;};
+                        if sessions.len()>=MAX_SESSIONS {drop(stream);continue;}
+                        let ip = remote.ip();
+                        {
+                            let Ok(mut counts) = per_ip.lock() else {continue};
+                            let count = counts.entry(ip).or_default();
+                            if *count >= MAX_PER_IP {drop(stream);continue;}
+                            *count += 1;
+                        }
+                        let active=peers.clone();let id=id.clone();let completed=completed.clone();let registry=registry.clone();let shared=shared.clone();let uploads=upload_manager.clone();let per_ip=per_ip.clone();
                         sessions.spawn(async move {
                             struct Active(Arc<AtomicUsize>);impl Drop for Active {fn drop(&mut self){self.0.fetch_sub(1,Ordering::AcqRel);}}
-                            active.fetch_add(1,Ordering::AcqRel);let _active=Active(active);
-                            let _=tokio::time::timeout(Duration::from_secs(30),session(stream,identity,id,completed,registry,shared)).await;
+                            struct PerIp(Arc<Mutex<HashMap<std::net::IpAddr, usize>>>, std::net::IpAddr);
+                            impl Drop for PerIp {fn drop(&mut self){if let Ok(mut c)=self.0.lock()&&let Some(n)=c.get_mut(&self.1){*n=n.saturating_sub(1);if *n==0{c.remove(&self.1);}}}}
+                            active.fetch_add(1,Ordering::AcqRel);let _active=Active(active);let _ip=PerIp(per_ip,ip);
+                            let _=session(stream,ip,identity,id,completed,registry,shared,uploads).await;
                         });
                     },
                     _=sessions.join_next(), if !sessions.is_empty()=>{},
@@ -189,6 +211,7 @@ impl IncomingListener {
             active,
             handshakes,
             callbacks,
+            uploads,
             task: task.abort_handle(),
         })
     }
@@ -197,6 +220,10 @@ impl IncomingListener {
     }
     pub fn callbacks(&self) -> CallbackRegistry {
         self.callbacks.clone()
+    }
+    /// Upload slots, queue, limits and statistics of this listener.
+    pub fn uploads(&self) -> UploadManager {
+        self.uploads.clone()
     }
     pub fn status(&self) -> IncomingStatus {
         IncomingStatus {
@@ -207,109 +234,42 @@ impl IncomingListener {
         }
     }
 }
+const MAX_SESSIONS: usize = 64;
+const MAX_PER_IP: usize = 4;
+
+#[allow(clippy::too_many_arguments)]
 async fn session(
     mut stream: TcpStream,
+    ip: std::net::IpAddr,
     identity: [u8; 16],
     client_id: Arc<AtomicU32>,
     completed: Arc<AtomicU64>,
     callbacks: CallbackRegistry,
     shares: ShareRegistry,
+    uploads: UploadManager,
 ) -> Result<()> {
-    let (protocol, op, data) = peer::frame(&mut stream).await?;
-    if protocol != 0xe3 || op != 1 || data.first() != Some(&16) {
-        bail!("incoming peer must begin with an ED2K hello");
-    }
-    let large = peer::hello_answer(&data[1..])?;
-    let remote_id = u32::from_le_bytes(data[17..21].try_into()?);
-    let answer = peer::hello(identity, client_id.load(Ordering::Acquire));
-    peer::send(&mut stream, 0xe3, 0x4c, &answer[1..]).await?;
+    // Only the hello exchange is time-boxed; afterwards the uploader applies its own idle rules.
+    let hello = tokio::time::timeout(Duration::from_secs(30), async {
+        let (protocol, op, data) = peer::frame(&mut stream).await?;
+        if protocol != 0xe3 || op != 1 || data.first() != Some(&16) {
+            bail!("incoming peer must begin with an ED2K hello");
+        }
+        let info = peer::parse_hello(&data[1..])?;
+        let answer = peer::hello(identity, client_id.load(Ordering::Acquire));
+        peer::send(&mut stream, 0xe3, 0x4c, &answer[1..]).await?;
+        Ok::<_, anyhow::Error>(info)
+    })
+    .await
+    .context("incoming peer hello timed out")??;
     completed.fetch_add(1, Ordering::AcqRel);
-    if let Some(sender) = callbacks.take(remote_id) {
-        let _ = sender.send(IncomingPeer { stream, large });
+    if let Some(sender) = callbacks.take(hello.client_id) {
+        let _ = sender.send(IncomingPeer {
+            stream,
+            large: hello.large,
+        });
         return Ok(());
     }
-    for _ in 0..128 {
-        let (protocol, op, data) = peer::frame(&mut stream).await?;
-        match (protocol, op) {
-            (0xc5, 1) => peer::send(&mut stream, 0xc5, 2, &[60, 1, 0, 0, 0, 0]).await?,
-            (0xe3, 0x58) => {
-                if data.len() != 16 { bail!("invalid filename request"); }
-                let hash: [u8;16] = data[..16].try_into()?;
-                if let Some(file) = shares.get(&hash) {
-                    let name = file.link.name.as_bytes();
-                    if name.len() > u16::MAX as usize { bail!("shared filename too long"); }
-                    let mut answer = hash.to_vec();
-                    answer.extend((name.len() as u16).to_le_bytes());
-                    answer.extend(name);
-                    peer::send(&mut stream, 0xe3, 0x59, &answer).await?;
-                } else {
-                    peer::send(&mut stream, 0xe3, 0x48, &hash).await?;
-                }
-            }
-            (0xe3, 0x4f) => {
-                if data.len() != 16 { bail!("invalid file status request"); }
-                let hash: [u8;16] = data[..16].try_into()?;
-                if let Some(file) = shares.get(&hash) {
-                    let count = file.link.part_count();
-                    let mut answer = hash.to_vec();
-                    answer.extend((count as u16).to_le_bytes());
-                    answer.extend(vec![0xff; count.div_ceil(8)]);
-                    if count % 8 != 0 {
-                        if let Some(last) = answer.last_mut() { *last &= (1u8 << (count % 8)) - 1; }
-                    }
-                    peer::send(&mut stream, 0xe3, 0x50, &answer).await?;
-                } else {
-                    peer::send(&mut stream, 0xe3, 0x48, &hash).await?;
-                }
-            }
-            (0xe3, 0x51) => {
-                if data.len() != 16 { bail!("invalid hashset request"); }
-                let hash: [u8;16] = data[..16].try_into()?;
-                if let Some(file) = shares.get(&hash) {
-                    let mut answer = hash.to_vec();
-                    answer.extend((file.part_hashes.len() as u16).to_le_bytes());
-                    for part in &file.part_hashes { answer.extend(part); }
-                    peer::send(&mut stream, 0xe3, 0x52, &answer).await?;
-                } else {
-                    peer::send(&mut stream, 0xe3, 0x48, &hash).await?;
-                }
-            }
-            (0xe3, 0x54) => {
-                if data.len() != 16 { bail!("invalid upload request"); }
-                let hash: [u8;16] = data[..16].try_into()?;
-                if shares.get(&hash).is_some() {
-                    peer::send(&mut stream, 0xe3, 0x55, &[]).await?;
-                } else {
-                    peer::send(&mut stream, 0xe3, 0x48, &hash).await?;
-                }
-            }
-            (0xe3, 0x47) => {
-                if data.len() != 40 { bail!("invalid part request"); }
-                let hash: [u8;16] = data[..16].try_into()?;
-                let Some(file) = shares.get(&hash) else {
-                    peer::send(&mut stream, 0xe3, 0x48, &hash).await?;
-                    continue;
-                };
-                for index in 0..3 {
-                    let start_at = 16 + index * 4;
-                    let end_at = 28 + index * 4;
-                    let from = u32::from_le_bytes(data[start_at..start_at+4].try_into()?) as u64;
-                    let to = u32::from_le_bytes(data[end_at..end_at+4].try_into()?) as u64;
-                    if to == 0 && from == 0 { continue; }
-                    let bytes = file.read_range(from, to)?;
-                    let mut answer = hash.to_vec();
-                    answer.extend((from as u32).to_le_bytes());
-                    answer.extend((to as u32).to_le_bytes());
-                    answer.extend(bytes);
-                    peer::send(&mut stream, 0xe3, 0x46, &answer).await?;
-                }
-            }
-            (0xe3, 0x4a) => peer::send(&mut stream, 0xe3, 0x4b, &[0; 4]).await?,
-            (0xe3, 0x56 | 0x49) => return Ok(()),
-            _ => {}
-        }
-    }
-    Ok(())
+    upload::serve(stream, ip, hello, shares, uploads).await
 }
 
 #[cfg(test)]

@@ -139,7 +139,11 @@ impl ShareRegistry {
         Ok(info)
     }
 
-    pub async fn add_directory(&self, directory: PathBuf, recursive: bool) -> Result<Vec<SharedFileInfo>> {
+    pub async fn add_directory(
+        &self,
+        directory: PathBuf,
+        recursive: bool,
+    ) -> Result<Vec<SharedFileInfo>> {
         let paths = tokio::task::spawn_blocking(move || -> Result<Vec<PathBuf>> {
             let root = std::fs::canonicalize(&directory)?;
             if !std::fs::symlink_metadata(&root)?.is_dir() {
@@ -166,7 +170,8 @@ impl ShareRegistry {
                 }
             }
             Ok(files)
-        }).await??;
+        })
+        .await??;
         let mut added = Vec::new();
         for path in paths {
             if let Ok(info) = self.add_file(path).await {
@@ -201,7 +206,12 @@ impl ShareRegistry {
             .values()
             .map(|file| SharedFileInfo::from(file.as_ref()))
             .collect::<Vec<_>>();
-        files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then(a.hash.cmp(&b.hash)));
+        files.sort_by(|a, b| {
+            a.name
+                .to_lowercase()
+                .cmp(&b.name.to_lowercase())
+                .then(a.hash.cmp(&b.hash))
+        });
         Ok(files)
     }
 
@@ -226,7 +236,10 @@ mod tests {
         assert_eq!(info.hash, "a448017aaf21d8525fc10ae87aa6729d");
         assert_eq!(registry.list().unwrap().len(), 1);
         let hash = super::super::server::file_hash(&info.hash).unwrap();
-        assert_eq!(registry.get(&hash).unwrap().read_range(0, 3).unwrap(), b"abc");
+        assert_eq!(
+            registry.get(&hash).unwrap().read_range(0, 3).unwrap(),
+            b"abc"
+        );
         std::fs::write(path, b"changed").unwrap();
         assert!(registry.get(&hash).unwrap().read_range(0, 3).is_err());
     }
@@ -238,8 +251,22 @@ mod tests {
         std::fs::write(root.path().join("a.bin"), b"a").unwrap();
         std::fs::write(root.path().join("sub").join("b.bin"), b"b").unwrap();
         let registry = ShareRegistry::default();
-        assert_eq!(registry.add_directory(root.path().to_path_buf(), false).await.unwrap().len(), 1);
+        assert_eq!(
+            registry
+                .add_directory(root.path().to_path_buf(), false)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
         registry.clear().unwrap();
-        assert_eq!(registry.add_directory(root.path().to_path_buf(), true).await.unwrap().len(), 2);
+        assert_eq!(
+            registry
+                .add_directory(root.path().to_path_buf(), true)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
     }
 }
