@@ -27,9 +27,12 @@ pub struct FileEntry {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Torrent {
     pub info_hash: [u8; 20],
+    pub v1_info_hash: Option<[u8; 20]>,
+    pub wire_v2: bool,
     pub name: String,
     pub piece_length: u64,
     pub pieces: Vec<[u8; 20]>,
+    pub v2: Option<super::v2::V2Info>,
     pub files: Vec<FileEntry>,
     pub total_length: u64,
     pub private: bool,
@@ -99,6 +102,35 @@ fn good_tracker(url: &str) -> bool {
             .any(|p| url.to_ascii_lowercase().starts_with(p))
 }
 
+fn filtered_extras(extras: Extras) -> (Vec<Vec<String>>, Vec<String>) {
+    let mut trackers: Vec<Vec<String>> = extras
+        .trackers
+        .into_iter()
+        .map(|tier| {
+            tier.into_iter()
+                .filter(|u| good_tracker(u))
+                .collect::<Vec<_>>()
+        })
+        .filter(|tier| !tier.is_empty())
+        .collect();
+    let mut seen = 0;
+    trackers.retain_mut(|tier| {
+        tier.truncate(MAX_TRACKERS.saturating_sub(seen));
+        seen += tier.len();
+        !tier.is_empty()
+    });
+    let web_seeds = extras
+        .web_seeds
+        .into_iter()
+        .filter(|u| {
+            let l = u.to_ascii_lowercase();
+            u.len() <= 512 && (l.starts_with("http://") || l.starts_with("https://"))
+        })
+        .take(MAX_WEB_SEEDS)
+        .collect();
+    (trackers, web_seeds)
+}
+
 impl Torrent {
     /// Parses a complete `.torrent` file.
     pub fn from_torrent_file(bytes: &[u8]) -> Result<Self> {
@@ -129,7 +161,17 @@ impl Torrent {
             extras.trackers.push(vec![url]);
         }
         extras.web_seeds = url_list(decoded.value.get("url-list"));
-        Self::from_info(&bytes[span], extras)
+        let mut torrent = Self::from_info(&bytes[span], extras)?;
+        let layers = decoded.value.get("piece layers");
+        if let Some(v2) = &mut torrent.v2 {
+            let legacy = torrent.v1_info_hash.is_some() && layers.is_none();
+            v2.load_layers(layers, !legacy)?;
+            if legacy {
+                torrent.wire_v2 = false;
+                torrent.info_hash = torrent.v1_info_hash.expect("hybrid hash");
+            }
+        }
+        Ok(torrent)
     }
 
     /// Builds a torrent from the raw `info` dictionary (for example obtained through BEP 9).
@@ -137,10 +179,9 @@ impl Torrent {
         let info = bencode::decode(info_bytes)
             .context("invalid info dictionary")?
             .value;
-        if info.get("meta version").and_then(Value::int).unwrap_or(1) != 1
-            && info.get("pieces").is_none()
-        {
-            bail!("BitTorrent v2-only torrents are not supported yet");
+        let meta = info.get("meta version").and_then(Value::int).unwrap_or(1);
+        if !matches!(meta, 1 | 2) {
+            bail!("unsupported torrent meta version {meta}");
         }
         let name = sanitize_component(
             info.get("name.utf-8")
@@ -155,6 +196,30 @@ impl Torrent {
         )?;
         if !(MIN_PIECE..=MAX_PIECE).contains(&piece_length) || piece_length % MIN_PIECE != 0 {
             bail!("unsupported piece length {piece_length}");
+        }
+        let v2 = if meta == 2 {
+            Some(super::v2::V2Info::parse(&info, info_bytes, piece_length)?)
+        } else {
+            None
+        };
+        if info.get("pieces").is_none() {
+            let v2 = v2.context("torrent has no pieces")?;
+            let (trackers, web_seeds) = filtered_extras(extras);
+            return Ok(Self {
+                info_hash: v2.info_hash[..20].try_into()?,
+                v1_info_hash: None,
+                wire_v2: true,
+                name,
+                piece_length,
+                pieces: vec![],
+                files: v2.layout.clone(),
+                total_length: v2.total,
+                private: info.get("private").and_then(Value::int) == Some(1),
+                trackers,
+                web_seeds,
+                info_bytes: info_bytes.to_vec(),
+                v2: Some(v2),
+            });
         }
         let blob = info
             .get("pieces")
@@ -243,36 +308,25 @@ impl Torrent {
             bail!("piece count does not match the total size");
         }
 
-        let mut trackers: Vec<Vec<String>> = extras
-            .trackers
-            .into_iter()
-            .map(|tier| {
-                tier.into_iter()
-                    .filter(|u| good_tracker(u))
-                    .collect::<Vec<_>>()
-            })
-            .filter(|tier| !tier.is_empty())
-            .collect();
-        let mut seen = 0;
-        trackers.retain_mut(|tier| {
-            tier.truncate(MAX_TRACKERS.saturating_sub(seen));
-            seen += tier.len();
-            !tier.is_empty()
-        });
-        let web_seeds = extras
-            .web_seeds
-            .into_iter()
-            .filter(|u| {
-                let l = u.to_ascii_lowercase();
-                u.len() <= 512 && (l.starts_with("http://") || l.starts_with("https://"))
-            })
-            .take(MAX_WEB_SEEDS)
-            .collect();
+        if let Some(v2) = &v2 {
+            let one: Vec<_> = files.iter().filter(|f| !f.pad).collect();
+            let two: Vec<_> = v2.layout.iter().filter(|f| !f.pad).collect();
+            if one != two {
+                bail!("hybrid v1 and v2 file layouts differ");
+            }
+        }
+        let (trackers, web_seeds) = filtered_extras(extras);
         Ok(Self {
-            info_hash: info_hash(info_bytes),
+            info_hash: v2
+                .as_ref()
+                .map(|v| v.info_hash[..20].try_into().expect("20 bytes"))
+                .unwrap_or_else(|| info_hash(info_bytes)),
+            v1_info_hash: Some(info_hash(info_bytes)),
+            wire_v2: v2.is_some(),
             name,
             piece_length,
             pieces,
+            v2,
             files,
             total_length,
             private: info.get("private").and_then(Value::int) == Some(1),
@@ -283,11 +337,34 @@ impl Torrent {
     }
 
     pub fn piece_count(&self) -> usize {
-        self.pieces.len()
+        if self.pieces.is_empty() {
+            self.v2.as_ref().map_or(0, |v| v.hashes.len())
+        } else {
+            self.pieces.len()
+        }
+    }
+
+    pub fn is_v2_only(&self) -> bool {
+        self.pieces.is_empty() && self.v2.is_some()
+    }
+
+    pub fn select_wire_hash(&mut self, hash: [u8; 20]) -> Result<()> {
+        if self.v2.as_ref().is_some_and(|v| v.info_hash[..20] == hash) {
+            self.wire_v2 = true;
+        } else if self.v1_info_hash == Some(hash) {
+            self.wire_v2 = false;
+        } else {
+            bail!("torrent metadata does not match the requested info hash");
+        }
+        self.info_hash = hash;
+        Ok(())
     }
 
     /// Length of piece `index` (the last one may be shorter).
     pub fn piece_len(&self, index: usize) -> u64 {
+        if self.wire_v2 {
+            return self.v2.as_ref().expect("v2 torrent").piece_len(index);
+        }
         let start = index as u64 * self.piece_length;
         self.total_length
             .saturating_sub(start)
@@ -319,6 +396,12 @@ impl Torrent {
         }
         out.extend(b"4:info");
         out.extend(&self.info_bytes);
+        if let Some(v2) = &self.v2
+            && (self.wire_v2 || v2.hashes.iter().all(Option::is_some))
+        {
+            out.extend(b"12:piece layers");
+            out.extend(bencode::encode(&v2.layers_value()));
+        }
         if !self.web_seeds.is_empty() {
             let list = Value::List(self.web_seeds.iter().map(|u| Value::text(u)).collect());
             let mut tail = Vec::new();

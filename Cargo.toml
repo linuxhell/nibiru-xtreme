@@ -42,6 +42,10 @@ sha2 = "0.10"
 russh = { version = "0.64", optional = true, default-features = false, features = ["ring"] }
 russh-sftp = { version = "3", optional = true }
 uuid = { version = "1", features = ["v4"] }
+getrandom = "0.4"
+num-bigint = "0.5"
+librqbit-utp = "0.7"
+librqbit-dualstack-sockets = "0.7"
 
 [dev-dependencies]
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

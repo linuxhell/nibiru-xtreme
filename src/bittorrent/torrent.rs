@@ -48,6 +48,10 @@ pub struct Settings {
     pub allow_loopback_peers: bool,
     /// Extra peers to try immediately (`x.pe`, manual add, tests).
     pub peers: Vec<SocketAddr>,
+    /// Require MSE/RC4 on all peer connections; never fall back to plaintext.
+    pub require_encryption: bool,
+    pub enable_tcp: bool,
+    pub enable_utp: bool,
 }
 
 impl Settings {
@@ -62,6 +66,9 @@ impl Settings {
             enable_pex: true,
             allow_loopback_peers: false,
             peers: Vec::new(),
+            require_encryption: false,
+            enable_tcp: true,
+            enable_utp: true,
         }
     }
 }
@@ -185,6 +192,7 @@ pub struct Core {
 
 pub struct Shared {
     pub info_hash: [u8; 20],
+    pub v2_info_hash: Option<[u8; 32]>,
     pub peer_id: [u8; 20],
     pub listen_port: u16,
     pub core: Mutex<Core>,
@@ -201,14 +209,35 @@ pub struct Shared {
     /// This torrent's own caps (zero = unlimited), applied on top of the session-wide ones.
     pub own_down: RateLimiter,
     pub own_up: RateLimiter,
+    pub hash_query_limit: RateLimiter,
     pub tracker: TrackerClient,
     pub dht: Option<Arc<Dht>>,
+    pub dht6: Option<Arc<Dht>>,
+    pub utp: Option<Arc<librqbit_utp::UtpSocketUdp>>,
     /// Fired (with `notify_waiters`) on shutdown so sleeping loops end promptly.
     pub stop_signal: Notify,
     next_peer: AtomicU64,
 }
 
 impl Shared {
+    /// Wire identities served by this task, without registering duplicate tasks.
+    pub fn wire_hashes(&self) -> Vec<[u8; 20]> {
+        let mut hashes = vec![self.info_hash];
+        if let Some(ready) = self.lock().ready()
+            && let Some(v1) = ready.torrent.v1_info_hash
+            && !hashes.contains(&v1)
+        {
+            hashes.push(v1);
+        }
+        hashes
+    }
+    pub fn dht_for(&self, addr: SocketAddr) -> Option<Arc<Dht>> {
+        if addr.is_ipv6() {
+            self.dht6.clone()
+        } else {
+            self.dht.clone()
+        }
+    }
     pub fn lock(&self) -> MutexGuard<'_, Core> {
         self.core.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -436,11 +465,14 @@ pub(crate) struct Environment {
     pub up_limit: Arc<RateLimiter>,
     pub tracker: TrackerClient,
     pub dht: Option<Arc<Dht>>,
+    pub dht6: Option<Arc<Dht>>,
+    pub utp: Option<Arc<librqbit_utp::UtpSocketUdp>>,
 }
 
 pub struct Start {
     pub torrent: Option<Torrent>,
     pub info_hash: [u8; 20],
+    pub v2_info_hash: Option<[u8; 32]>,
     pub name: Option<String>,
     pub extras: Extras,
 }
@@ -454,6 +486,8 @@ impl TorrentHandle {
             up_limit,
             tracker,
             dht,
+            dht6,
+            utp,
         } = env;
         let private = start.torrent.as_ref().is_some_and(|t| t.private);
         let mut core = Core {
@@ -497,6 +531,7 @@ impl TorrentHandle {
         }
         let shared = Arc::new(Shared {
             info_hash: start.info_hash,
+            v2_info_hash: start.v2_info_hash,
             peer_id,
             listen_port,
             core: Mutex::new(core),
@@ -509,8 +544,11 @@ impl TorrentHandle {
             up_limit,
             own_down: RateLimiter::new(0),
             own_up: RateLimiter::new(0),
+            hash_query_limit: RateLimiter::new(16),
             tracker,
             dht,
+            dht6,
+            utp,
             stop_signal: Notify::new(),
             next_peer: AtomicU64::new(1),
         });
@@ -519,7 +557,12 @@ impl TorrentHandle {
         };
         tokio::spawn(main_loop(shared.clone(), start.torrent));
         tokio::spawn(tracker_loop(shared.clone()));
-        tokio::spawn(dht_loop(shared));
+        for dht in [shared.dht.clone(), shared.dht6.clone()]
+            .into_iter()
+            .flatten()
+        {
+            tokio::spawn(dht_loop(shared.clone(), dht));
+        }
         handle
     }
 
@@ -532,7 +575,15 @@ impl TorrentHandle {
     }
 
     pub fn torrent(&self) -> Option<Arc<Torrent>> {
-        self.shared.lock().ready().map(|r| r.torrent.clone())
+        let core = self.shared.lock();
+        let ready = core.ready()?;
+        if ready.torrent.v2.is_some() {
+            let mut torrent = (*ready.torrent).clone();
+            torrent.v2.as_mut()?.hashes = ready.storage.v2_hashes();
+            Some(Arc::new(torrent))
+        } else {
+            Some(ready.torrent.clone())
+        }
     }
 
     pub fn status(&self) -> TorrentStatus {
@@ -759,7 +810,12 @@ impl TorrentHandle {
             let notified = self.shared.progress.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if let Some(t) = self.torrent() {
+            if let Some(t) = self.torrent()
+                && (!t.wire_v2
+                    || t.v2
+                        .as_ref()
+                        .is_none_or(|v| v.hashes.iter().all(Option::is_some)))
+            {
                 return Ok(t);
             }
             if self.is_stopped() {
@@ -877,7 +933,7 @@ fn state_for(core: &Core) -> State {
         Phase::Metadata(_) => State::Metadata,
         Phase::Checking { .. } => State::Checking,
         Phase::Ready(r) => {
-            if r.picker.is_complete() {
+            if r.picker.is_complete() && r.storage.metadata_complete() {
                 if core.seeding_since.is_some() && core.state == State::Complete {
                     State::Complete
                 } else {
@@ -895,7 +951,10 @@ fn state_for(core: &Core) -> State {
 // ---------------------------------------------------------------------------------------------
 
 /// Builds storage, verifies existing data and switches the torrent to `Ready`.
-pub(crate) async fn install_metadata(shared: &Arc<Shared>, torrent: Torrent) {
+pub(crate) async fn install_metadata(shared: &Arc<Shared>, mut torrent: Torrent) {
+    if let Err(error) = torrent.select_wire_hash(shared.info_hash) {
+        return fail(shared, error.to_string());
+    }
     let torrent = Arc::new(torrent);
     let (directory, selected) = {
         let mut core = shared.lock();
@@ -916,9 +975,11 @@ pub(crate) async fn install_metadata(shared: &Arc<Shared>, torrent: Torrent) {
     let check = {
         let storage = storage.clone();
         let shared = shared.clone();
-        tokio::task::spawn_blocking(move || {
+        let selected = selected.clone();
+        tokio::task::spawn_blocking(move || -> Result<_> {
+            storage.create_empty_files(selected.as_deref())?;
             let cancel = AtomicBool::new(false);
-            storage.check_all(
+            Ok(storage.check_all(
                 |done, total| {
                     shared.lock().phase = Phase::Checking { done, total };
                     if shared.is_stopped() {
@@ -926,12 +987,13 @@ pub(crate) async fn install_metadata(shared: &Arc<Shared>, torrent: Torrent) {
                     }
                 },
                 &cancel,
-            )
+            ))
         })
         .await
     };
     let have = match check {
-        Ok(have) => have,
+        Ok(Ok(have)) => have,
+        Ok(Err(error)) => return fail(shared, format!("storage preparation failed: {error}")),
         Err(error) => return fail(shared, format!("verification failed: {error}")),
     };
     if shared.is_stopped() {
@@ -941,7 +1003,17 @@ pub(crate) async fn install_metadata(shared: &Arc<Shared>, torrent: Torrent) {
         .map(|i| selected.as_ref().is_none_or(|s| s.contains(&i)) && !torrent.files[i].pad)
         .collect();
     let wanted = Core::wanted_from_files(&torrent, &storage, &file_selected);
-    let picker = Picker::new(torrent.piece_length, torrent.total_length, have, wanted);
+    let mut picker = Picker::new(torrent.piece_length, torrent.total_length, have, wanted);
+    if torrent.wire_v2 {
+        picker = picker.with_piece_lengths(
+            (0..torrent.piece_count())
+                .map(|i| torrent.piece_len(i))
+                .collect(),
+        );
+    }
+    for i in 0..torrent.piece_count() {
+        picker.set_hash_available(i, storage.v2_piece_known(i));
+    }
     {
         let mut core = shared.lock();
         core.phase = Phase::Ready(Box::new(Ready {
@@ -965,7 +1037,10 @@ pub(crate) async fn install_metadata(shared: &Arc<Shared>, torrent: Torrent) {
         } else {
             State::Downloading
         };
-        if core.ready().is_some_and(|r| r.picker.is_complete()) {
+        if core
+            .ready()
+            .is_some_and(|r| r.picker.is_complete() && r.storage.metadata_complete())
+        {
             mark_complete(&mut core);
         }
         core.broadcast(|| PeerCmd::Ready);
@@ -1067,7 +1142,16 @@ pub(crate) fn complete_metadata(shared: &Arc<Shared>) -> Option<Vec<u8>> {
         return None;
     }
     let bytes: Vec<u8> = fetch.pieces.iter().flatten().flatten().copied().collect();
-    if Sha1::digest(&bytes).as_slice() == shared.info_hash {
+    let v1 = Sha1::digest(&bytes);
+    let valid = match shared.v2_info_hash {
+        Some(expected) => {
+            use sha2::Sha256;
+            Sha256::digest(&bytes).as_slice() == expected
+                && (shared.info_hash == expected[..20] || v1.as_slice() == shared.info_hash)
+        }
+        None => v1.as_slice() == shared.info_hash,
+    };
+    if valid {
         Some(bytes)
     } else {
         // Somebody sent garbage: forget everything and strike the senders.
@@ -1299,32 +1383,35 @@ async fn tracker_loop(shared: Arc<Shared>) {
             }
         };
         let mut any_ok = false;
-        'tiers: for tier in &trackers {
-            for url in tier {
-                if shared.is_stopped() {
-                    return;
-                }
-                let req = request(event, left, &shared);
-                match shared.tracker.announce(url, &req).await {
-                    Ok(response) => {
-                        any_ok = true;
-                        if let Some(id) = response.tracker_id {
-                            tracker_ids.insert(url.clone(), id);
-                        }
-                        interval = response
-                            .interval
-                            .max(Duration::from_secs(30))
-                            .min(Duration::from_secs(3600));
-                        {
-                            let mut core = shared.lock();
-                            for peer in response.peers {
-                                core.add_candidate(peer);
-                            }
-                        }
-                        shared.wake.notify_one();
-                        break 'tiers;
+        for wire_hash in shared.wire_hashes() {
+            'tiers: for tier in &trackers {
+                for url in tier {
+                    if shared.is_stopped() {
+                        return;
                     }
-                    Err(_) => continue,
+                    let mut req = request(event, left, &shared);
+                    req.info_hash = wire_hash;
+                    match shared.tracker.announce(url, &req).await {
+                        Ok(response) => {
+                            any_ok = true;
+                            if let Some(id) = response.tracker_id {
+                                tracker_ids.insert(url.clone(), id);
+                            }
+                            interval = response
+                                .interval
+                                .max(Duration::from_secs(30))
+                                .min(Duration::from_secs(3600));
+                            {
+                                let mut core = shared.lock();
+                                for peer in response.peers {
+                                    core.add_candidate(peer);
+                                }
+                            }
+                            shared.wake.notify_one();
+                            break 'tiers;
+                        }
+                        Err(_) => continue,
+                    }
                 }
             }
         }
@@ -1340,11 +1427,14 @@ async fn tracker_loop(shared: Arc<Shared>) {
                     announce_stopped(&shared, &trackers).await;
                     return;
                 }
-                let req = request(Event::Completed, 0, &shared);
+                for wire_hash in shared.wire_hashes() {
+                let mut req = request(Event::Completed, 0, &shared);
+                req.info_hash = wire_hash;
                 for tier in &trackers {
                     if let Some(url) = tier.first() {
                         let _ = shared.tracker.announce(url, &req).await;
                     }
+                }
                 }
             }
             _ = shared.tracker_wake.notified() => {
@@ -1372,13 +1462,17 @@ async fn announce_stopped(shared: &Arc<Shared>, trackers: &[Vec<String>]) {
             numwant: 0,
         }
     };
-    for tier in trackers {
-        if let Some(url) = tier.first() {
-            let _ = tokio::time::timeout(
-                Duration::from_secs(3),
-                shared.tracker.announce(url, &request),
-            )
-            .await;
+    for wire_hash in shared.wire_hashes() {
+        let mut request = request.clone();
+        request.info_hash = wire_hash;
+        for tier in trackers {
+            if let Some(url) = tier.first() {
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(3),
+                    shared.tracker.announce(url, &request),
+                )
+                .await;
+            }
         }
     }
 }
@@ -1392,10 +1486,7 @@ pub fn unchoke_message() -> Message {
 }
 
 /// Finds peers through the DHT and announces ourselves, for torrents that allow it.
-async fn dht_loop(shared: Arc<Shared>) {
-    let Some(dht) = shared.dht.clone() else {
-        return;
-    };
+async fn dht_loop(shared: Arc<Shared>, dht: Arc<Dht>) {
     loop {
         if shared.is_stopped() || shared.lock().private {
             return;
@@ -1403,20 +1494,23 @@ async fn dht_loop(shared: Arc<Shared>) {
         let paused = shared.lock().paused;
         let mut wait = Duration::from_secs(10);
         if !paused {
-            let lookup = dht.get_peers(shared.info_hash).await;
-            let connected = {
-                let mut core = shared.lock();
-                for peer in &lookup.peers {
-                    core.add_candidate(*peer);
+            let mut connected = 0;
+            for wire_hash in shared.wire_hashes() {
+                let lookup = dht.get_peers(wire_hash).await;
+                connected = {
+                    let mut core = shared.lock();
+                    for peer in &lookup.peers {
+                        core.add_candidate(*peer);
+                    }
+                    core.peers.len()
+                };
+                if !lookup.peers.is_empty() {
+                    shared.wake.notify_one();
                 }
-                core.peers.len()
-            };
-            if !lookup.peers.is_empty() {
-                shared.wake.notify_one();
-            }
-            if !lookup.tokens.is_empty() {
-                dht.announce(shared.info_hash, shared.listen_port, &lookup.tokens)
-                    .await;
+                if !lookup.tokens.is_empty() {
+                    dht.announce(wire_hash, shared.listen_port, &lookup.tokens)
+                        .await;
+                }
             }
             wait = if connected < 5 {
                 Duration::from_secs(30)
@@ -1442,6 +1536,7 @@ mod resume_tests {
             Start {
                 torrent: None,
                 info_hash: [1; 20],
+                v2_info_hash: None,
                 name: None,
                 extras: Extras {
                     trackers: vec![],
@@ -1456,6 +1551,8 @@ mod resume_tests {
                 up_limit: Arc::new(RateLimiter::new(0)),
                 tracker: TrackerClient::default(),
                 dht: None,
+                dht6: None,
+                utp: None,
             },
         )
     }

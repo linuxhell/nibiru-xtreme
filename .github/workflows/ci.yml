@@ -28,6 +28,16 @@ jobs:
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Test
         run: cargo test --locked --all-targets --all-features
+      - uses: actions/setup-python@v5
+        if: runner.os == 'Linux'
+        with:
+          python-version: "3.12"
+      - name: Independent BitTorrent interoperability
+        if: runner.os == 'Linux'
+        run: |
+          python -m pip install libtorrent==2.1.1
+          cargo build --locked --bin nibiru-xtreme
+          python tests/interop_libtorrent.py --binary target/debug/nibiru-xtreme
       - name: Release build
         run: cargo build --locked --release
       - name: Package Windows x64
@@ -37,7 +47,7 @@ jobs:
           ./target/release/nibiru-xtreme.exe --version
           if ($LASTEXITCODE -ne 0) { throw "Binary smoke test failed" }
           New-Item -ItemType Directory -Force dist/nibiru-windows-x64 | Out-Null
-          Copy-Item target/release/nibiru-xtreme.exe, benchmarks/windows11.ps1, benchmarks/iniciar-teste.cmd, benchmarks/comparar-sync.ps1, benchmarks/comparar-sync.cmd, benchmarks/comparar-adaptativo.cmd, benchmarks/README.md, benchmarks/performance-2026-10-19.md, docs/protocols.md, LICENSE dist/nibiru-windows-x64/
+          Copy-Item target/release/nibiru-xtreme.exe, benchmarks/windows11.ps1, benchmarks/iniciar-teste.cmd, benchmarks/comparar-sync.ps1, benchmarks/comparar-sync.cmd, benchmarks/comparar-adaptativo.cmd, benchmarks/README.md, benchmarks/performance-2026-10-19.md, docs/protocols.md, LICENSE, THIRD_PARTY_NOTICES.md, LICENSE-APACHE-2.0.txt dist/nibiru-windows-x64/
           $hash = (Get-FileHash dist/nibiru-windows-x64/nibiru-xtreme.exe -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  nibiru-xtreme.exe" | Set-Content -Encoding ascii dist/nibiru-windows-x64/SHA256SUMS.txt
       - name: Upload Windows x64

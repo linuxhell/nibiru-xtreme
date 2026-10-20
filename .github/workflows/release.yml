@@ -67,6 +67,7 @@ jobs:
           case "$REF_NAME" in v*) version="${REF_NAME#v}" ;; esac
           name="nibiru-xtreme-${version}-${{ matrix.suffix }}"
           mkdir -p dist
+          cp LICENSE THIRD_PARTY_NOTICES.md LICENSE-APACHE-2.0.txt dist/
           cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "dist/$name"
           (cd dist && if command -v sha256sum >/dev/null; then sha256sum "$name" > "$name.sha256"; else shasum -a 256 "$name" > "$name.sha256"; fi)
           ls -l dist

@@ -5,20 +5,20 @@ use super::{
     dht::{Dht, DhtConfig},
     limiter::RateLimiter,
     magnet::Magnet,
-    message::read_handshake,
     metainfo::{Extras, Torrent},
-    peer,
+    mse, peer,
     torrent::{Environment, Settings, Start, TorrentHandle},
     tracker::TrackerClient,
 };
 use anyhow::{Context, Result};
+use librqbit_dualstack_sockets::TcpListener;
 use std::{
     collections::HashMap,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::{net::TcpListener, sync::Semaphore, time::timeout};
+use tokio::{sync::Semaphore, time::timeout};
 
 #[derive(Clone, Debug)]
 pub struct SessionConfig {
@@ -30,20 +30,25 @@ pub struct SessionConfig {
     /// Let trackers resolve to private/loopback addresses (LAN trackers, tests).
     pub allow_private_trackers: bool,
     pub max_pending_handshakes: usize,
-    /// Enables the DHT (trackerless peer discovery). Its UDP port defaults to the TCP port.
+    /// Enables IPv4 DHT (trackerless discovery). Falls back to a free UDP port if busy.
     pub dht: Option<DhtConfig>,
+    pub dht6: Option<DhtConfig>,
+    /// Listen for uTP on the TCP peer port. DHT uses its own UDP socket/port.
+    pub enable_utp: bool,
 }
 
 impl Default for SessionConfig {
     fn default() -> Self {
         Self {
             listen_port: 0,
-            bind: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            bind: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
             download_limit: 0,
             upload_limit: 0,
             allow_private_trackers: false,
             max_pending_handshakes: 64,
             dht: None,
+            dht6: None,
+            enable_utp: true,
         }
     }
 }
@@ -56,6 +61,8 @@ pub struct Session {
     up: Arc<RateLimiter>,
     tracker: TrackerClient,
     dht: Option<Arc<Dht>>,
+    dht6: Option<Arc<Dht>>,
+    utp: Option<Arc<librqbit_utp::UtpSocketUdp>>,
 }
 
 fn new_peer_id() -> [u8; 20] {
@@ -67,10 +74,40 @@ fn new_peer_id() -> [u8; 20] {
 
 impl Session {
     pub async fn start(config: SessionConfig) -> Result<Arc<Self>> {
-        let listener = TcpListener::bind(SocketAddr::new(config.bind, config.listen_port))
-            .await
-            .with_context(|| format!("cannot listen on port {}", config.listen_port))?;
-        let port = listener.local_addr()?.port();
+        let listener = TcpListener::bind_tcp(
+            SocketAddr::new(config.bind, config.listen_port),
+            Default::default(),
+        )
+        .or_else(|error| {
+            if config.bind == IpAddr::V6(Ipv6Addr::UNSPECIFIED) {
+                TcpListener::bind_tcp(
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.listen_port),
+                    Default::default(),
+                )
+            } else {
+                Err(error)
+            }
+        })
+        .with_context(|| format!("cannot listen on port {}", config.listen_port))?;
+        let port = listener.bind_addr().port();
+        let utp = if config.enable_utp {
+            let options = librqbit_utp::SocketOpts {
+                max_live_vsocks: std::num::NonZeroUsize::new(256),
+                remote_inactivity_timeout: Some(Duration::from_secs(180)),
+                ..Default::default()
+            };
+            Some(
+                librqbit_utp::UtpSocketUdp::new_udp_with_opts(
+                    SocketAddr::new(listener.bind_addr().ip(), port),
+                    options,
+                    Default::default(),
+                )
+                .await
+                .context("cannot bind uTP peer port")?,
+            )
+        } else {
+            None
+        };
         let dht = match config.dht.clone() {
             Some(mut dht_config) => {
                 if dht_config.port == 0 {
@@ -87,7 +124,12 @@ impl Session {
             }
             None => None,
         };
-        if let Some(dht) = &dht {
+        let dht6 = if let Some(dht_config) = config.dht6.clone() {
+            Dht::start(dht_config).await.ok()
+        } else {
+            None
+        };
+        for dht in [dht.as_ref(), dht6.as_ref()].into_iter().flatten() {
             let dht = dht.clone();
             tokio::spawn(async move { dht.bootstrap().await });
         }
@@ -102,12 +144,14 @@ impl Session {
                 ..TrackerClient::default()
             },
             dht,
+            dht6,
+            utp: utp.clone(),
         });
         let gate = Arc::new(Semaphore::new(config.max_pending_handshakes.max(1)));
         let weak = Arc::downgrade(&session);
         tokio::spawn(async move {
             loop {
-                let Ok((mut stream, addr)) = listener.accept().await else {
+                let Ok((stream, addr)) = listener.accept().await else {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
                 };
@@ -118,20 +162,52 @@ impl Session {
                     continue; // too many unauthenticated connections at once
                 };
                 tokio::spawn(async move {
-                    let hello = timeout(Duration::from_secs(10), read_handshake(&mut stream)).await;
+                    let hashes = session.accepted_hashes();
+                    let hello =
+                        timeout(Duration::from_secs(15), mse::incoming(stream, &hashes)).await;
                     drop(permit);
-                    let Ok(Ok(hello)) = hello else { return };
-                    let handle = session
-                        .torrents
-                        .lock()
-                        .ok()
-                        .and_then(|t| t.get(&hello.info_hash).cloned());
+                    let Ok(Ok((stream, hello, encrypted))) = hello else {
+                        return;
+                    };
+                    let handle = session.existing(&hello.info_hash);
                     if let Some(handle) = handle {
-                        peer::accept(handle.shared.clone(), stream, addr, hello).await;
+                        peer::accept(handle.shared.clone(), stream, addr, hello, encrypted).await;
                     }
                 });
             }
         });
+        if let Some(utp) = utp {
+            let weak = Arc::downgrade(&session);
+            let gate = Arc::new(Semaphore::new(config.max_pending_handshakes.max(1)));
+            tokio::spawn(async move {
+                loop {
+                    let Ok(stream) = utp.accept().await else {
+                        return;
+                    };
+                    let Some(session) = weak.upgrade() else {
+                        return;
+                    };
+                    let Ok(permit) = gate.clone().try_acquire_owned() else {
+                        continue;
+                    };
+                    tokio::spawn(async move {
+                        let addr = stream.remote_addr();
+                        let hashes = session.accepted_hashes();
+                        let hello =
+                            timeout(Duration::from_secs(15), mse::incoming(stream, &hashes)).await;
+                        drop(permit);
+                        let Ok(Ok((stream, hello, encrypted))) = hello else {
+                            return;
+                        };
+                        let handle = session.existing(&hello.info_hash);
+                        if let Some(handle) = handle {
+                            peer::accept(handle.shared.clone(), stream, addr, hello, encrypted)
+                                .await;
+                        }
+                    });
+                }
+            });
+        }
         Ok(session)
     }
 
@@ -141,6 +217,10 @@ impl Session {
 
     pub fn dht(&self) -> Option<&Arc<Dht>> {
         self.dht.as_ref()
+    }
+
+    pub fn dht6(&self) -> Option<&Arc<Dht>> {
+        self.dht6.as_ref()
     }
 
     pub fn set_download_limit(&self, bytes_per_second: u64) {
@@ -156,8 +236,21 @@ impl Session {
         torrents.entry(handle.info_hash()).or_insert(handle).clone()
     }
 
+    fn accepted_hashes(&self) -> Vec<[u8; 20]> {
+        self.torrents
+            .lock()
+            .map(|t| t.values().flat_map(|h| h.shared.wire_hashes()).collect())
+            .unwrap_or_default()
+    }
+
     fn existing(&self, info_hash: &[u8; 20]) -> Option<TorrentHandle> {
-        self.torrents.lock().ok()?.get(info_hash).cloned()
+        let torrents = self.torrents.lock().ok()?;
+        torrents.get(info_hash).cloned().or_else(|| {
+            torrents
+                .values()
+                .find(|h| h.shared.wire_hashes().contains(info_hash))
+                .cloned()
+        })
     }
 
     fn spawn(&self, start: Start, settings: Settings) -> TorrentHandle {
@@ -171,6 +264,8 @@ impl Session {
                 up_limit: self.up.clone(),
                 tracker: self.tracker.clone(),
                 dht: self.dht.clone(),
+                dht6: self.dht6.clone(),
+                utp: self.utp.clone(),
             },
         )
     }
@@ -182,6 +277,7 @@ impl Session {
         }
         let start = Start {
             info_hash: torrent.info_hash,
+            v2_info_hash: torrent.v2.as_ref().map(|v| v.info_hash),
             name: Some(torrent.name.clone()),
             extras: Extras {
                 trackers: torrent.trackers.clone(),
@@ -205,6 +301,7 @@ impl Session {
         let start = Start {
             torrent: None,
             info_hash: magnet.info_hash,
+            v2_info_hash: magnet.v2_info_hash,
             name: magnet.name.clone(),
             extras: Extras {
                 trackers: magnet.trackers.iter().map(|t| vec![t.clone()]).collect(),
@@ -227,11 +324,14 @@ impl Session {
     }
 
     pub fn remove(&self, info_hash: &[u8; 20], delete_files: bool) -> bool {
-        let handle = self
-            .torrents
-            .lock()
-            .ok()
-            .and_then(|mut t| t.remove(info_hash));
+        let handle = self.torrents.lock().ok().and_then(|mut t| {
+            let primary = t.get(info_hash).map(|h| h.info_hash()).or_else(|| {
+                t.values()
+                    .find(|h| h.shared.wire_hashes().contains(info_hash))
+                    .map(|h| h.info_hash())
+            })?;
+            t.remove(&primary)
+        });
         match handle {
             Some(handle) => {
                 handle.shutdown(delete_files);

@@ -11,6 +11,7 @@ const MAX_PEERS: usize = 32;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Magnet {
     pub info_hash: [u8; 20],
+    pub v2_info_hash: Option<[u8; 32]>,
     pub name: Option<String>,
     pub trackers: Vec<String>,
     pub web_seeds: Vec<String>,
@@ -22,12 +23,12 @@ fn hex_digit(c: u8) -> Option<u8> {
     (c as char).to_digit(16).map(|d| d as u8)
 }
 
-fn decode_hex(text: &str) -> Option<[u8; 20]> {
+fn decode_hex<const N: usize>(text: &str) -> Option<[u8; N]> {
     let bytes = text.as_bytes();
-    if bytes.len() != 40 {
+    if bytes.len() != N * 2 {
         return None;
     }
-    let mut out = [0u8; 20];
+    let mut out = [0u8; N];
     for (i, pair) in bytes.chunks_exact(2).enumerate() {
         out[i] = hex_digit(pair[0])? << 4 | hex_digit(pair[1])?;
     }
@@ -91,7 +92,7 @@ impl Magnet {
             .or_else(|| link.strip_prefix("MAGNET:?"))
             .context("not a magnet link")?;
         let mut magnet = Magnet::default();
-        let mut have_hash = false;
+        let mut v1_hash = None;
         for pair in query.split('&') {
             let Some((key, value)) = pair.split_once('=') else {
                 continue;
@@ -101,8 +102,18 @@ impl Magnet {
                 "xt" if key == "xt" || key.starts_with("xt.") => {
                     if let Some(hash) = value.strip_prefix("urn:btih:") {
                         let parsed = decode_hex(hash).or_else(|| decode_base32(hash));
-                        magnet.info_hash = parsed.context("invalid info hash in magnet link")?;
-                        have_hash = true;
+                        let hash = parsed.context("invalid info hash in magnet link")?;
+                        if v1_hash.is_some_and(|old| old != hash) {
+                            bail!("conflicting v1 magnet hashes");
+                        }
+                        v1_hash = Some(hash);
+                    } else if let Some(hash) = value.strip_prefix("urn:btmh:1220") {
+                        let hash =
+                            decode_hex::<32>(hash).context("invalid v2 SHA-256 multihash")?;
+                        if magnet.v2_info_hash.is_some_and(|old| old != hash) {
+                            bail!("conflicting v2 magnet hashes");
+                        }
+                        magnet.v2_info_hash = Some(hash);
                     }
                 }
                 "dn" if key == "dn" => {
@@ -144,9 +155,11 @@ impl Magnet {
                 _ => {}
             }
         }
-        if !have_hash {
-            bail!("magnet link has no BitTorrent info hash (xt=urn:btih:)");
-        }
+        magnet.info_hash = match (v1_hash, magnet.v2_info_hash) {
+            (_, Some(hash)) => hash[..20].try_into()?,
+            (Some(hash), None) => hash,
+            _ => bail!("magnet link has no BitTorrent info hash (btih/btmh)"),
+        };
         Ok(magnet)
     }
 
@@ -225,6 +238,18 @@ mod tests {
         .unwrap();
         assert_eq!(m.name.as_deref(), Some(".._.._etc"));
         assert!(m.trackers.is_empty() && m.web_seeds.is_empty() && m.peers.is_empty());
+    }
+
+    #[test]
+    fn v2_multihashes_preserve_all_bytes_and_reject_conflicts() {
+        let hash = "57".repeat(32);
+        let link = format!("magnet:?xt=urn:btih:{HEX}&xt=urn:btmh:1220{hash}");
+        let magnet = Magnet::parse(&link).unwrap();
+        assert_eq!(magnet.v2_info_hash, Some([0x57; 32]));
+        assert_eq!(magnet.info_hash, [0x57; 20]);
+        assert!(Magnet::parse(&format!("{link}&xt=urn:btmh:1220{}", "58".repeat(32))).is_err());
+        assert!(Magnet::parse(&format!("magnet:?xt=urn:btmh:1220{}", &hash[..62])).is_err());
+        assert!(Magnet::parse(&format!("magnet:?xt=urn:btmh:1114{HEX}")).is_err());
     }
 
     #[test]

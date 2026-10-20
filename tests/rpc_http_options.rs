@@ -286,3 +286,87 @@ async fn per_task_and_global_limits_slow_the_transfer_and_can_be_lifted() {
         started.elapsed()
     );
 }
+
+#[tokio::test]
+async fn split_and_server_caps_bound_actual_concurrent_http_requests() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let body = Arc::new(vec![31u8; 12 * 1024 * 1024]);
+    let active = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = listener.local_addr().unwrap().port();
+    let source = body.clone();
+    let active_count = active.clone();
+    let peak_count = peak.clone();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let body = source.clone();
+            let active = active_count.clone();
+            let peak = peak_count.clone();
+            tokio::spawn(async move {
+                let mut buffer = vec![0; 8192];
+                let n = stream.read(&mut buffer).await.unwrap();
+                let request = String::from_utf8_lossy(&buffer[..n]);
+                if request.starts_with("HEAD ") {
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nAccept-Ranges: bytes\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    stream.write_all(head.as_bytes()).await.unwrap();
+                    return;
+                }
+                let range = request.lines().find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("range: bytes=")
+                        .map(str::to_owned)
+                });
+                let (from, to) = range
+                    .as_deref()
+                    .and_then(|r| r.split_once('-'))
+                    .map(|(a, b)| {
+                        (
+                            a.parse::<usize>().unwrap(),
+                            b.parse::<usize>().unwrap_or(body.len() - 1),
+                        )
+                    })
+                    .unwrap_or((0, body.len() - 1));
+                let count = active.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(count, Ordering::SeqCst);
+                let status = if range.is_some() {
+                    "206 Partial Content"
+                } else {
+                    "200 OK"
+                };
+                let head = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Range: bytes {from}-{to}/{}\r\nConnection: close\r\n\r\n",
+                    to - from + 1,
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes()).await;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let _ = stream.write_all(&body[from..=to]).await;
+                active.fetch_sub(1, Ordering::SeqCst);
+            });
+        }
+    });
+    let (port, client) = rpc(false).await;
+    let dir = tempfile::tempdir().unwrap();
+    for (split, cap, min_size, expected, name) in [
+        ("1", "4", "1M", 1, "one.bin"),
+        ("4", "2", "1M", 2, "two.bin"),
+        ("4", "4", "20M", 1, "large-min.bin"),
+    ] {
+        peak.store(0, Ordering::SeqCst);
+        let gid=call(port,&client,"aria2.addUri",vec![json!([format!("http://127.0.0.1:{origin}/file")]),json!({"dir":dir.path(),"out":name,"split":split,"max-connection-per-server":cap,"min-split-size":min_size})]).await;
+        let done = finish(port, &client, gid.as_str().unwrap()).await;
+        assert_eq!(done["status"], "complete", "{done}");
+        assert_eq!(std::fs::read(dir.path().join(name)).unwrap(), *body);
+        assert_eq!(
+            peak.load(Ordering::SeqCst),
+            expected,
+            "split={split} cap={cap} minimum={min_size}"
+        );
+    }
+    server.abort();
+}

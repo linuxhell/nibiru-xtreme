@@ -33,13 +33,25 @@ waiting for the tracker's next announce interval.
   `removeDownloadResult`, `changeOption`, `changeGlobalOption`, `getFiles`, `getPeers`, `getGlobalStat`,
   `tellActive`, `getVersion`.
 
+## Protocol expansion in development
+
+- TCP/uTP with optional or required MSE/PE, IPv4/IPv6 DHT and BEP 42 node IDs.
+- BEP 52 v2/hybrid metainfo, SHA256/Merkle proofs and btmh magnets; hashes are
+  authenticated before enabling data requests. Hybrid sessions also accept v1 identities.
+- Upload request queue advertisement now matches its bound; fair processing avoids
+  starving uploads under a busy request pipeline.
+- HTTP RPC split/server/minimum-size options constrain actual payload concurrency;
+  the one-byte Range probe finishes before payload connections begin.
+- Independent libtorrent 2.1.1: 18 complete, byte-compared loopback transfers.
+- User reported a complete public-magnet download and VLC preview on Windows.
+  Connections began after disabling a third-party firewall. This is a user report,
+  not an automated public-network or firewall compatibility test.
+
 ## Not implemented yet
 
-- uTP (BEP 29), Message Stream Encryption, BitTorrent v2/hybrid (BEP 52) hashing, IPv6 DHT (BEP 32),
-  Local Service Discovery, Metalink, secure DHT node IDs (BEP 42).
+- Local Service Discovery, hole punching and Metalink.
 - Kad persistent sessions, ED2K credits/secure identification/obfuscation.
 
-Peers that *require* encryption or only speak uTP cannot be reached yet.
 
 ## Files
 

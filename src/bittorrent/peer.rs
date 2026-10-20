@@ -4,10 +4,11 @@ use super::{
     bitfield::Bitfield,
     limiter::RateMeter,
     message::{
-        ExtHandshake, Handshake, LOCAL_UT_METADATA, LOCAL_UT_PEX, MAX_BLOCK, METADATA_PIECE,
-        Message, MetadataMessage, Pex, read_handshake, read_message, write_message,
+        ExtHandshake, Handshake, HashRequest, LOCAL_UT_METADATA, LOCAL_UT_PEX, MAX_BLOCK,
+        METADATA_PIECE, Message, MetadataMessage, Pex, read_handshake, read_message, write_message,
     },
     metainfo::{Extras, Torrent},
+    mse::{self, Stream},
     picker::BlockRef,
     torrent::{
         MAX_METADATA, MetadataFetch, PeerCmd, PeerEntry, PeerKey, Phase, PieceBuffer, Shared,
@@ -17,14 +18,14 @@ use super::{
 };
 use anyhow::{Result, bail};
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     net::SocketAddr,
     sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncWriteExt, BufReader},
-    net::{TcpStream, tcp::OwnedWriteHalf},
+    net::TcpStream,
     sync::mpsc,
     time::timeout,
 };
@@ -34,7 +35,7 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(180);
 const KEEPALIVE: Duration = Duration::from_secs(90);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
-const MAX_UPLOAD_QUEUE: usize = 128;
+pub(crate) const MAX_UPLOAD_QUEUE: usize = 128;
 const MAX_PEX_ADDED: usize = 50;
 
 pub async fn connect(shared: Arc<Shared>, addr: SocketAddr) {
@@ -48,28 +49,93 @@ pub async fn connect(shared: Arc<Shared>, addr: SocketAddr) {
 }
 
 async fn connect_inner(shared: &Arc<Shared>, addr: SocketAddr) -> Result<()> {
-    let mut stream = timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await??;
-    stream.set_nodelay(true).ok();
-    let ours = Handshake::new(shared.info_hash, shared.peer_id, shared.dht.is_some());
+    let settings = shared.lock().settings.clone();
+    let mut last_error = anyhow::anyhow!("no peer transport enabled");
+    for use_utp in [false, true] {
+        if (use_utp && (!settings.enable_utp || shared.utp.is_none()))
+            || (!use_utp && !settings.enable_tcp)
+        {
+            continue;
+        }
+        for wire_hash in shared.wire_hashes() {
+            for encrypted in [false, true] {
+                if settings.require_encryption && !encrypted {
+                    continue;
+                }
+                if shared.is_stopped() || shared.lock().paused {
+                    return Ok(());
+                }
+                let result = timeout(
+                    CONNECT_TIMEOUT + HANDSHAKE_TIMEOUT,
+                    open_peer(
+                        shared,
+                        addr,
+                        use_utp,
+                        encrypted,
+                        settings.require_encryption,
+                        wire_hash,
+                    ),
+                )
+                .await;
+                match result {
+                    Ok(Ok((stream, theirs))) => {
+                        shared.lock().connecting.remove(&addr);
+                        return run(shared.clone(), stream, addr, false, theirs).await;
+                    }
+                    Ok(Err(e)) => last_error = e,
+                    Err(e) => last_error = e.into(),
+                }
+            }
+        }
+    }
+    Err(last_error)
+}
+
+async fn open_peer(
+    shared: &Arc<Shared>,
+    addr: SocketAddr,
+    use_utp: bool,
+    encrypted: bool,
+    require_rc4: bool,
+    wire_hash: [u8; 20],
+) -> Result<(Stream, Handshake)> {
+    let mut stream: Stream = if use_utp {
+        Box::new(
+            timeout(
+                CONNECT_TIMEOUT,
+                shared.utp.as_ref().expect("uTP checked").connect(addr),
+            )
+            .await??,
+        )
+    } else {
+        let tcp = timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await??;
+        tcp.set_nodelay(true).ok();
+        Box::new(tcp)
+    };
+    if encrypted {
+        stream = mse::outgoing(stream, wire_hash, require_rc4).await?;
+    }
+    let ours = Handshake::new(wire_hash, shared.peer_id, shared.dht_for(addr).is_some());
     stream.write_all(&ours.encode()).await?;
     let theirs = timeout(HANDSHAKE_TIMEOUT, read_handshake(&mut stream)).await??;
-    if theirs.info_hash != shared.info_hash || theirs.peer_id == shared.peer_id {
+    if theirs.info_hash != wire_hash || theirs.peer_id == shared.peer_id {
         bail!("wrong torrent or connected to ourselves");
     }
-    shared.lock().connecting.remove(&addr);
-    run(shared.clone(), stream, addr, false, theirs).await
+    Ok((stream, theirs))
 }
 
 /// The listener already read (and matched) the remote handshake.
 pub async fn accept(
     shared: Arc<Shared>,
-    mut stream: TcpStream,
+    mut stream: Stream,
     addr: SocketAddr,
     theirs: Handshake,
+    encrypted: bool,
 ) {
     let allowed = {
         let core = shared.lock();
         core.peer_address_ok(&addr)
+            && (!core.settings.require_encryption || encrypted)
             && !core.paused
             && core.peers.len() < core.settings.max_peers + 10
             && !matches!(core.state, State::Error | State::Complete)
@@ -77,8 +143,11 @@ pub async fn accept(
     if !allowed || theirs.peer_id == shared.peer_id {
         return;
     }
-    stream.set_nodelay(true).ok();
-    let ours = Handshake::new(shared.info_hash, shared.peer_id, shared.dht.is_some());
+    let ours = Handshake::new(
+        theirs.info_hash,
+        shared.peer_id,
+        shared.dht_for(addr).is_some(),
+    );
     if stream.write_all(&ours.encode()).await.is_err() {
         return;
     }
@@ -86,10 +155,11 @@ pub async fn accept(
 }
 
 struct Peer {
+    wire_hash: [u8; 20],
     shared: Arc<Shared>,
     key: PeerKey,
     addr: SocketAddr,
-    writer: OwnedWriteHalf,
+    writer: tokio::io::WriteHalf<Stream>,
     fast: bool,
     their_ext: Option<ExtHandshake>,
     /// Their pieces. Empty (len 0) until we know the piece count.
@@ -102,6 +172,7 @@ struct Peer {
     uploads: VecDeque<(u32, u32, u32)>,
     pex_sent: HashSet<SocketAddr>,
     meta_asked: HashSet<u32>,
+    hash_requests: HashMap<HashRequest, Instant>,
     meter: RateMeter,
     last_sent: Instant,
     ext_hello_sent: bool,
@@ -120,12 +191,12 @@ struct EarlyState {
 
 async fn run(
     shared: Arc<Shared>,
-    stream: TcpStream,
+    stream: Stream,
     addr: SocketAddr,
     incoming: bool,
     theirs: Handshake,
 ) -> Result<()> {
-    let (read_half, writer) = stream.into_split();
+    let (read_half, writer) = tokio::io::split(stream);
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<PeerCmd>(64);
     let key = shared.next_key();
     {
@@ -171,6 +242,7 @@ async fn run(
         }
     });
     let mut peer = Peer {
+        wire_hash: theirs.info_hash,
         shared: shared.clone(),
         key,
         addr,
@@ -186,6 +258,7 @@ async fn run(
         uploads: VecDeque::new(),
         pex_sent: HashSet::new(),
         meta_asked: HashSet::new(),
+        hash_requests: HashMap::new(),
         meter: RateMeter::default(),
         last_sent: Instant::now(),
         ext_hello_sent: false,
@@ -216,6 +289,121 @@ async fn run(
 }
 
 impl Peer {
+    async fn request_hashes(&mut self) -> Result<()> {
+        self.hash_requests
+            .retain(|_, at| at.elapsed() < Duration::from_secs(20));
+        let requests = {
+            let core = self.shared.lock();
+            if core.paused {
+                return Ok(());
+            }
+            let Some(ready) = core.ready() else {
+                return Ok(());
+            };
+            let Some(v2) = &ready.torrent.v2 else {
+                return Ok(());
+            };
+            let mut requests = vec![];
+            for file in &v2.files {
+                if file.pieces < 2 {
+                    continue;
+                }
+                let length = file.pieces.next_power_of_two().clamp(2, 128);
+                for index in (0..file.pieces).step_by(length) {
+                    if self.hash_requests.len() + requests.len() >= 4 {
+                        break;
+                    }
+                    let end = (index + length).min(file.pieces);
+                    if (index..end).all(|i| ready.storage.v2_piece_known(file.first_piece + i)) {
+                        continue;
+                    }
+                    let request = v2.request(file, index);
+                    if !self.hash_requests.contains_key(&request) {
+                        requests.push(request);
+                    }
+                }
+                if self.hash_requests.len() + requests.len() >= 4 {
+                    break;
+                }
+            }
+            requests
+        };
+        for request in requests {
+            self.hash_requests.insert(request, Instant::now());
+            self.send(&Message::HashRequest(request)).await?;
+        }
+        Ok(())
+    }
+
+    async fn serve_hashes(&mut self, request: HashRequest) -> Result<()> {
+        self.shared.hash_query_limit.acquire(1).await;
+        let source = {
+            let core = self.shared.lock();
+            if core.paused {
+                None
+            } else {
+                core.ready()
+                    .map(|r| (r.storage.clone(), r.picker.have().clone()))
+            }
+        };
+        let hashes = if let Some((storage, have)) = source {
+            tokio::task::spawn_blocking(move || storage.hash_response(&request, &have))
+                .await
+                .ok()
+                .and_then(Result::ok)
+        } else {
+            None
+        };
+        match hashes {
+            Some(hashes) => self.send(&Message::Hashes { request, hashes }).await,
+            None => self.send(&Message::HashReject(request)).await,
+        }
+    }
+
+    async fn receive_hashes(&mut self, request: HashRequest, hashes: Vec<[u8; 32]>) -> Result<()> {
+        if self.hash_requests.remove(&request).is_none() {
+            return Ok(());
+        }
+        let storage = { self.shared.lock().ready().map(|r| r.storage.clone()) };
+        let Some(storage) = storage else {
+            return Ok(());
+        };
+        let added = storage.install_v2_proof(&request, &hashes)?;
+        // Magnet resume learns the authenticated hashes first, then verifies
+        // existing data before asking the swarm to send those pieces again.
+        let check = storage.clone();
+        let indices = added.clone();
+        let verified = tokio::task::spawn_blocking(move || {
+            indices
+                .into_iter()
+                .filter(|i| check.check_piece(*i))
+                .collect::<Vec<_>>()
+        })
+        .await?;
+        {
+            let mut core = self.shared.lock();
+            let complete = if let Some(r) = core.ready_mut() {
+                for i in added {
+                    r.picker.set_hash_available(i, true);
+                }
+                for i in verified {
+                    r.picker.mark_have(i);
+                }
+                r.picker.is_complete() && r.storage.metadata_complete()
+            } else {
+                false
+            };
+            if complete {
+                super::torrent::mark_complete(&mut core);
+            }
+        }
+        self.shared.progress.notify_waiters();
+        self.shared.wake.notify_one();
+        self.update_interest().await?;
+        self.fill_requests().await?;
+        self.request_hashes().await
+    }
+
     async fn send(&mut self, message: &Message) -> Result<()> {
         write_message(&mut self.writer, message).await?;
         self.last_sent = Instant::now();
@@ -243,7 +431,7 @@ impl Peer {
             self.ext_hello_sent = true;
         }
         if self.dht_capable
-            && let Some(dht) = &self.shared.dht
+            && let Some(dht) = self.shared.dht_for(self.addr)
         {
             let port = dht.port();
             self.send(&Message::Port(port)).await?;
@@ -256,7 +444,6 @@ impl Peer {
                 return Ok(());
             }
             tokio::select! {
-                biased;
                 command = commands.recv() => {
                     let Some(command) = command else { return Ok(()) };
                     if !self.command(command).await? {
@@ -438,6 +625,7 @@ impl Peer {
             self.send(&Message::KeepAlive).await?;
         }
         self.request_metadata().await?;
+        self.request_hashes().await?;
         self.fill_requests().await?;
         Ok(())
     }
@@ -489,6 +677,7 @@ impl Peer {
                 }
                 self.settle_early()?;
                 self.update_interest().await?;
+                self.request_hashes().await?;
                 self.fill_requests().await?;
             }
             PeerCmd::Cancel {
@@ -552,10 +741,17 @@ impl Peer {
 
     async fn message(&mut self, message: Message) -> Result<()> {
         match message {
+            Message::HashRequest(request) => self.serve_hashes(request).await?,
+            Message::Hashes { request, hashes } => self.receive_hashes(request, hashes).await?,
+            Message::HashReject(request) => {
+                if let Some(at) = self.hash_requests.get_mut(&request) {
+                    *at = Instant::now();
+                }
+            }
             Message::KeepAlive | Message::Suggest(_) => {}
             Message::Port(port) => {
                 // The peer runs a DHT node: ping it so it can enter our routing table.
-                if let Some(dht) = self.shared.dht.clone()
+                if let Some(dht) = self.shared.dht_for(self.addr)
                     && port != 0
                     && !self.shared.lock().private
                 {
@@ -813,9 +1009,17 @@ impl Peer {
                 return Ok(());
             };
             let piece = index as usize;
+            let piece_len = if r.torrent.v1_info_hash == Some(self.wire_hash) {
+                r.torrent
+                    .total_length
+                    .saturating_sub(piece as u64 * r.torrent.piece_length)
+                    .min(r.torrent.piece_length)
+            } else {
+                r.picker.piece_len(piece)
+            };
             if piece >= r.torrent.piece_count()
                 || !r.picker.have().get(piece)
-                || begin as u64 + length as u64 > r.picker.piece_len(piece)
+                || begin as u64 + length as u64 > piece_len
             {
                 None
             } else {

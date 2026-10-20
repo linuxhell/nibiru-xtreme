@@ -165,6 +165,9 @@ pub struct RequestOptions {
     pub headers: Vec<(String, String)>,
     /// `http://`, `https://` or `socks5://` proxy for every request.
     pub proxy: Option<ProxyOptions>,
+    /// An upper bound requested by RPC split/max-connection-per-server.
+    pub max_connections: Option<usize>,
+    pub min_split_size: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -194,6 +197,16 @@ pub struct Engine {
 }
 
 impl Engine {
+    fn connection_count(&self, total: u64) -> usize {
+        let mut workers = suggested_worker_count(total);
+        if let Some(limit) = self.request_options.max_connections {
+            workers = workers.min(limit.max(1));
+        }
+        if let Some(size) = self.request_options.min_split_size.filter(|s| *s > 0) {
+            workers = workers.min((total / size).max(1).min(MAX_HTTP_WORKERS as u64) as usize);
+        }
+        workers
+    }
     pub fn new(log: Arc<LogSink>) -> Result<Self> {
         Self::build(log, false)
     }
@@ -377,6 +390,7 @@ impl Engine {
             && let Ok((Some(total), ranges)) = self.probe(&request.url).await
             && ranges
             && total >= MIN_SEGMENTED_SIZE
+            && self.connection_count(total) > 1
         {
             match self
                 .download_segmented(
@@ -565,7 +579,7 @@ impl Engine {
         F: FnMut(Progress) + Send,
     {
         let started = Instant::now();
-        let workers = suggested_worker_count(total);
+        let workers = self.connection_count(total);
         let part_path = temporary_part_path(destination);
         let _ = fs::remove_file(&part_path).await;
 
@@ -934,7 +948,7 @@ impl Engine {
         }
 
         if advertised_ranges {
-            let probe = self
+            let mut probe = self
                 .client
                 .get(parsed)
                 .header(RANGE, "bytes=0-0")
@@ -949,7 +963,13 @@ impl Engine {
                 )
                 .is_ok()
             {
-                return Ok((total, true));
+                // Finish the one-byte probe before opening payload connections.
+                // A server can send headers before the probe body.
+                if probe.content_length() == Some(1)
+                    && probe.chunk().await?.is_some_and(|chunk| chunk.len() == 1)
+                {
+                    return Ok((total, true));
+                }
             }
         }
         Ok((total, false))

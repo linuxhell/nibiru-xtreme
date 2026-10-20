@@ -5,15 +5,19 @@
 ## Desenvolvimento multiprotocolo
 
 A branch de desenvolvimento 0.2.0-alpha.1 acrescenta FTP/FTPS, SFTP, HTTP/3
-explícito, aliases WebDAV GET e a fundação nativa de ED2K/Kad. Ela **não** é um
+explícito, aliases WebDAV GET, BitTorrent v1/v2/híbrido, uTP, criptografia MSE,
+DHT IPv4/IPv6 e a fundação nativa de ED2K/Kad. Ela **não** é um
 release multiprotocolo completo. Veja [suporte e limitações](docs/protocols.md).
 O agendador HTTP fixo continua como padrão; os experimentos não foram ativados.
 
 ## Estado atual
 
-A primeira fundação funcional já contém:
+A versão de desenvolvimento contém:
 
-- download HTTP/HTTPS;
+- download HTTP/HTTPS e os transportes opcionais descritos abaixo;
+- BitTorrent v1/v2/híbrido e magnets `btih`/`btmh`, metadata, PEX e pré-visualização;
+- TCP e uTP (BEP 29), com negociação MSE/PE e opção de exigir criptografia;
+- DHT IPv4 e IPv6, com IDs vinculados ao IP conforme BEP 42;
 - cliente com HTTP/2 e TLS via Rustls;
 - retomada segura por HTTP Range quando o servidor oferece suporte;
 - logs estruturados em JSON Lines, focados em eventos importantes;
@@ -24,22 +28,26 @@ A primeira fundação funcional já contém:
 
 > O Nibiru **ainda não substitui o aria2/aria2-ultra no ADM**. A troca definitiva só será feita quando houver paridade funcional, testes multiplataforma e regressões cobertas.
 
-## Protocolos planejados
+## Suporte e trabalho restante
 
-- HTTP/1.1, HTTP/2 e HTTP/3/QUIC;
-- HTTPS;
-- FTP e FTPS;
-- SFTP;
-- WebDAV;
-- BitTorrent v1;
-- BitTorrent v2 / BEP52;
-- torrents híbridos;
-- Magnet;
-- DHT IPv4/IPv6;
-- PEX;
-- uTP;
-- hole punching quando interoperável;
-- ED2K e Kad.
+| Protocolo | Estado na versão de desenvolvimento |
+| --- | --- |
+| HTTP/1.1, HTTPS, HTTP/2 | Download, segmentação e retomada |
+| HTTP/3/QUIC | Seleção explícita; testes locais com TLS |
+| FTP/FTPS e SFTP | Download; SFTP exige fingerprint da chave SSH; ainda sem retomada |
+| WebDAV | Arquivo individual via GET; sem navegação de coleções |
+| BitTorrent v1/v2/híbrido, Magnet | Download, envio, metadata, hashes e provas Merkle verificados |
+| DHT IPv4/IPv6, PEX | Implementados; BEP 42 e persistência separada por família |
+| uTP e MSE/PE | TCP/uTP com criptografia opcional ou obrigatória |
+| Hole punching e descoberta local | Pendentes |
+| ED2K | Fundação nativa de busca, download e compartilhamento explícito |
+| Kad | Apenas bootstrap; roteamento persistente, busca e publicação pendentes |
+
+Os testes independentes usam libtorrent **somente como outro cliente**, fora do
+motor: 18 cenários de download/envio com bytes comparados, v1/v2/híbrido e
+TCP/uTP/MSE. O transporte uTP usa a dependência Rust `librqbit-utp`; consulte
+[avisos de terceiros](THIRD_PARTY_NOTICES.md). Nenhum desses resultados torna a
+versão estável ou conclui a integração do ADM.
 
 ## Objetivos de engenharia
 
@@ -72,7 +80,8 @@ O bootstrap implementa inicialmente:
 - `aria2.removeDownloadResult`;
 - `aria2.changeOption` / `aria2.changeGlobalOption` como compatibilidade inicial.
 
-BitTorrent ainda não está marcado como pronto nessa camada.
+O RPC também oferece `addTorrent`, `getFiles`, `getPeers` e `nibiru.streamUrl`.
+O conjunto completo de métodos e opções do aria2 ainda não foi implementado.
 
 ## Segurança
 

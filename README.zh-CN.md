@@ -1,23 +1,30 @@
 # Nibiru Xtreme
 
-Nibiru Xtreme 是一个使用 Rust 从零开发的跨平台下载引擎。目标是：体积小、安全边界清晰、吞吐量高、支持断点续传，并提供简洁而有效的诊断日志。
+Nibiru Xtreme 是使用 Rust 开发的下载引擎，提供部分兼容 aria2 的 JSON-RPC。
+目前仍是开发中的 alpha 版本；在功能对齐和迁移测试完成之前，ADM 保留现有生产引擎。
 
-## 当前状态
+## 本分支已实现
 
-仓库目前包含第一版可运行基础引擎：
+- HTTP/HTTPS/HTTP2 下载、分段、Range 断点续传和带宽限制。
+- 显式选择的 HTTP/3、FTP/FTPS、SFTP 下载；SFTP 必须提供可信 SSH 主机密钥指纹。
+- WebDAV 单文件 GET 别名，不支持集合遍历。
+- BitTorrent v1/v2/混合、btih/btmh Magnet、元数据交换、Merkle 证明验证、PEX、Tracker、
+  哈希校验续传、文件选择、做种和下载时预览。
+- TCP/uTP、MSE/PE 协商及强制加密模式。
+- 独立的 IPv4/IPv6 DHT、BEP 42 节点 ID 和节点持久化。
+- 原生 ED2K 搜索、传输和显式共享基础；Kad 仅实现 bootstrap。
 
-- HTTP/HTTPS 下载；
-- 支持 HTTP/2 的 Rustls 客户端；
-- 服务器支持 Range 时可安全断点续传；
-- 简洁的 JSON Lines 诊断日志；
-- 仅监听本机回环地址的 JSON-RPC；
-- 初步兼容 ADM 迁移所需的 aria2 RPC 子集；
-- 严格验证 RPC 输出文件名，防止路径穿越；
-- 项目自有代码禁止使用 `unsafe`。
+独立客户端 libtorrent 2.1.1 的 18 个场景覆盖 v1/v2/混合及 TCP/uTP/MSE，
+并逐字节比较完整上传和 Magnet 下载结果。引擎没有嵌入 libtorrent。
+uTP 使用 Rust 依赖 librqbit-utp；参见[第三方声明](THIRD_PARTY_NOTICES.md)。
 
-BitTorrent v1/v2/混合、Magnet、DHT、PEX、uTP、HTTP/3/QUIC、FTP/FTPS、SFTP、WebDAV 和 ED2K/Kad 将作为独立模块逐步实现，并且只有通过互操作性、回归和性能测试后才会标记为稳定。
+## 尚未完成
 
-在 Nibiru 达到功能完整并通过迁移测试之前，ADM 不会移除现有生产下载引擎。
+Hole punching、本地发现、Kad 持久路由/搜索/发布、ED2K 积分/安全身份/混淆/AICH、
+Metalink、完整 WebDAV、FTP/SFTP 续传和完整 aria2 RPC/选项兼容仍待实现。
+MSE 是传统混淆协议，不提供身份认证。项目自身的 Rust 代码禁止 unsafe；依赖有各自的实现和许可证。
+
+详见[协议支持和限制](docs/protocols.md)。
 
 Português: [README.md](README.md)  
 English: [README.en.md](README.en.md)

@@ -78,9 +78,11 @@ struct State {
 
 pub struct Dht {
     socket: Arc<UdpSocket>,
-    id: NodeId,
+    id: Mutex<NodeId>,
+    ip_votes: Mutex<HashMap<IpAddr, IpAddr>>,
     port: u16,
     allow_loopback: bool,
+    ipv6: bool,
     bootstrap: Vec<String>,
     state: Mutex<State>,
     pending: Mutex<HashMap<(SocketAddr, u16), oneshot::Sender<Value>>>,
@@ -128,26 +130,39 @@ fn random_bytes<const N: usize>() -> [u8; N] {
     out
 }
 
-pub fn encode_peer(addr: &SocketAddr) -> Option<[u8; 6]> {
-    let SocketAddr::V4(v4) = addr else {
+pub fn encode_peer(addr: &SocketAddr) -> Option<Vec<u8>> {
+    if addr.port() == 0 {
         return None;
+    }
+    let mut out = match addr.ip() {
+        IpAddr::V4(ip) => ip.octets().to_vec(),
+        IpAddr::V6(ip) => ip.octets().to_vec(),
     };
-    let mut out = [0u8; 6];
-    out[..4].copy_from_slice(&v4.ip().octets());
-    out[4..].copy_from_slice(&v4.port().to_be_bytes());
+    out.extend(addr.port().to_be_bytes());
     Some(out)
 }
 
 pub fn decode_peer(bytes: &[u8]) -> Option<SocketAddr> {
-    if bytes.len() != 6 {
-        return None;
-    }
-    let port = u16::from_be_bytes([bytes[4], bytes[5]]);
-    (port != 0).then(|| SocketAddr::from(([bytes[0], bytes[1], bytes[2], bytes[3]], port)))
+    let (ip, port) = match bytes.len() {
+        6 => (
+            IpAddr::V4(std::net::Ipv4Addr::from(
+                <[u8; 4]>::try_from(&bytes[..4]).ok()?,
+            )),
+            u16::from_be_bytes(bytes[4..].try_into().ok()?),
+        ),
+        18 => (
+            IpAddr::V6(std::net::Ipv6Addr::from(
+                <[u8; 16]>::try_from(&bytes[..16]).ok()?,
+            )),
+            u16::from_be_bytes(bytes[16..].try_into().ok()?),
+        ),
+        _ => return None,
+    };
+    (port != 0).then(|| SocketAddr::new(ip, port))
 }
 
 fn encode_nodes(nodes: &[Node]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(nodes.len() * 26);
+    let mut out = Vec::new();
     for node in nodes {
         if let Some(peer) = encode_peer(&node.addr) {
             out.extend_from_slice(&node.id);
@@ -157,13 +172,14 @@ fn encode_nodes(nodes: &[Node]) -> Vec<u8> {
     out
 }
 
-fn decode_nodes(bytes: &[u8]) -> Vec<(NodeId, SocketAddr)> {
+fn decode_nodes(bytes: &[u8], ipv6: bool) -> Vec<(NodeId, SocketAddr)> {
+    let size = if ipv6 { 38 } else { 26 };
+    if !bytes.len().is_multiple_of(size) {
+        return vec![];
+    }
     bytes
-        .chunks_exact(26)
-        .filter_map(|chunk| {
-            let id: NodeId = chunk[..20].try_into().ok()?;
-            Some((id, decode_peer(&chunk[20..])?))
-        })
+        .chunks_exact(size)
+        .filter_map(|chunk| Some((chunk[..20].try_into().ok()?, decode_peer(&chunk[20..])?)))
         .collect()
 }
 
@@ -175,9 +191,11 @@ impl Dht {
         let port = socket.local_addr()?.port();
         let dht = Arc::new(Self {
             socket: Arc::new(socket),
-            id: random_bytes(),
+            id: Mutex::new(super::dht_security::bind(config.bind, random_bytes())),
+            ip_votes: Mutex::new(HashMap::new()),
             port,
             allow_loopback: config.allow_loopback,
+            ipv6: config.bind.is_ipv6(),
             bootstrap: config.bootstrap,
             state: Mutex::new(State {
                 buckets: vec![Vec::new(); 160],
@@ -221,7 +239,45 @@ impl Dht {
     }
 
     pub fn id(&self) -> NodeId {
-        self.id
+        *self.id.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn observe_ip(&self, reporter: SocketAddr, observed: SocketAddr) {
+        use super::dht_security::{bind, local, voting_network};
+        if local(reporter.ip()) || local(observed.ip()) || observed.is_ipv6() != self.ipv6 {
+            return;
+        }
+        let enough = {
+            let mut votes = self.ip_votes.lock().unwrap_or_else(|e| e.into_inner());
+            if votes.len() >= 32 && !votes.contains_key(&voting_network(reporter.ip())) {
+                votes.clear();
+            }
+            votes.insert(voting_network(reporter.ip()), observed.ip());
+            votes.values().filter(|ip| **ip == observed.ip()).count() >= 3
+        };
+        if enough {
+            let changed = {
+                let mut id = self.id.lock().unwrap_or_else(|e| e.into_inner());
+                let new = bind(observed.ip(), *id);
+                let changed = *id != new;
+                *id = new;
+                changed
+            };
+            if changed {
+                // Re-bucket the known nodes around the newly bound identity.
+                let nodes = {
+                    let mut state = self.state();
+                    state
+                        .buckets
+                        .iter_mut()
+                        .flat_map(std::mem::take)
+                        .collect::<Vec<_>>()
+                };
+                for node in nodes {
+                    self.insert(node.id, node.addr);
+                }
+            }
+        }
     }
 
     pub fn node_count(&self) -> usize {
@@ -233,25 +289,30 @@ impl Dht {
     }
 
     fn address_ok(&self, addr: &SocketAddr) -> bool {
-        let SocketAddr::V4(v4) = addr else {
-            return false;
-        };
-        let ip = v4.ip();
-        v4.port() != 0
+        let ip = addr.ip();
+        addr.port() != 0
+            && addr.is_ipv6() == self.ipv6
             && !ip.is_unspecified()
             && !ip.is_multicast()
-            && !ip.is_broadcast()
-            && !ip.is_link_local()
             && (self.allow_loopback || !ip.is_loopback())
+            && match ip {
+                IpAddr::V4(ip) => !ip.is_broadcast() && !ip.is_link_local(),
+                IpAddr::V6(ip) => !ip.is_unicast_link_local() && ip.to_ipv4_mapped().is_none(),
+            }
+    }
+
+    fn nodes_key(&self) -> &'static str {
+        if self.ipv6 { "nodes6" } else { "nodes" }
     }
 
     // ---- routing table ------------------------------------------------------------------
 
     fn insert(&self, id: NodeId, addr: SocketAddr) {
-        if id == self.id || !self.address_ok(&addr) {
+        if id == self.id() || !self.address_ok(&addr) || !super::dht_security::valid(addr.ip(), &id)
+        {
             return;
         }
-        let Some(index) = bucket_index(&self.id, &id) else {
+        let Some(index) = bucket_index(&self.id(), &id) else {
             return;
         };
         let mut state = self.state();
@@ -316,8 +377,9 @@ impl Dht {
     fn token_for(secret: &[u8; 16], addr: &SocketAddr) -> Vec<u8> {
         let mut hasher = Sha1::new();
         hasher.update(secret);
-        if let SocketAddr::V4(v4) = addr {
-            hasher.update(v4.ip().octets());
+        match addr.ip() {
+            IpAddr::V4(ip) => hasher.update(ip.octets()),
+            IpAddr::V6(ip) => hasher.update(ip.octets()),
         }
         hasher.finalize()[..8].to_vec()
     }
@@ -391,7 +453,12 @@ impl Dht {
                 if self.rate_limited() || !self.address_ok(&from) {
                     return;
                 }
-                if let Some(reply) = self.answer(&message, &tid, from) {
+                if let Some(mut reply) = self.answer(&message, &tid, from) {
+                    if let Value::Dict(fields) = &mut reply
+                        && let Some(ip) = encode_peer(&from)
+                    {
+                        fields.insert(b"ip".to_vec(), Value::Bytes(ip));
+                    }
                     self.send(from, &reply).await;
                 }
             }
@@ -418,7 +485,7 @@ impl Dht {
     }
 
     fn reply(&self, tid: &[u8], mut fields: Vec<(&str, Value)>) -> Value {
-        fields.push(("id", Value::Bytes(self.id.to_vec())));
+        fields.push(("id", Value::Bytes(self.id().to_vec())));
         let r = Value::Dict(
             fields
                 .into_iter()
@@ -445,7 +512,7 @@ impl Dht {
                     return Some(Self::error(tid, 203, "missing target"));
                 };
                 let nodes = encode_nodes(&self.closest(&target, K));
-                self.reply(tid, vec![("nodes", Value::Bytes(nodes))])
+                self.reply(tid, vec![(self.nodes_key(), Value::Bytes(nodes))])
             }
             "get_peers" => {
                 let Some(hash) = target("info_hash") else {
@@ -454,7 +521,10 @@ impl Dht {
                 let mut fields = vec![("token", Value::Bytes(self.make_token(&from)))];
                 let peers = self.stored_peers(&hash);
                 if peers.is_empty() {
-                    fields.push(("nodes", Value::Bytes(encode_nodes(&self.closest(&hash, K)))));
+                    fields.push((
+                        self.nodes_key(),
+                        Value::Bytes(encode_nodes(&self.closest(&hash, K))),
+                    ));
                 } else {
                     let values = peers
                         .iter()
@@ -503,7 +573,7 @@ impl Dht {
             .lock()
             .map_err(|_| anyhow::anyhow!("poisoned"))?
             .insert((to, tid), tx);
-        let mut a: Vec<(Vec<u8>, Value)> = vec![(b"id".to_vec(), Value::Bytes(self.id.to_vec()))];
+        let mut a: Vec<(Vec<u8>, Value)> = vec![(b"id".to_vec(), Value::Bytes(self.id().to_vec()))];
         a.extend(args.into_iter().map(|(k, v)| (k.as_bytes().to_vec(), v)));
         let message = dict([
             ("t", Value::Bytes(tid.to_be_bytes().to_vec())),
@@ -523,6 +593,13 @@ impl Dht {
                 bail!("no answer from {to}");
             }
         };
+        if let Some(observed) = response
+            .get("ip")
+            .and_then(Value::bytes)
+            .and_then(decode_peer)
+        {
+            self.observe_ip(to, observed);
+        }
         if response.get("y").and_then(Value::str) != Some("r") {
             bail!("{to} answered with an error");
         }
@@ -532,7 +609,12 @@ impl Dht {
             .and_then(Value::bytes)
             .and_then(|b| <NodeId>::try_from(b).ok())
         {
+            if !super::dht_security::valid(to.ip(), &id) {
+                bail!("DHT node ID does not match its address");
+            }
             self.insert(id, to);
+        } else {
+            bail!("DHT reply has no valid node ID");
         }
         Ok(r)
     }
@@ -555,7 +637,7 @@ impl Dht {
         let mut out = Vec::new();
         for entry in &self.bootstrap {
             if let Ok(found) = tokio::net::lookup_host(entry.as_str()).await {
-                out.extend(found.filter(SocketAddr::is_ipv4));
+                out.extend(found.filter(|a| a.is_ipv6() == self.ipv6));
             }
         }
         out
@@ -568,7 +650,7 @@ impl Dht {
             self.add_nodes(&seeds).await;
         }
         for _ in 0..2 {
-            let _ = self.find_node(self.id).await;
+            let _ = self.find_node(self.id()).await;
         }
     }
 
@@ -631,16 +713,18 @@ impl Dht {
                 if let Some(values) = r.get("values").and_then(Value::list) {
                     for value in values {
                         if let Some(peer) = value.bytes().and_then(decode_peer)
+                            && self.address_ok(&peer)
                             && found_peers.insert(peer)
                         {
                             lookup.peers.push(peer);
                         }
                     }
                 }
-                if let Some(nodes) = r.get("nodes").and_then(Value::bytes) {
-                    for (id, node_addr) in decode_nodes(nodes) {
-                        if id != self.id
+                if let Some(nodes) = r.get(self.nodes_key()).and_then(Value::bytes) {
+                    for (id, node_addr) in decode_nodes(nodes, self.ipv6) {
+                        if id != self.id()
                             && self.address_ok(&node_addr)
+                            && super::dht_security::valid(node_addr.ip(), &id)
                             && shortlist.insert(node_addr, id).is_none()
                         {
                             progressed = true;
@@ -723,6 +807,26 @@ impl Dht {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn public_address_needs_three_independent_network_votes() {
+        let dht = Dht::start(DhtConfig {
+            bind: "127.0.0.1".parse().unwrap(),
+            bootstrap: vec![],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let old = dht.id();
+        let observed = "8.8.4.4:6881".parse().unwrap();
+        for reporter in ["1.1.1.1:1", "1.1.1.2:2", "9.9.9.9:3"] {
+            dht.observe_ip(reporter.parse().unwrap(), observed);
+            assert_eq!(dht.id(), old);
+        }
+        dht.observe_ip("208.67.222.222:4".parse().unwrap(), observed);
+        assert!(super::super::dht_security::valid(observed.ip(), &dht.id()));
+        assert_ne!(dht.id(), old);
+    }
+
     #[test]
     fn buckets_follow_the_first_differing_bit() {
         let own = [0u8; 20];
@@ -751,15 +855,15 @@ mod tests {
         };
         let encoded = encode_nodes(&[node]);
         assert_eq!(encoded.len(), 26);
-        assert_eq!(decode_nodes(&encoded), vec![([7; 20], peer)]);
+        assert_eq!(decode_nodes(&encoded, false), vec![([7; 20], peer)]);
         assert_eq!(
-            decode_nodes(&encoded[..25]),
+            decode_nodes(&encoded[..25], false),
             vec![],
             "truncated entries are ignored"
         );
         assert!(
-            encode_peer(&"[::1]:80".parse().unwrap()).is_none(),
-            "IPv4 only"
+            encode_peer(&"[::1]:80".parse().unwrap()).unwrap().len() == 18,
+            "IPv6 compact peers have 18 bytes"
         );
     }
 }

@@ -184,7 +184,16 @@ impl RpcServer {
             "aria2.getVersion" | "nibiru.getVersion" => {
                 let mut features = vec!["HTTP", "HTTPS", "HTTP/2", "WebDAV-GET", "RPC", "Resume"];
                 if self.bt.is_some() {
-                    features.extend(["BitTorrent", "Magnet"]);
+                    features.extend([
+                        "BitTorrent",
+                        "BitTorrent-v2",
+                        "Magnet",
+                        "uTP",
+                        "MSE",
+                        "DHT-IPv4",
+                        "DHT-IPv6",
+                        "PEX",
+                    ]);
                 }
                 if cfg!(feature = "ftp") {
                     features.extend(["FTP", "FTPS"]);
@@ -584,6 +593,23 @@ fn request_options(options: Option<&serde_json::Map<String, Value>>) -> Result<R
     }
     if let Some(agent) = text("user-agent") {
         out.headers.push(("User-Agent".into(), agent.into()));
+    }
+    for key in ["split", "max-connection-per-server"] {
+        if let Some(value) = text(key) {
+            let n = value
+                .parse::<usize>()
+                .ok()
+                .filter(|n| *n > 0)
+                .ok_or_else(|| anyhow!("invalid {key}"))?;
+            out.max_connections = Some(out.max_connections.map_or(n, |old| old.min(n)));
+        }
+    }
+    if let Some(value) = text("min-split-size") {
+        out.min_split_size = Some(
+            bt::parse_size(value)
+                .filter(|n| *n > 0)
+                .ok_or_else(|| anyhow!("invalid min-split-size"))?,
+        );
     }
     if let Some(url) = text("all-proxy")
         .or_else(|| text("http-proxy"))

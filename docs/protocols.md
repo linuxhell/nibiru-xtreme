@@ -39,6 +39,35 @@ for FTPS or HTTP/3; it does not disable certificate validation. JSON-RPC addUri
 accepts `ssh-host-key`, `ssh-identity`, and `ca-certificate` as per-task options.
 Resume options are preserved for the same RPC task.
 
+## BitTorrent transport and BEP 52 work
+
+The engine handles v1, v2 and hybrid metainfo and `urn:btmh:1220…` magnets.
+SHA256 piece layers are checked against each file's root; magnet peers supply
+correlated BEP 52 hash responses with authenticated Merkle proofs. Missing hashes
+keep pieces unavailable to the scheduler. Short final file pieces, padding and
+zero-length files are handled separately. Hybrid uploads accept the v1 identity
+and its padding geometry; tracker/DHT announcements cover both known identities.
+
+TCP and uTP support plaintext or MSE/PE. `--enable-utp=false` disables uTP;
+`--bt-force-encryption=true` requires RC4 negotiation and rejects plaintext peers.
+MSE is legacy traffic obfuscation, not peer authentication. The uTP transport
+uses the Apache-2.0 Rust `librqbit-utp` crate, not libtorrent. Native engine code
+continues to forbid unsafe code.
+
+DHT has separate IPv4/IPv6 routing instances, compact address formats and
+IP-bound BEP 42 IDs. A public address change needs observations from three
+independent reporter networks. IPv6 is best effort where the OS cannot bind it;
+`--enable-dht6=false` disables it. Saved IPv6 nodes use the DHT path's `.ipv6`
+extension. DHT can use a different UDP port from the TCP/uTP peer port.
+
+`tests/interop_libtorrent.py` uses libtorrent 2.1.1 only as an independent test
+client: v1/v2/hybrid download through metadata exchange and upload, TCP with MSE,
+uTP plaintext and uTP with MSE (18 scenarios). Payloads are compared byte for
+byte; v2 uses over 128 pieces to exercise multiple hash requests. Rust tests
+exercise IPv6 transport/DHT and corrupted Merkle proofs. These loopback tests do
+not prove public tracker availability or NAT traversal. Hole punching and local
+service discovery remain unimplemented.
+
 ## Embedding without unused transports
 
 Cargo features `ftp`, `sftp`, and `http3` are enabled in the standalone build.

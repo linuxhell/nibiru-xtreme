@@ -41,6 +41,8 @@ pub struct Picker {
     piece_length: u64,
     total: u64,
     count: usize,
+    piece_lengths: Option<Vec<u64>>,
+    hash_available: Bitfield,
     have: Bitfield,
     wanted: Bitfield,
     availability: Vec<u32>,
@@ -57,6 +59,8 @@ impl Picker {
             piece_length,
             total,
             count,
+            piece_lengths: None,
+            hash_available: Bitfield::full(count),
             have,
             wanted,
             availability: vec![0; count],
@@ -79,9 +83,26 @@ impl Picker {
     }
 
     pub fn piece_len(&self, piece: usize) -> u64 {
+        if let Some(lengths) = &self.piece_lengths {
+            return lengths.get(piece).copied().unwrap_or(0);
+        }
         self.total
             .saturating_sub(piece as u64 * self.piece_length)
             .min(self.piece_length)
+    }
+
+    pub fn with_piece_lengths(mut self, lengths: Vec<u64>) -> Self {
+        assert_eq!(lengths.len(), self.count);
+        self.piece_lengths = Some(lengths);
+        self
+    }
+
+    pub fn set_hash_available(&mut self, piece: usize, available: bool) {
+        if available {
+            self.hash_available.set(piece);
+        } else {
+            self.hash_available.clear(piece);
+        }
     }
 
     fn block_count(&self, piece: usize) -> usize {
@@ -140,7 +161,11 @@ impl Picker {
     // ---- picking ------------------------------------------------------------------------
 
     fn candidate(&self, piece: usize, theirs: &Bitfield) -> bool {
-        piece < self.count && self.wanted.get(piece) && !self.have.get(piece) && theirs.get(piece)
+        piece < self.count
+            && self.wanted.get(piece)
+            && self.hash_available.get(piece)
+            && !self.have.get(piece)
+            && theirs.get(piece)
     }
 
     /// Next block to request from `peer`, who owns `theirs`. Prefers finishing pieces already in
@@ -259,6 +284,7 @@ impl Picker {
         // Untouched: not started, or started and fully given back.
         let untouched = |s: &Self, p: usize| {
             s.wanted.get(p)
+                && s.hash_available.get(p)
                 && !s.have.get(p)
                 && s.progress
                     .get(&p)

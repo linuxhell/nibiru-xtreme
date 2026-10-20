@@ -84,6 +84,10 @@ pub struct Storage {
     piece_length: u64,
     total: u64,
     pieces: Vec<[u8; 20]>,
+    count: usize,
+    v2: Option<super::v2::V2Info>,
+    v2_mode: bool,
+    v2_hashes: Mutex<Vec<Option<[u8; 32]>>>,
     open: Mutex<HashMap<(usize, bool), std::sync::Arc<File>>>,
 }
 
@@ -111,8 +115,28 @@ impl Storage {
             piece_length: torrent.piece_length,
             total: torrent.total_length,
             pieces: torrent.pieces.clone(),
+            count: torrent.piece_count(),
+            v2: torrent.v2.clone(),
+            v2_mode: torrent.wire_v2,
+            v2_hashes: Mutex::new(
+                torrent
+                    .v2
+                    .as_ref()
+                    .map(|v| v.hashes.clone())
+                    .unwrap_or_default(),
+            ),
             open: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Empty files carry no blocks and would otherwise never be created.
+    pub fn create_empty_files(&self, selected: Option<&[usize]>) -> Result<()> {
+        for (i, slot) in self.slots.iter().enumerate() {
+            if !slot.pad && slot.length == 0 && selected.is_none_or(|s| s.contains(&i)) {
+                self.handle(i, true)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn piece_length(&self) -> u64 {
@@ -124,6 +148,9 @@ impl Storage {
     }
 
     pub fn piece_len(&self, index: usize) -> u64 {
+        if self.v2_mode {
+            return self.v2.as_ref().map_or(0, |v| v.piece_len(index));
+        }
         self.total
             .saturating_sub(index as u64 * self.piece_length)
             .min(self.piece_length)
@@ -241,8 +268,188 @@ impl Storage {
     }
 
     pub fn piece_matches(&self, index: usize, data: &[u8]) -> bool {
-        data.len() as u64 == self.piece_len(index)
-            && Sha1::digest(data).as_slice() == self.pieces[index]
+        if index >= self.count || data.len() as u64 != self.piece_len(index) {
+            return false;
+        }
+        if !self.pieces.is_empty() {
+            let legacy_length = self
+                .total
+                .saturating_sub(index as u64 * self.piece_length)
+                .min(self.piece_length) as usize;
+            let matches = if legacy_length == data.len() {
+                Sha1::digest(data).as_slice() == self.pieces[index]
+            } else {
+                let mut legacy = data.to_vec();
+                legacy.resize(legacy_length, 0);
+                Sha1::digest(&legacy).as_slice() == self.pieces[index]
+            };
+            if !matches {
+                return false;
+            }
+        }
+        if let Some(v2) = &self.v2 {
+            let expected = self
+                .v2_hashes
+                .lock()
+                .ok()
+                .and_then(|h| h.get(index).copied().flatten());
+            let Some(expected) = expected else {
+                return !self.v2_mode;
+            };
+            let length = v2.piece_len(index) as usize;
+            if length > data.len()
+                || super::v2::piece_root(&data[..length], v2.leaf_capacity(index)).ok()
+                    != Some(expected)
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub fn v2_piece_known(&self, index: usize) -> bool {
+        !self.v2_mode
+            || self.v2.is_none()
+            || self
+                .v2_hashes
+                .lock()
+                .ok()
+                .and_then(|h| h.get(index).copied().flatten())
+                .is_some()
+    }
+
+    pub fn v2_hashes(&self) -> Vec<Option<[u8; 32]>> {
+        self.v2_hashes.lock().map(|h| h.clone()).unwrap_or_default()
+    }
+
+    pub fn metadata_complete(&self) -> bool {
+        !self.v2_mode
+            || self
+                .v2_hashes
+                .lock()
+                .is_ok_and(|h| h.iter().all(Option::is_some))
+    }
+
+    /// The caller supplies a complete authenticated piece layer, never raw
+    /// untrusted hashes. Network proof blocks are verified before reaching here.
+    pub fn install_v2_layer(&self, root: &[u8; 32], hashes: &[[u8; 32]]) -> Result<()> {
+        let v2 = self.v2.as_ref().context("not a v2 torrent")?;
+        let file = v2
+            .files
+            .iter()
+            .find(|f| &f.root == root)
+            .context("unknown v2 file root")?;
+        v2.validate_layer(file, hashes)?;
+        let mut known = self
+            .v2_hashes
+            .lock()
+            .map_err(|_| anyhow::anyhow!("hash table poisoned"))?;
+        for (i, h) in hashes.iter().enumerate() {
+            known[file.first_piece + i] = Some(*h);
+        }
+        Ok(())
+    }
+
+    pub fn install_v2_proof(
+        &self,
+        request: &super::message::HashRequest,
+        hashes: &[[u8; 32]],
+    ) -> Result<Vec<usize>> {
+        let v2 = self.v2.as_ref().context("not a v2 torrent")?;
+        let file = v2
+            .files
+            .iter()
+            .find(|f| f.root == request.root)
+            .context("unknown v2 file root")?;
+        v2.verify_response(file, request, hashes)?;
+        let mut known = self
+            .v2_hashes
+            .lock()
+            .map_err(|_| anyhow::anyhow!("hash table poisoned"))?;
+        let mut added = vec![];
+        for file in v2.files.iter().filter(|f| f.root == request.root) {
+            for (i, hash) in hashes[..request.length as usize].iter().enumerate() {
+                let piece = request.index as usize + i;
+                if piece >= file.pieces {
+                    break;
+                }
+                let index = file.first_piece + piece;
+                if known[index].is_none() {
+                    known[index] = Some(*hash);
+                    added.push(index);
+                }
+            }
+        }
+        Ok(added)
+    }
+
+    /// Serve leaf or piece-layer hashes, with proofs, without reading whole
+    /// files. Reading data below the piece layer requires a verified piece.
+    pub fn hash_response(
+        &self,
+        request: &super::message::HashRequest,
+        have: &Bitfield,
+    ) -> Result<Vec<[u8; 32]>> {
+        let v2 = self.v2.as_ref().context("not a v2 torrent")?;
+        let file = v2
+            .files
+            .iter()
+            .find(|f| f.root == request.root)
+            .context("unknown file root")?;
+        let (level, proofs) = v2.geometry(file, request)?;
+        let known = self.v2_hashes();
+        let node = |layer: u32, index: u32| -> Result<[u8; 32]> {
+            let base = (v2.piece_length / super::v2::BLOCK).ilog2();
+            if layer >= base && file.pieces > 1 {
+                let width = 1usize
+                    .checked_shl(layer - base)
+                    .context("Merkle width overflow")?;
+                if width > 1_048_576 {
+                    bail!("Merkle proof exceeds bounds");
+                }
+                let start = (index as usize)
+                    .checked_mul(width)
+                    .context("Merkle offset overflow")?;
+                let padding = super::v2::zero_at_layer(base);
+                let mut hashes = Vec::with_capacity(width);
+                for i in start..start + width {
+                    hashes.push(if i < file.pieces {
+                        known[file.first_piece + i].context("piece hash not available")?
+                    } else {
+                        padding
+                    });
+                }
+                super::v2::root(&hashes, padding)
+            } else {
+                let bytes = super::v2::BLOCK
+                    .checked_shl(layer)
+                    .context("Merkle span overflow")?;
+                let start = (index as u64)
+                    .checked_mul(bytes)
+                    .context("Merkle offset overflow")?;
+                if start >= file.length {
+                    return Ok(super::v2::zero_at_layer(layer));
+                }
+                let len = bytes.min(file.length - start);
+                let first = file.first_piece + (start / v2.piece_length) as usize;
+                let last = file.first_piece + ((start + len - 1) / v2.piece_length) as usize;
+                if (first..=last).any(|p| !have.get(p)) {
+                    bail!("data for hash request is not verified");
+                }
+                let data = self.read(file.offset + start, len)?;
+                super::v2::piece_root(&data, 1usize << layer)
+            }
+        };
+        let mut out = Vec::with_capacity(request.length as usize + proofs as usize);
+        for i in request.index..request.index + request.length {
+            out.push(node(request.base_layer, i)?);
+        }
+        let mut index = request.index / request.length;
+        for extra in 0..proofs {
+            out.push(node(request.base_layer + level + extra, index ^ 1)?);
+            index >>= 1;
+        }
+        Ok(out)
     }
 
     /// Re-hashes whatever is on disk for `index`. A missing or short file simply means "not have".
@@ -270,7 +477,7 @@ impl Storage {
         mut progress: impl FnMut(usize, usize),
         cancel: &std::sync::atomic::AtomicBool,
     ) -> Bitfield {
-        let count = self.pieces.len();
+        let count = self.count;
         let mut have = Bitfield::new(count);
         for index in 0..count {
             if cancel.load(std::sync::atomic::Ordering::Relaxed) {

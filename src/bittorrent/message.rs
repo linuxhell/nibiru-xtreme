@@ -18,6 +18,37 @@ pub const MAX_MESSAGE: usize = 2 * 1024 * 1024;
 /// A `piece` message may carry at most this many data bytes (the standard block is 16 KiB).
 pub const MAX_BLOCK: usize = 32 * 1024;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct HashRequest {
+    pub root: [u8; 32],
+    pub base_layer: u32,
+    pub index: u32,
+    pub length: u32,
+    pub proof_layers: u32,
+}
+
+impl HashRequest {
+    fn encode(&self) -> Vec<u8> {
+        let mut out = self.root.to_vec();
+        for n in [self.base_layer, self.index, self.length, self.proof_layers] {
+            out.extend(n.to_be_bytes());
+        }
+        out
+    }
+    fn decode(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() != 48 {
+            bail!("invalid hash request length");
+        }
+        Ok(Self {
+            root: bytes[..32].try_into()?,
+            base_layer: be32(&bytes[32..]),
+            index: be32(&bytes[36..]),
+            length: be32(&bytes[40..]),
+            proof_layers: be32(&bytes[44..]),
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Handshake {
     pub reserved: [u8; 8],
@@ -84,6 +115,12 @@ pub async fn read_handshake<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Hand
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Message {
     KeepAlive,
+    HashRequest(HashRequest),
+    Hashes {
+        request: HashRequest,
+        hashes: Vec<[u8; 32]>,
+    },
+    HashReject(HashRequest),
     Choke,
     Unchoke,
     Interested,
@@ -129,6 +166,21 @@ impl Message {
     pub fn encode(&self) -> Vec<u8> {
         let mut body = Vec::new();
         let id = match self {
+            Message::HashRequest(request) => {
+                body.extend(request.encode());
+                21
+            }
+            Message::Hashes { request, hashes } => {
+                body.extend(request.encode());
+                for hash in hashes {
+                    body.extend(hash);
+                }
+                22
+            }
+            Message::HashReject(request) => {
+                body.extend(request.encode());
+                23
+            }
             Message::KeepAlive => return 0u32.to_be_bytes().to_vec(),
             Message::Choke => 0,
             Message::Unchoke => 1,
@@ -298,6 +350,28 @@ impl Message {
                     payload: body[1..].to_vec(),
                 }
             }
+            21 | 23 => {
+                let request = HashRequest::decode(body)?;
+                if id == 21 {
+                    Message::HashRequest(request)
+                } else {
+                    Message::HashReject(request)
+                }
+            }
+            22 => {
+                if body.len() < 48
+                    || !(body.len() - 48).is_multiple_of(32)
+                    || (body.len() - 48) / 32 > 544
+                {
+                    bail!("invalid hash response size");
+                }
+                let request = HashRequest::decode(&body[..48])?;
+                let hashes = body[48..]
+                    .chunks_exact(32)
+                    .map(|h| h.try_into().expect("32 bytes"))
+                    .collect();
+                Message::Hashes { request, hashes }
+            }
             // Unknown message types must be skipped, not treated as fatal.
             other => bail!("unknown message id {other}"),
         })
@@ -351,7 +425,7 @@ impl ExtHandshake {
             metadata_size,
             listen_port: Some(listen_port),
             client: Some(format!("Nibiru Xtreme {}", env!("CARGO_PKG_VERSION"))),
-            request_queue: Some(250),
+            request_queue: Some(super::peer::MAX_UPLOAD_QUEUE as u32),
         }
     }
 

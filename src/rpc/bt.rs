@@ -31,8 +31,11 @@ pub struct BtConfig {
     pub allow_loopback_peers: bool,
     /// Trackerless peer discovery (aria2's `--enable-dht`).
     pub dht: bool,
+    pub dht6: bool,
     /// Where known DHT nodes are kept between runs (`--dht-file-path`).
     pub dht_file: Option<PathBuf>,
+    pub require_encryption: bool,
+    pub enable_tcp: bool,
 }
 
 impl Default for BtConfig {
@@ -46,7 +49,10 @@ impl Default for BtConfig {
             default_dir: PathBuf::from("."),
             allow_loopback_peers: false,
             dht: true,
+            dht6: true,
             dht_file: None,
+            require_encryption: false,
+            enable_tcp: true,
         }
     }
 }
@@ -134,6 +140,13 @@ impl BtService {
                 ..DhtConfig::default()
             });
         }
+        if config.dht && config.dht6 && session_config.dht6.is_none() {
+            session_config.dht6 = Some(DhtConfig {
+                bind: "::".parse().expect("IPv6 unspecified"),
+                allow_loopback: config.allow_loopback_peers,
+                ..DhtConfig::default()
+            });
+        }
         let session = match config.port_range {
             Some((first, last)) if session_config.listen_port == 0 => {
                 let mut started = None;
@@ -156,30 +169,39 @@ impl BtService {
             _ => Session::start(session_config).await?,
         };
         let stream = StreamServer::start(&session).await?;
-        if let (Some(dht), Some(file)) = (session.dht().cloned(), config.dht_file.clone()) {
-            // Known nodes make the next start independent of the public bootstrap routers.
-            tokio::spawn(async move {
-                if let Ok(saved) = tokio::fs::read_to_string(&file).await {
-                    let nodes: Vec<SocketAddr> = saved
-                        .lines()
-                        .filter_map(|l| l.trim().parse().ok())
-                        .take(300)
-                        .collect();
-                    dht.add_nodes(&nodes).await;
-                }
-                loop {
-                    tokio::time::sleep(Duration::from_secs(600)).await;
-                    let nodes = dht.export_nodes();
-                    if nodes.is_empty() {
-                        continue;
+        let persistence = [
+            (session.dht().cloned(), config.dht_file.clone()),
+            (
+                session.dht6().cloned(),
+                config.dht_file.as_ref().map(|p| p.with_extension("ipv6")),
+            ),
+        ];
+        for (dht, file) in persistence {
+            if let (Some(dht), Some(file)) = (dht, file) {
+                // Known nodes make the next start independent of the public bootstrap routers.
+                tokio::spawn(async move {
+                    if let Ok(saved) = tokio::fs::read_to_string(&file).await {
+                        let nodes: Vec<SocketAddr> = saved
+                            .lines()
+                            .filter_map(|l| l.trim().parse().ok())
+                            .take(300)
+                            .collect();
+                        dht.add_nodes(&nodes).await;
                     }
-                    let text: String = nodes.iter().map(|n| format!("{n}\n")).collect();
-                    let temp = file.with_extension("tmp");
-                    if tokio::fs::write(&temp, text).await.is_ok() {
-                        let _ = tokio::fs::rename(&temp, &file).await;
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(600)).await;
+                        let nodes = dht.export_nodes();
+                        if nodes.is_empty() {
+                            continue;
+                        }
+                        let text: String = nodes.iter().map(|n| format!("{n}\n")).collect();
+                        let temp = file.with_extension("tmp");
+                        if tokio::fs::write(&temp, text).await.is_ok() {
+                            let _ = tokio::fs::rename(&temp, &file).await;
+                        }
                     }
-                }
-            });
+                });
+            }
         }
         Ok(Arc::new(Self {
             session,
@@ -213,6 +235,11 @@ impl BtService {
         settings.allow_loopback_peers = self.config.allow_loopback_peers;
         settings.seed_time = self.config.seed_time;
         settings.seed_ratio = self.config.seed_ratio.filter(|r| *r > 0.0);
+        settings.require_encryption = self.config.require_encryption
+            || flag(options, "bt-force-encryption").unwrap_or(false)
+            || flag(options, "bt-require-crypto").unwrap_or(false);
+        settings.enable_tcp = self.config.enable_tcp;
+        settings.enable_utp = self.config.session.enable_utp;
         if let Some(time) = text(options, "seed-time").and_then(|v| v.parse::<f64>().ok()) {
             settings.seed_time = Some(Duration::from_secs_f64((time * 60.0).max(0.0)));
         }

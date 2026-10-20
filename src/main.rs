@@ -180,6 +180,10 @@ async fn run_aria2_compatible_rpc(args: &[String]) -> Result<()> {
             }
             "dir" => bt.default_dir = PathBuf::from(value),
             "enable-dht" => bt.dht = value == "true",
+            "enable-dht6" => bt.dht6 = value == "true",
+            "enable-utp" => bt.session.enable_utp = value == "true",
+            "x-nibiru-enable-tcp" => bt.enable_tcp = value == "true",
+            "bt-force-encryption" | "bt-require-crypto" => bt.require_encryption |= value == "true",
             "dht-file-path" => bt.dht_file = Some(PathBuf::from(value)),
             // Not an aria2 option: lets tests and LAN setups connect to peers on this machine.
             "x-nibiru-allow-loopback-peers" => bt.allow_loopback_peers = value == "true",

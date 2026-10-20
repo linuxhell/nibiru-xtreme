@@ -77,6 +77,36 @@ async fn announces_with_a_bad_token_are_refused() {
 }
 
 #[tokio::test]
+async fn ipv6_nodes_bootstrap_announce_and_find_peers() {
+    let start = |bootstrap| async {
+        Dht::start(DhtConfig {
+            bind: "::1".parse().unwrap(),
+            port: 0,
+            bootstrap,
+            allow_loopback: true,
+        })
+        .await
+        .unwrap()
+    };
+    let router = start(vec![]).await;
+    let seed = start(vec![format!("[::1]:{}", router.port())]).await;
+    let client = start(vec![format!("[::1]:{}", router.port())]).await;
+    seed.bootstrap().await;
+    client.bootstrap().await;
+    let hash = [0x39; 20];
+    let lookup = seed.get_peers(hash).await;
+    assert!(!lookup.tokens.is_empty());
+    assert!(seed.announce(hash, 51413, &lookup.tokens).await > 0);
+    let found = client.get_peers(hash).await;
+    assert!(
+        found.peers.contains(&"[::1]:51413".parse().unwrap()),
+        "{:?}",
+        found.peers
+    );
+    assert!(found.peers.iter().all(SocketAddr::is_ipv6));
+}
+
+#[tokio::test]
 async fn silent_or_non_dht_addresses_do_not_hang_or_poison_the_table() {
     let a = node(vec![]).await;
     let silent = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
