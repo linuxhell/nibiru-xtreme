@@ -25,6 +25,55 @@ pub struct SearchResult {
     pub link: String,
 }
 
+/// A server-advertised source. Low-ID sources need a server callback;
+/// their numeric client ID is never interpreted as an IP address.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileSource {
+    pub client_id: u32,
+    pub host: Option<std::net::Ipv4Addr>,
+    pub port: u16,
+    pub requires_callback: bool,
+}
+
+fn file_hash(value: &str) -> Result<[u8; 16]> {
+    if value.len() != 32 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
+        bail!("invalid ED2K file hash");
+    }
+    let mut hash = [0; 16];
+    for (index, byte) in hash.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)?;
+    }
+    Ok(hash)
+}
+
+fn file_sources(data: &[u8], expected: &[u8; 16]) -> Result<Vec<FileSource>> {
+    let mut reader = Reader::new(data);
+    if reader.take(16)? != expected {
+        bail!("ED2K source response has a different file hash");
+    }
+    let count = reader.u8()? as usize;
+    if data.len() != 17 + count * 6 {
+        bail!("invalid ED2K source response length");
+    }
+    let mut sources = Vec::with_capacity(count);
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..count {
+        let id = reader.u32()?;
+        let port = reader.u16()?;
+        if id == 0 || port == 0 || !seen.insert((id, port)) {
+            continue;
+        }
+        let low_id = id < 0x0100_0000;
+        sources.push(FileSource {
+            client_id: id,
+            host: (!low_id).then(|| std::net::Ipv4Addr::from(id.to_le_bytes())),
+            port,
+            requires_callback: low_id,
+        });
+    }
+    Ok(sources)
+}
+
 pub(crate) async fn frame<R: AsyncRead + Unpin>(reader: &mut R) -> Result<(u8, Vec<u8>)> {
     let protocol = reader.read_u8().await?;
     if !matches!(protocol, 0xe3 | 0xd4 | 0xc5) {
@@ -139,8 +188,12 @@ fn results(data: &[u8]) -> Result<Vec<SearchResult>> {
     Ok(results)
 }
 
+type SourceReply = oneshot::Sender<Result<Vec<FileSource>>>;
+type PendingSources = ([u8; 16], SourceReply);
+
 enum Command {
     Search(String, oneshot::Sender<Result<Vec<SearchResult>>>),
+    Sources([u8; 16], SourceReply),
 }
 struct Inner {
     commands: mpsc::Sender<Command>,
@@ -222,6 +275,9 @@ impl ServerConnection {
             }
             let _stop_pump = StopPump(pump.abort_handle());
             let mut pending: Option<oneshot::Sender<Result<Vec<SearchResult>>>> = None;
+            let mut pending_sources: Option<PendingSources> = None;
+            let mut source_deadline = tokio::time::Instant::now();
+            let mut last_sources = None;
             let mut deadline = tokio::time::Instant::now() + Duration::from_secs(3600);
             loop {
                 tokio::select! {
@@ -232,12 +288,39 @@ impl ServerConnection {
                             if let Err(error) = send(&mut writer,0x16,&data).await { let _ = reply.send(Err(error)); break; }
                             pending=Some(reply); deadline=tokio::time::Instant::now()+Duration::from_secs(20);
                         },
+                        Some(Command::Sources(hash,reply)) => {
+                            if pending_sources.is_some() { let _ = reply.send(Err(anyhow!("source lookup already in progress"))); continue; }
+                            if last_sources.is_some_and(|last: tokio::time::Instant| last.elapsed() < Duration::from_secs(1)) {
+                                let _ = reply.send(Err(anyhow!("wait before requesting more sources"))); continue;
+                            }
+                            last_sources = Some(tokio::time::Instant::now());
+                            match tokio::time::timeout(Duration::from_secs(10), send(&mut writer,0x19,&hash)).await {
+                                Ok(Ok(())) => {},
+                                error => { let _ = reply.send(Err(anyhow!("cannot request ED2K sources: {error:?}"))); break; }
+                            }
+                            pending_sources=Some((hash,reply));
+                            source_deadline=tokio::time::Instant::now()+Duration::from_secs(20);
+                        },
                         None => break,
                     },
                     packet = incoming.recv() => match packet {
                         Some(Ok((0x33,data))) => if let Some(reply) = pending.take() { let _ = reply.send(results(&data)); },
+                        Some(Ok((0x42,data))) => {
+                            if let Some((hash,_)) = pending_sources.as_ref() {
+                                // Ignore unrelated unsolicited packets; never attach another
+                                // file's sources to the pending request.
+                                if data.get(..16) == Some(hash.as_slice()) {
+                                    let (hash,reply) = pending_sources.take().expect("pending source lookup");
+                                    let _ = reply.send(file_sources(&data,&hash));
+                                }
+                            }
+                        },
                         Some(Ok(_)) => {},
                         _ => break,
+                    },
+                    _ = tokio::time::sleep_until(source_deadline), if pending_sources.is_some() => {
+                        if let Some((_,reply)) = pending_sources.take() { let _ = reply.send(Err(anyhow!("ED2K source lookup timed out"))); }
+                        break;
                     },
                     _ = tokio::time::sleep_until(deadline), if pending.is_some() => {
                         if let Some(reply) = pending.take() { let _ = reply.send(Err(anyhow!("ED2K search timed out"))); }
@@ -269,6 +352,23 @@ impl ServerConnection {
     }
     pub fn is_low_id(&self) -> bool {
         self.client_id < 0x0100_0000
+    }
+    /// Ask the connected server for sources using the baseline OP_GETSOURCES
+    /// hash-only packet. This does not connect to peers or request callbacks.
+    pub async fn sources(&self, hash: &str) -> Result<Vec<FileSource>> {
+        let hash = file_hash(hash)?;
+        if !self.is_connected() {
+            bail!("ED2K server is disconnected");
+        }
+        let (reply, response) = oneshot::channel();
+        self.inner
+            .commands
+            .send(Command::Sources(hash, reply))
+            .await
+            .context("ED2K server disconnected")?;
+        response
+            .await
+            .context("ED2K server disconnected during source lookup")?
     }
     pub async fn search(&self, query: &str) -> Result<Vec<SearchResult>> {
         if query.trim().is_empty() || query.len() > 1024 || query.chars().any(char::is_control) {
@@ -333,6 +433,84 @@ mod tests {
         assert!(results[0].link.contains("ed2k://|file|example"));
         fixture.await.unwrap();
     }
+    #[test]
+    fn source_packets_validate_hash_length_duplicates_and_low_ids() {
+        assert!(file_hash("é").is_err());
+        assert!(file_hash(&"g".repeat(32)).is_err());
+        assert_eq!(file_hash(&"AB".repeat(16)).unwrap(), [0xab; 16]);
+        let mut data = vec![9; 16];
+        data.push(4);
+        for (id, port) in [(0x04030201u32, 4662u16), (123, 4663), (123, 4663), (0, 0)] {
+            data.extend(id.to_le_bytes());
+            data.extend(port.to_le_bytes());
+        }
+        let sources = file_sources(&data, &[9; 16]).unwrap();
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources[0].host.unwrap().to_string(), "1.2.3.4");
+        assert!(!sources[0].requires_callback);
+        assert!(sources[1].host.is_none());
+        assert!(sources[1].requires_callback);
+        assert!(file_sources(&data, &[8; 16]).is_err());
+        data.pop();
+        assert!(file_sources(&data, &[9; 16]).is_err());
+        data.extend([0, 0]);
+        assert!(file_sources(&data, &[9; 16]).is_err());
+    }
+
+    #[tokio::test]
+    async fn source_lookup_correlates_real_wire_packets_and_disconnect_cancels() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (finish, wait) = oneshot::channel();
+        let fixture = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            assert_eq!(frame(&mut stream).await.unwrap().0, 1);
+            send(&mut stream, 0x40, &123u32.to_le_bytes())
+                .await
+                .unwrap();
+            let (opcode, hash) = frame(&mut stream).await.unwrap();
+            assert_eq!(opcode, 0x19);
+            assert_eq!(hash, vec![0xab; 16]);
+            let mut response = vec![0xcd; 16];
+            response.push(0);
+            send(&mut stream, 0x42, &response).await.unwrap();
+            response = vec![0xab; 16];
+            response.push(1);
+            response.extend([1, 2, 3, 4]);
+            response.extend(4662u16.to_le_bytes());
+            send(&mut stream, 0x42, &response).await.unwrap();
+            let _ = wait.await;
+        });
+        let connection = ServerConnection::connect(
+            Server {
+                host: "127.0.0.1".into(),
+                port: address.port(),
+                name: "fixture".into(),
+                description: String::new(),
+            },
+            [7; 16],
+            "Nibiru",
+            0,
+        )
+        .await
+        .unwrap();
+        assert!(connection.sources("invalid").await.is_err());
+        let sources = connection.sources(&"ab".repeat(16)).await.unwrap();
+        assert_eq!(sources[0].host.unwrap().to_string(), "1.2.3.4");
+        assert!(
+            connection
+                .sources(&"ab".repeat(16))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("wait")
+        );
+        connection.disconnect();
+        assert!(connection.sources(&"ab".repeat(16)).await.is_err());
+        let _ = finish.send(());
+        fixture.await.unwrap();
+    }
+
     #[tokio::test]
     async fn rejects_packet_length_bombs_before_allocating() {
         let mut bytes = &[0xe3, 255, 255, 255, 255][..];

@@ -5,7 +5,7 @@ pub mod metadata;
 mod server;
 
 pub use kad::{BootstrapResult, bootstrap};
-pub use server::{SearchResult, ServerConnection};
+pub use server::{FileSource, SearchResult, ServerConnection};
 pub const SERVER_LIST_URL: &str = "https://upd.emule-security.org/server.met";
 pub const NODE_LIST_URL: &str = "https://upd.emule-security.org/nodes.dat";
 
