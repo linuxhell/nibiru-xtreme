@@ -1,4 +1,4 @@
-use super::{FileLink, FileSource, ServerConnection, peer};
+use super::{FileLink, FileSource, ServerConnection, ShareRegistry, peer};
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use std::{
@@ -129,6 +129,14 @@ impl Drop for IncomingListener {
 }
 impl IncomingListener {
     pub async fn bind(identity: [u8; 16], preferred_port: u16) -> Result<Self> {
+        Self::bind_with_shares(identity, preferred_port, ShareRegistry::default()).await
+    }
+
+    pub async fn bind_with_shares(
+        identity: [u8; 16],
+        preferred_port: u16,
+        shares: ShareRegistry,
+    ) -> Result<Self> {
         let listener =
             match TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, preferred_port)).await {
                 Ok(listener) => listener,
@@ -148,6 +156,7 @@ impl IncomingListener {
         let completed = handshakes.clone();
         let callbacks = CallbackRegistry::default();
         let registry = callbacks.clone();
+        let shared = shares.clone();
         let task = tokio::spawn(async move {
             struct Offline(Arc<AtomicBool>);
             impl Drop for Offline {
@@ -162,11 +171,11 @@ impl IncomingListener {
                     accepted=listener.accept()=>{
                         let Ok((stream,_))=accepted else {break;};
                         if sessions.len()>=16 {drop(stream);continue;}
-                        let active=peers.clone();let id=id.clone();let completed=completed.clone();let registry=registry.clone();
+                        let active=peers.clone();let id=id.clone();let completed=completed.clone();let registry=registry.clone();let shared=shared.clone();
                         sessions.spawn(async move {
                             struct Active(Arc<AtomicUsize>);impl Drop for Active {fn drop(&mut self){self.0.fetch_sub(1,Ordering::AcqRel);}}
                             active.fetch_add(1,Ordering::AcqRel);let _active=Active(active);
-                            let _=tokio::time::timeout(Duration::from_secs(30),session(stream,identity,id,completed,registry)).await;
+                            let _=tokio::time::timeout(Duration::from_secs(30),session(stream,identity,id,completed,registry,shared)).await;
                         });
                     },
                     _=sessions.join_next(), if !sessions.is_empty()=>{},
@@ -204,6 +213,7 @@ async fn session(
     client_id: Arc<AtomicU32>,
     completed: Arc<AtomicU64>,
     callbacks: CallbackRegistry,
+    shares: ShareRegistry,
 ) -> Result<()> {
     let (protocol, op, data) = peer::frame(&mut stream).await?;
     if protocol != 0xe3 || op != 1 || data.first() != Some(&16) {
@@ -222,11 +232,77 @@ async fn session(
         let (protocol, op, data) = peer::frame(&mut stream).await?;
         match (protocol, op) {
             (0xc5, 1) => peer::send(&mut stream, 0xc5, 2, &[60, 1, 0, 0, 0, 0]).await?,
-            (0xe3, 0x58 | 0x4f | 0x51 | 0x54) => {
-                if data.len() != 16 {
-                    bail!("invalid incoming file request");
+            (0xe3, 0x58) => {
+                if data.len() != 16 { bail!("invalid filename request"); }
+                let hash: [u8;16] = data[..16].try_into()?;
+                if let Some(file) = shares.get(&hash) {
+                    let name = file.link.name.as_bytes();
+                    if name.len() > u16::MAX as usize { bail!("shared filename too long"); }
+                    let mut answer = hash.to_vec();
+                    answer.extend((name.len() as u16).to_le_bytes());
+                    answer.extend(name);
+                    peer::send(&mut stream, 0xe3, 0x59, &answer).await?;
+                } else {
+                    peer::send(&mut stream, 0xe3, 0x48, &hash).await?;
                 }
-                peer::send(&mut stream, 0xe3, 0x48, &data).await?;
+            }
+            (0xe3, 0x4f) => {
+                if data.len() != 16 { bail!("invalid file status request"); }
+                let hash: [u8;16] = data[..16].try_into()?;
+                if let Some(file) = shares.get(&hash) {
+                    let count = file.link.part_count();
+                    let mut answer = hash.to_vec();
+                    answer.extend((count as u16).to_le_bytes());
+                    answer.extend(vec![0xff; count.div_ceil(8)]);
+                    if count % 8 != 0 {
+                        if let Some(last) = answer.last_mut() { *last &= (1u8 << (count % 8)) - 1; }
+                    }
+                    peer::send(&mut stream, 0xe3, 0x50, &answer).await?;
+                } else {
+                    peer::send(&mut stream, 0xe3, 0x48, &hash).await?;
+                }
+            }
+            (0xe3, 0x51) => {
+                if data.len() != 16 { bail!("invalid hashset request"); }
+                let hash: [u8;16] = data[..16].try_into()?;
+                if let Some(file) = shares.get(&hash) {
+                    let mut answer = hash.to_vec();
+                    answer.extend((file.part_hashes.len() as u16).to_le_bytes());
+                    for part in &file.part_hashes { answer.extend(part); }
+                    peer::send(&mut stream, 0xe3, 0x52, &answer).await?;
+                } else {
+                    peer::send(&mut stream, 0xe3, 0x48, &hash).await?;
+                }
+            }
+            (0xe3, 0x54) => {
+                if data.len() != 16 { bail!("invalid upload request"); }
+                let hash: [u8;16] = data[..16].try_into()?;
+                if shares.get(&hash).is_some() {
+                    peer::send(&mut stream, 0xe3, 0x55, &[]).await?;
+                } else {
+                    peer::send(&mut stream, 0xe3, 0x48, &hash).await?;
+                }
+            }
+            (0xe3, 0x47) => {
+                if data.len() != 40 { bail!("invalid part request"); }
+                let hash: [u8;16] = data[..16].try_into()?;
+                let Some(file) = shares.get(&hash) else {
+                    peer::send(&mut stream, 0xe3, 0x48, &hash).await?;
+                    continue;
+                };
+                for index in 0..3 {
+                    let start_at = 16 + index * 4;
+                    let end_at = 28 + index * 4;
+                    let from = u32::from_le_bytes(data[start_at..start_at+4].try_into()?) as u64;
+                    let to = u32::from_le_bytes(data[end_at..end_at+4].try_into()?) as u64;
+                    if to == 0 && from == 0 { continue; }
+                    let bytes = file.read_range(from, to)?;
+                    let mut answer = hash.to_vec();
+                    answer.extend((from as u32).to_le_bytes());
+                    answer.extend((to as u32).to_le_bytes());
+                    answer.extend(bytes);
+                    peer::send(&mut stream, 0xe3, 0x46, &answer).await?;
+                }
             }
             (0xe3, 0x4a) => peer::send(&mut stream, 0xe3, 0x4b, &[0; 4]).await?,
             (0xe3, 0x56 | 0x49) => return Ok(()),
