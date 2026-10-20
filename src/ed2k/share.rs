@@ -341,12 +341,10 @@ impl ShareRegistry {
         Ok(report)
     }
 
-    pub async fn add_directory(
-        &self,
-        directory: PathBuf,
-        recursive: bool,
-    ) -> Result<Vec<SharedFileInfo>> {
-        let paths = tokio::task::spawn_blocking(move || -> Result<Vec<PathBuf>> {
+    /// Lists the regular, non-empty files under `directory` (symlinks are skipped), at most
+    /// 10,000, without hashing them. Callers hash them one by one to report progress.
+    pub async fn scan_directory(directory: PathBuf, recursive: bool) -> Result<Vec<PathBuf>> {
+        tokio::task::spawn_blocking(move || -> Result<Vec<PathBuf>> {
             let root = std::fs::canonicalize(&directory)?;
             if !std::fs::symlink_metadata(&root)?.is_dir() {
                 bail!("shared directory is not a directory");
@@ -371,11 +369,19 @@ impl ShareRegistry {
                     }
                 }
             }
+            files.sort();
             Ok(files)
         })
-        .await??;
+        .await?
+    }
+
+    pub async fn add_directory(
+        &self,
+        directory: PathBuf,
+        recursive: bool,
+    ) -> Result<Vec<SharedFileInfo>> {
         let mut added = Vec::new();
-        for path in paths {
+        for path in Self::scan_directory(directory, recursive).await? {
             if let Ok(info) = self.add_file(path).await {
                 added.push(info);
             }
