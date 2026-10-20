@@ -4,6 +4,14 @@ Nibiru Xtreme is a single-binary download engine with an aria2-compatible JSON-R
 the engine of the Apocalipse Download Manager. **This is an alpha**: it passes its own loopback tests and
 interoperability tests against aria2c, but it has had little exposure to the open internet.
 
+## Bandwidth limit fix
+
+HTTP and BitTorrent now account for every byte before releasing a received block,
+including the final block and blocks larger than the one-second burst budget.
+Concurrent connections share that budget. Previously, an oversized final block
+could finish without waiting for the excess bytes, making limits depend on how
+the operating system divided network reads.
+
 ## What works
 
 - **HTTP/HTTPS/HTTP2** segmented downloads with resume, custom headers/cookies/referer/user-agent, proxies

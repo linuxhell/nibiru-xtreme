@@ -1,11 +1,11 @@
-//! Shared bandwidth limiting and speed measurement for BitTorrent transfers.
+//! Shared bandwidth limiting for HTTP/BitTorrent and BitTorrent speed measurement.
 
 use std::{
     sync::Mutex,
     time::{Duration, Instant},
 };
 
-/// Token bucket shared by every peer connection. Zero means unlimited.
+/// Token bucket shared by transfer connections. Zero means unlimited.
 pub struct RateLimiter {
     inner: Mutex<Bucket>,
 }
@@ -38,30 +38,33 @@ impl RateLimiter {
         self.inner.lock().map(|b| b.rate).unwrap_or(0)
     }
 
-    /// Waits until `bytes` may be transferred. A request larger than one second's budget is
-    /// still allowed, but pays for itself by going into debt.
+    /// Waits until all `bytes` have been paid for, including requests larger than the
+    /// one-second burst budget. No debt is left for a later request to repay.
     pub async fn acquire(&self, bytes: u64) {
-        // Take the bytes now (possibly going into debt), then wait out the debt, so one huge
-        // chunk is paced as well as many small ones.
-        let wait = {
-            let Ok(mut bucket) = self.inner.lock() else {
-                return;
+        let mut remaining = bytes as f64;
+        loop {
+            let wait = {
+                let Ok(mut bucket) = self.inner.lock() else {
+                    return;
+                };
+                if bucket.rate == 0 {
+                    return;
+                }
+                let now = Instant::now();
+                let refill = now.duration_since(bucket.last).as_secs_f64() * bucket.rate as f64;
+                bucket.last = now;
+                // Allow at most one second of burst.
+                bucket.tokens = (bucket.tokens + refill).min(bucket.rate as f64);
+                let granted = bucket.tokens.min(remaining);
+                bucket.tokens -= granted;
+                remaining -= granted;
+                if remaining <= 0.0 {
+                    return;
+                }
+                Duration::from_secs_f64((remaining / bucket.rate as f64).clamp(0.005, 1.0))
             };
-            if bucket.rate == 0 {
-                return;
-            }
-            let now = Instant::now();
-            let refill = now.duration_since(bucket.last).as_secs_f64() * bucket.rate as f64;
-            bucket.last = now;
-            // At most one second of burst.
-            bucket.tokens = (bucket.tokens + refill).min(bucket.rate as f64);
-            bucket.tokens -= bytes as f64;
-            if bucket.tokens >= 0.0 {
-                return;
-            }
-            Duration::from_secs_f64(-bucket.tokens / bucket.rate as f64)
-        };
-        tokio::time::sleep(wait).await;
+            tokio::time::sleep(wait).await;
+        }
     }
 }
 
@@ -118,6 +121,38 @@ mod tests {
         let elapsed = start.elapsed();
         assert!(elapsed > Duration::from_millis(600), "{elapsed:?}");
         assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
+    }
+
+    #[tokio::test]
+    async fn a_single_large_request_pays_for_every_byte() {
+        let limiter = RateLimiter::new(100_000);
+        let start = Instant::now();
+        // One second of burst is free; the final 200 kB must be paid for here.
+        limiter.acquire(300_000).await;
+        assert!(start.elapsed() >= Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn concurrent_requests_share_the_same_budget() {
+        let limiter = RateLimiter::new(100_000);
+        let start = Instant::now();
+        tokio::join!(limiter.acquire(150_000), limiter.acquire(150_000));
+        assert!(start.elapsed() >= Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn removing_the_limit_releases_a_waiting_request() {
+        let limiter = RateLimiter::new(1);
+        let request = limiter.acquire(1_000_000);
+        let remove_limit = async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            limiter.set_rate(0);
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(request, remove_limit);
+        })
+        .await
+        .expect("removing the limit must release an oversized request");
     }
 
     #[test]
