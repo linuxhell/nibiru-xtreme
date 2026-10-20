@@ -124,6 +124,7 @@ async fn world() -> World {
         seed_time: Some(Duration::ZERO), // the ADM runs with --seed-time=0
         seed_ratio: None,
         allow_loopback_peers: true,
+        dht: false,
         ..BtConfig::default()
     })
     .await

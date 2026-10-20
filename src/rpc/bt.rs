@@ -1,6 +1,7 @@
 //! BitTorrent and Magnet support for the aria2-compatible JSON-RPC server.
 
 use crate::bittorrent::{
+    dht::DhtConfig,
     magnet::Magnet,
     metainfo::Torrent,
     session::{Session, SessionConfig},
@@ -12,6 +13,7 @@ use base64::Engine as _;
 use serde_json::{Map, Value, json};
 use std::{
     collections::HashMap,
+    net::SocketAddr,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
@@ -27,6 +29,10 @@ pub struct BtConfig {
     pub max_peers: usize,
     pub default_dir: PathBuf,
     pub allow_loopback_peers: bool,
+    /// Trackerless peer discovery (aria2's `--enable-dht`).
+    pub dht: bool,
+    /// Where known DHT nodes are kept between runs (`--dht-file-path`).
+    pub dht_file: Option<PathBuf>,
 }
 
 impl Default for BtConfig {
@@ -39,6 +45,8 @@ impl Default for BtConfig {
             max_peers: 50,
             default_dir: PathBuf::from("."),
             allow_loopback_peers: false,
+            dht: true,
+            dht_file: None,
         }
     }
 }
@@ -120,6 +128,12 @@ fn hex(bytes: &[u8]) -> String {
 impl BtService {
     pub async fn start(config: BtConfig) -> Result<Arc<Self>> {
         let mut session_config = config.session.clone();
+        if config.dht && session_config.dht.is_none() {
+            session_config.dht = Some(DhtConfig {
+                allow_loopback: config.allow_loopback_peers,
+                ..DhtConfig::default()
+            });
+        }
         let session = match config.port_range {
             Some((first, last)) if session_config.listen_port == 0 => {
                 let mut started = None;
@@ -142,6 +156,31 @@ impl BtService {
             _ => Session::start(session_config).await?,
         };
         let stream = StreamServer::start(&session).await?;
+        if let (Some(dht), Some(file)) = (session.dht().cloned(), config.dht_file.clone()) {
+            // Known nodes make the next start independent of the public bootstrap routers.
+            tokio::spawn(async move {
+                if let Ok(saved) = tokio::fs::read_to_string(&file).await {
+                    let nodes: Vec<SocketAddr> = saved
+                        .lines()
+                        .filter_map(|l| l.trim().parse().ok())
+                        .take(300)
+                        .collect();
+                    dht.add_nodes(&nodes).await;
+                }
+                loop {
+                    tokio::time::sleep(Duration::from_secs(600)).await;
+                    let nodes = dht.export_nodes();
+                    if nodes.is_empty() {
+                        continue;
+                    }
+                    let text: String = nodes.iter().map(|n| format!("{n}\n")).collect();
+                    let temp = file.with_extension("tmp");
+                    if tokio::fs::write(&temp, text).await.is_ok() {
+                        let _ = tokio::fs::rename(&temp, &file).await;
+                    }
+                }
+            });
+        }
         Ok(Arc::new(Self {
             session,
             stream,

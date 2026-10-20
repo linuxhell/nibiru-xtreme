@@ -179,10 +179,15 @@ async fn run_aria2_compatible_rpc(args: &[String]) -> Result<()> {
                 bt.session.upload_limit = parse_size(value).unwrap_or(0);
             }
             "dir" => bt.default_dir = PathBuf::from(value),
+            "enable-dht" => bt.dht = value == "true",
+            "dht-file-path" => bt.dht_file = Some(PathBuf::from(value)),
             // Not an aria2 option: lets tests and LAN setups connect to peers on this machine.
             "x-nibiru-allow-loopback-peers" => bt.allow_loopback_peers = value == "true",
             _ => {}
         }
+    }
+    if bt.dht && bt.dht_file.is_none() {
+        bt.dht_file = Some(PathBuf::from("dht.dat"));
     }
     if let Some(pid) = stop_with {
         tokio::spawn(async move {

@@ -1,6 +1,7 @@
 //! One torrent: shared state, lifecycle tasks (verify, connect, choke, announce, seed) and the
 //! public handle used by the session and the RPC layer.
 
+use super::dht::Dht;
 use super::{
     bitfield::Bitfield,
     limiter::{RateLimiter, RateMeter},
@@ -181,6 +182,9 @@ pub struct Shared {
     pub own_down: RateLimiter,
     pub own_up: RateLimiter,
     pub tracker: TrackerClient,
+    pub dht: Option<Arc<Dht>>,
+    /// Fired (with `notify_waiters`) on shutdown so sleeping loops end promptly.
+    pub stop_signal: Notify,
     next_peer: AtomicU64,
 }
 
@@ -403,6 +407,16 @@ pub struct TorrentHandle {
     pub(crate) shared: Arc<Shared>,
 }
 
+/// What the owning session provides to each torrent.
+pub(crate) struct Environment {
+    pub peer_id: [u8; 20],
+    pub listen_port: u16,
+    pub down_limit: Arc<RateLimiter>,
+    pub up_limit: Arc<RateLimiter>,
+    pub tracker: TrackerClient,
+    pub dht: Option<Arc<Dht>>,
+}
+
 pub struct Start {
     pub torrent: Option<Torrent>,
     pub info_hash: [u8; 20],
@@ -411,15 +425,15 @@ pub struct Start {
 }
 
 impl TorrentHandle {
-    pub(crate) fn spawn(
-        start: Start,
-        settings: Settings,
-        peer_id: [u8; 20],
-        listen_port: u16,
-        down_limit: Arc<RateLimiter>,
-        up_limit: Arc<RateLimiter>,
-        tracker: TrackerClient,
-    ) -> Self {
+    pub(crate) fn spawn(start: Start, settings: Settings, env: Environment) -> Self {
+        let Environment {
+            peer_id,
+            listen_port,
+            down_limit,
+            up_limit,
+            tracker,
+            dht,
+        } = env;
         let private = start.torrent.as_ref().is_some_and(|t| t.private);
         let mut core = Core {
             phase: Phase::Metadata(None),
@@ -463,13 +477,16 @@ impl TorrentHandle {
             own_down: RateLimiter::new(0),
             own_up: RateLimiter::new(0),
             tracker,
+            dht,
+            stop_signal: Notify::new(),
             next_peer: AtomicU64::new(1),
         });
         let handle = Self {
             shared: shared.clone(),
         };
         tokio::spawn(main_loop(shared.clone(), start.torrent));
-        tokio::spawn(tracker_loop(shared));
+        tokio::spawn(tracker_loop(shared.clone()));
+        tokio::spawn(dht_loop(shared));
         handle
     }
 
@@ -627,6 +644,7 @@ impl TorrentHandle {
         };
         self.shared.wake.notify_one();
         self.shared.tracker_wake.notify_one();
+        self.shared.stop_signal.notify_waiters();
         self.shared.completed_announce.notify_one();
         self.shared.progress.notify_waiters();
         if delete_files && let Some(storage) = storage {
@@ -1313,4 +1331,44 @@ pub fn pipeline_depth(rate: u64) -> usize {
 
 pub fn unchoke_message() -> Message {
     Message::Unchoke
+}
+
+/// Finds peers through the DHT and announces ourselves, for torrents that allow it.
+async fn dht_loop(shared: Arc<Shared>) {
+    let Some(dht) = shared.dht.clone() else {
+        return;
+    };
+    loop {
+        if shared.is_stopped() || shared.lock().private {
+            return;
+        }
+        let paused = shared.lock().paused;
+        let mut wait = Duration::from_secs(10);
+        if !paused {
+            let lookup = dht.get_peers(shared.info_hash).await;
+            let connected = {
+                let mut core = shared.lock();
+                for peer in &lookup.peers {
+                    core.add_candidate(*peer);
+                }
+                core.peers.len()
+            };
+            if !lookup.peers.is_empty() {
+                shared.wake.notify_one();
+            }
+            if !lookup.tokens.is_empty() {
+                dht.announce(shared.info_hash, shared.listen_port, &lookup.tokens)
+                    .await;
+            }
+            wait = if connected < 5 {
+                Duration::from_secs(30)
+            } else {
+                Duration::from_secs(300)
+            };
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(wait) => {}
+            _ = shared.stop_signal.notified() => {}
+        }
+    }
 }

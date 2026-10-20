@@ -2,12 +2,13 @@
 //! registry of active torrents.
 
 use super::{
+    dht::{Dht, DhtConfig},
     limiter::RateLimiter,
     magnet::Magnet,
     message::read_handshake,
     metainfo::{Extras, Torrent},
     peer,
-    torrent::{Settings, Start, TorrentHandle},
+    torrent::{Environment, Settings, Start, TorrentHandle},
     tracker::TrackerClient,
 };
 use anyhow::{Context, Result};
@@ -29,6 +30,8 @@ pub struct SessionConfig {
     /// Let trackers resolve to private/loopback addresses (LAN trackers, tests).
     pub allow_private_trackers: bool,
     pub max_pending_handshakes: usize,
+    /// Enables the DHT (trackerless peer discovery). Its UDP port defaults to the TCP port.
+    pub dht: Option<DhtConfig>,
 }
 
 impl Default for SessionConfig {
@@ -40,6 +43,7 @@ impl Default for SessionConfig {
             upload_limit: 0,
             allow_private_trackers: false,
             max_pending_handshakes: 64,
+            dht: None,
         }
     }
 }
@@ -51,6 +55,7 @@ pub struct Session {
     down: Arc<RateLimiter>,
     up: Arc<RateLimiter>,
     tracker: TrackerClient,
+    dht: Option<Arc<Dht>>,
 }
 
 fn new_peer_id() -> [u8; 20] {
@@ -66,6 +71,26 @@ impl Session {
             .await
             .with_context(|| format!("cannot listen on port {}", config.listen_port))?;
         let port = listener.local_addr()?.port();
+        let dht = match config.dht.clone() {
+            Some(mut dht_config) => {
+                if dht_config.port == 0 {
+                    dht_config.port = port;
+                }
+                // The UDP port may be taken even though the TCP one was free; use any port then.
+                match Dht::start(dht_config.clone()).await {
+                    Ok(dht) => Some(dht),
+                    Err(_) => {
+                        dht_config.port = 0;
+                        Dht::start(dht_config).await.ok()
+                    }
+                }
+            }
+            None => None,
+        };
+        if let Some(dht) = &dht {
+            let dht = dht.clone();
+            tokio::spawn(async move { dht.bootstrap().await });
+        }
         let session = Arc::new(Self {
             port,
             peer_id: new_peer_id(),
@@ -76,6 +101,7 @@ impl Session {
                 allow_private: config.allow_private_trackers,
                 ..TrackerClient::default()
             },
+            dht,
         });
         let gate = Arc::new(Semaphore::new(config.max_pending_handshakes.max(1)));
         let weak = Arc::downgrade(&session);
@@ -113,6 +139,10 @@ impl Session {
         self.port
     }
 
+    pub fn dht(&self) -> Option<&Arc<Dht>> {
+        self.dht.as_ref()
+    }
+
     pub fn set_download_limit(&self, bytes_per_second: u64) {
         self.down.set_rate(bytes_per_second);
     }
@@ -134,11 +164,14 @@ impl Session {
         TorrentHandle::spawn(
             start,
             settings,
-            self.peer_id,
-            self.port,
-            self.down.clone(),
-            self.up.clone(),
-            self.tracker.clone(),
+            Environment {
+                peer_id: self.peer_id,
+                listen_port: self.port,
+                down_limit: self.down.clone(),
+                up_limit: self.up.clone(),
+                tracker: self.tracker.clone(),
+                dht: self.dht.clone(),
+            },
         )
     }
 

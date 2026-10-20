@@ -434,3 +434,63 @@ async fn http_range_server_streams_a_file_that_is_still_downloading() {
     let status = handle.status();
     assert!(status.files[0].selected && !status.files[2].selected);
 }
+
+#[tokio::test]
+async fn a_bare_magnet_link_finds_the_swarm_through_the_dht() {
+    use nibiru_xtreme::bittorrent::dht::{Dht, DhtConfig};
+    let fx = fixture();
+    // One neutral DHT node that both sides know (the "bootstrap router").
+    let router = Dht::start(DhtConfig {
+        bind: "127.0.0.1".parse().unwrap(),
+        port: 0,
+        bootstrap: vec![],
+        allow_loopback: true,
+    })
+    .await
+    .unwrap();
+    let boot = format!("127.0.0.1:{}", router.port());
+    let dht_session = |bind: &str| {
+        let boot = boot.clone();
+        let bind = bind.to_owned();
+        async move {
+            Session::start(SessionConfig {
+                bind: bind.parse().unwrap(),
+                dht: Some(DhtConfig {
+                    bind: bind.parse().unwrap(),
+                    port: 0,
+                    bootstrap: vec![boot],
+                    allow_loopback: true,
+                }),
+                ..SessionConfig::default()
+            })
+            .await
+            .unwrap()
+        }
+    };
+    let seed_dir = tempfile::tempdir().unwrap();
+    seed_files(seed_dir.path(), &fx);
+    let seed = dht_session("127.0.0.1").await;
+    let seed_handle = seed.add_torrent(fx.torrent.clone(), local_settings(seed_dir.path()));
+    seed_handle
+        .wait_complete(Duration::from_secs(20))
+        .await
+        .unwrap();
+    // Give the seeder's DHT loop time to announce to the router.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let out = tempfile::tempdir().unwrap();
+    let leech = dht_session("127.0.0.1").await;
+    let magnet = Magnet::parse(&format!(
+        "magnet:?xt=urn:btih:{}",
+        hex(&fx.torrent.info_hash)
+    ))
+    .unwrap();
+    assert!(
+        magnet.trackers.is_empty() && magnet.peers.is_empty(),
+        "no tracker, no peer hint"
+    );
+    let handle = leech.add_magnet(&magnet, local_settings(out.path()));
+    handle.wait_metadata(Duration::from_secs(30)).await.unwrap();
+    handle.wait_complete(Duration::from_secs(30)).await.unwrap();
+    verify(out.path(), &fx);
+}

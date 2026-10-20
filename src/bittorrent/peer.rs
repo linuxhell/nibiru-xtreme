@@ -50,7 +50,7 @@ pub async fn connect(shared: Arc<Shared>, addr: SocketAddr) {
 async fn connect_inner(shared: &Arc<Shared>, addr: SocketAddr) -> Result<()> {
     let mut stream = timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await??;
     stream.set_nodelay(true).ok();
-    let ours = Handshake::new(shared.info_hash, shared.peer_id, false);
+    let ours = Handshake::new(shared.info_hash, shared.peer_id, shared.dht.is_some());
     stream.write_all(&ours.encode()).await?;
     let theirs = timeout(HANDSHAKE_TIMEOUT, read_handshake(&mut stream)).await??;
     if theirs.info_hash != shared.info_hash || theirs.peer_id == shared.peer_id {
@@ -78,7 +78,7 @@ pub async fn accept(
         return;
     }
     stream.set_nodelay(true).ok();
-    let ours = Handshake::new(shared.info_hash, shared.peer_id, false);
+    let ours = Handshake::new(shared.info_hash, shared.peer_id, shared.dht.is_some());
     if stream.write_all(&ours.encode()).await.is_err() {
         return;
     }
@@ -107,6 +107,7 @@ struct Peer {
     ext_hello_sent: bool,
     /// We told this peer what we have (needs the metadata first).
     announced: bool,
+    dht_capable: bool,
 }
 
 /// Messages that arrive before we know how many pieces there are.
@@ -187,6 +188,7 @@ async fn run(
         last_sent: Instant::now(),
         ext_hello_sent: false,
         announced: false,
+        dht_capable: theirs.supports_dht(),
     };
     let outcome = peer
         .drive(&mut msg_rx, &mut cmd_rx, theirs.supports_extensions())
@@ -237,6 +239,12 @@ impl Peer {
             })
             .await?;
             self.ext_hello_sent = true;
+        }
+        if self.dht_capable
+            && let Some(dht) = &self.shared.dht
+        {
+            let port = dht.port();
+            self.send(&Message::Port(port)).await?;
         }
         self.send_bitfield().await?;
         let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -542,7 +550,19 @@ impl Peer {
 
     async fn message(&mut self, message: Message) -> Result<()> {
         match message {
-            Message::KeepAlive | Message::Port(_) | Message::Suggest(_) => {}
+            Message::KeepAlive | Message::Suggest(_) => {}
+            Message::Port(port) => {
+                // The peer runs a DHT node: ping it so it can enter our routing table.
+                if let Some(dht) = self.shared.dht.clone()
+                    && port != 0
+                    && !self.shared.lock().private
+                {
+                    let node = SocketAddr::new(self.addr.ip(), port);
+                    tokio::spawn(async move {
+                        dht.ping(node).await;
+                    });
+                }
+            }
             Message::Choke => {
                 self.peer_choking = true;
                 if !self.fast {
