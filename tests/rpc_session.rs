@@ -61,6 +61,21 @@ async fn origin(body: Vec<u8>) -> u16 {
                     (start <= end).then_some((start, end))
                 });
                 let common = "Accept-Ranges: bytes\r\nETag: \"v1\"\r\nConnection: close\r\n";
+                // A range that starts at or past the end is not satisfiable: answer like a real
+                // server (416) instead of replaying the whole file with 200.
+                let unsatisfiable = head.lines().any(|line| {
+                    line.strip_prefix("range: bytes=")
+                        .and_then(|spec| spec.split_once('-'))
+                        .and_then(|(start, _)| start.trim().parse::<usize>().ok())
+                        .is_some_and(|start| start >= total)
+                });
+                if unsatisfiable {
+                    let reply = format!(
+                        "HTTP/1.1 416 Range Not Satisfiable\r\n{common}Content-Range: bytes */{total}\r\nContent-Length: 0\r\n\r\n"
+                    );
+                    let _ = stream.write_all(reply.as_bytes()).await;
+                    return;
+                }
                 let (status, extra, slice) = match range {
                     Some((start, end)) => (
                         "206 Partial Content",
@@ -181,7 +196,7 @@ fn saved(path: &Path) -> String {
 
 #[tokio::test]
 async fn a_paused_http_task_survives_a_restart_and_resumes_to_identical_bytes() {
-    let body = sample(500_000, 3);
+    let body = sample(900_000, 3);
     let port = origin(body.clone()).await;
     let dir = tempfile::tempdir().unwrap();
     let session = dir.path().join("session.json");
@@ -191,7 +206,7 @@ async fn a_paused_http_task_survives_a_restart_and_resumes_to_identical_bytes() 
             "nibiru.addUri",
             vec![
                 json!([format!("http://127.0.0.1:{port}/movie.bin")]),
-                json!({"dir": dir.path(), "out": "movie.bin", "max-download-limit": "100K",
+                json!({"dir": dir.path(), "out": "movie.bin", "max-download-limit": "40K",
                        "referer": "https://site.example/page"}),
             ],
         )
@@ -200,6 +215,15 @@ async fn a_paused_http_task_survives_a_restart_and_resumes_to_identical_bytes() 
     first.wait_progress(&gid).await;
     first.pause_and_save(&gid).await;
     assert!(saved(&session).contains(&gid));
+    // Paused means paused: nothing may keep writing the file behind the restore.
+    let length = || std::fs::metadata(dir.path().join("movie.bin")).map_or(0, |m| m.len());
+    let at_pause = length();
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(length(), at_pause, "a paused download kept writing");
+    assert!(
+        at_pause < 900_000,
+        "the transfer finished before it could be paused"
+    );
 
     // "Restart": a brand new server reads the same session file.
     let second = node(Some(&session), None).await;
