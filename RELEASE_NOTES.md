@@ -1,5 +1,22 @@
 # Nibiru Xtreme — download engine (alpha)
 
+## 0.2.0-alpha.3 — PRÉ-RELEASE PARA TESTE (não é a release final)
+
+Corrige o que o primeiro teste real no Windows (ISO de 8,7 GB) mostrou:
+
+- **Retomada de download HTTP segmentado.** Na alpha.2, pausar ou apertar Ctrl+C reiniciava do zero e
+  deixava um `.nibiru-http-XXXX.part` do tamanho do arquivo para trás a cada vez. Agora o parcial tem nome
+  fixo (`<arquivo>.nibiru-http.part` + `.json` com os blocos de 4 MiB já gravados) e a mesma linha de comando
+  continua de onde parou, conferindo com o servidor (`If-Range`, mesmo ETag/Last-Modified e tamanho) que o
+  arquivo não mudou; um link assinado renovado ainda vale. Servidor sem ETag/Last-Modified: não retomável.
+  No `download`, **Ctrl+C agora pausa** e mantém o progresso. Testado automaticamente (loopback); não testado
+  ainda em uso real. Os `.nibiru-http-*.part` órfãos da alpha.2 podem ser apagados.
+- **`nibiru-xtreme diagnose <URL>`**: mede a rede sem disco (1/8/16/32 conexões), o disco e o motor no mesmo
+  link e diz qual limita a velocidade, incluindo 8 contra 16 conexões. Grava `nibiru-diagnose-report.txt`.
+
+Limites iguais aos da alpha.2: nunca testado na rede ED2K/Kad pública, com NAT real ou em LAN com vários
+hosts; WebDAV é só GET; sem Metalink. Os binários não são assinados; confira o `.sha256`.
+
 ## 0.2.0-alpha.2 — PRÉ-RELEASE PARA TESTE (não é a release final)
 
 Esta pré-release existe para o usuário testar o motor. **Não substitui o aria2-ultra no ADM** e não é uma
