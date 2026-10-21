@@ -347,11 +347,15 @@ impl Peer {
     }
     pub async fn acquire_slot(&mut self, mut queued: impl FnMut(u32)) -> Result<()> {
         send(&mut self.stream, 0xe3, 0x54, &self.file.hash).await?;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+        // A peer that has no free slot may stay silent while we wait in its queue (aMule makes a new
+        // client wait before the first slot), so the usual 30-second read limit does not apply here.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
         loop {
-            let (protocol, op, data) = tokio::time::timeout_at(deadline, self.receive())
-                .await
-                .context("peer queue wait timed out")??;
+            let (protocol, op, data) = tokio::select! {
+                result = tokio::time::timeout_at(deadline, frame(&mut self.stream)) =>
+                    result.context("peer queue wait timed out")??,
+                _ = cancelled(&self.cancel) => bail!("ED2K transfer cancelled"),
+            };
             match (protocol, op) {
                 (0xe3, 0x55) => return Ok(()),
                 (0xe3, 0x48 | 0x57) => bail!("peer upload slot unavailable"),
