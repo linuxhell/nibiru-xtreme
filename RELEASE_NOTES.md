@@ -1,5 +1,24 @@
 # Nibiru Xtreme — download engine (alpha)
 
+## 0.2.0-alpha.2 — PRÉ-RELEASE PARA TESTE (não é a release final)
+
+Esta pré-release existe para o usuário testar o motor. **Não substitui o aria2-ultra no ADM** e não é uma
+versão completa: veja `docs/CAPABILITY-MATRIX.md` para o que está pendente.
+
+Novo desde a alpha.1 (testado automaticamente; só em loopback, nada em rede pública):
+
+- RPC com **persistência de tarefas** (`serve --session-file`), `nibiru.getSessionInfo`, contadores reais.
+- **ED2K pelo RPC** (`addUri ed2k://…`, `serve --ed2k`), **várias fontes por arquivo**, sessão **Kad2** no
+  motor, ofuscação ED2K (TCP) e Kad (UDP), callbacks Low-ID por servidor e por buddy do Kad (solicitante).
+  Verificado contra um **aMule 2.3.3** real em loopback (inclusive exigindo ofuscação).
+- **Retomada de FTP/FTPS/SFTP**.
+- **LSD (BEP 14)** (`--enable-lpd`) e **hole punching (BEP 55)**, verificados contra libtorrent 2.1.1.
+- HTTP/3 corrigido em hosts sem IPv6.
+
+Limites conhecidos: nunca testado na rede ED2K/Kad pública, com NAT real ou em LAN com vários hosts;
+WebDAV é só GET; sem Metalink; sem ofuscação cliente↔servidor ED2K; sem busca/publicação Kad.
+Os binários não são assinados. Confira o SHA-256 do `.sha256` ao lado de cada arquivo.
+
 Nibiru Xtreme is a single-binary download engine with an aria2-compatible JSON-RPC interface, built to be
 the engine of the Apocalipse Download Manager. **This is an alpha**: it passes its own loopback tests and
 interoperability tests against aria2c, but it has had little exposure to the open internet.

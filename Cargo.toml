@@ -1,6 +1,6 @@
 [package]
 name = "nibiru-xtreme"
-version = "0.2.0-alpha.1"
+version = "0.2.0-alpha.2"
 edition = "2024"
 license = "MIT"
 description = "Lightweight, secure and high-performance download engine"
