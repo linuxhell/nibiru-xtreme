@@ -37,7 +37,7 @@ async fn node(session: &Path, downloads: &Path) -> Node {
     let ed2k = Ed2kService::new(Ed2kConfig {
         default_dir: downloads.to_owned(),
         identity: [9; 16],
-        tcp_port: 4662,
+        tcp_port: 0,
         servers: Vec::new(),
         kad: None,
         obfuscation: nibiru_xtreme::ed2k::obfuscation::Obfuscation::Prefer,
