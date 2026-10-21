@@ -374,19 +374,18 @@ impl RpcServer {
             .map(|(gid, task)| (gid.clone(), task.created))
             .collect::<Vec<_>>();
         for (gid, created) in ids {
-            if let Ok(status) = self.tell_status(vec![json!(gid)]).await {
-                if matches(status["status"].as_str().unwrap_or("")) {
-                    rows.push((created, status));
-                }
+            if let Ok(status) = self.tell_status(vec![json!(gid)]).await
+                && matches(status["status"].as_str().unwrap_or(""))
+            {
+                rows.push((created, status));
             }
         }
         if let Some(bt) = &self.bt {
             for gid in bt.list_ids() {
                 if let (Some(created), Ok(status)) = (bt.created(&gid), bt.tell_status(&gid, None))
+                    && matches(status["status"].as_str().unwrap_or(""))
                 {
-                    if matches(status["status"].as_str().unwrap_or("")) {
-                        rows.push((created, status));
-                    }
+                    rows.push((created, status));
                 }
             }
         }
@@ -494,6 +493,7 @@ impl RpcServer {
         Ok(Value::String(gid))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn spawn_download(
         &self,
         gid: String,
