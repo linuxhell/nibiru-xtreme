@@ -35,7 +35,7 @@ Limites do ambiente que afetam a leitura:
 | --- | --- | --- | --- |
 | HTTP/1.1, HTTPS, HTTP/2 | Existe; segmentação, retomada por Range, identidade (origem/ETag/Last-Modified), 200/206/416, publicação sem sobrescrever | **T** `http_segmented` (6), `http_identity` (5), `rpc_http_options` (5), `h2_tests` | Retomada após reinício do **ADM** depende de o consumidor recriar a tarefa; ver RPC |
 | Cabeçalhos, referer, UA, cookies por cabeçalho, proxy HTTP, limite por tarefa e global, `split`/limites por servidor | Existe | **T** `rpc_http_options` | `load-cookies` (arquivo) não suportado |
-| Autenticação básica por URL | Existe | **T** (`rpc_http_options`/unit) | Digest/NTLM não avaliados |
+| Autenticação HTTP (credenciais na URL / `Authorization`) | Aceita pelo cabeçalho `header` do RPC | **NT**: nenhum teste exercita autenticação HTTP (só FTP e SFTP têm testes de senha) | Escrever teste; Digest/NTLM não avaliados |
 | HTTP/3 (QUIC) explícito, sem queda silenciosa | Existe | **T** `http3_transfer` (2) com servidor QUIC local e certificado não confiável rejeitado | Sem teste contra servidor HTTP/3 público; escolha automática de protocolo não existe (só `--http3-only`) |
 | FTP (PASV/EPSV, proteção contra endereço de terceiros) | Existe | **T** `direct_protocols` (5): exatidão, falhas sem publicar, cancelamento com servidor parado, injeção de comando | **Sem retomada**; cada tentativa recomeça |
 | FTPS explícito e implícito, validação de certificado | Existe | **T** `direct_protocols` | Sem retomada; sem teste contra servidor público |
@@ -51,7 +51,7 @@ Limites do ambiente que afetam a leitura:
 | uTP | Existe (crate `librqbit-utp`) | **T** `bittorrent_transports`; **I** libtorrent (12 de 18 cenários) | Sem teste com perda/atraso de rede |
 | MSE/PE (obfuscação legada) | Existe | **T**; **I** libtorrent | Não é autenticação |
 | DHT IPv4 | Existe | **T** `dht_network` (3); magnet sem tracker via RPC | Sem teste em DHT público |
-| DHT IPv6, BEP 42 | Existe no código | IPv6: **NT aqui** (teste se pula sem IPv6); BEP 42: unitários | Precisa de CI com IPv6 |
+| DHT IPv6, BEP 42 | Existe no código | IPv6: **NT aqui** (teste se pula sem IPv6); BEP 42: **T** unitário com os vetores oficiais (`dht_security`) | Precisa de CI com IPv6 |
 | Hole punching | **—** | `grep` sem ocorrência | Implementar só com interoperabilidade comprovada; sem stub anunciado |
 | Descoberta local (LSD, BEP 14) | **—** | `grep` sem ocorrência | Pendente |
 | Streaming de torrent (`nibiru.streamUrl`) | Existe | **T** `rpc_bittorrent::stream_url_…` (Range 206, seek) | — |
@@ -80,7 +80,7 @@ Limites do ambiente que afetam a leitura:
 | Persistência da tabela de tarefas | **—**: fica em memória; `--save-session`/`--input-file` ignorados | `src/main.rs` | Perda de fila ao reiniciar o motor; o ADM recria tarefas, mas isso precisa ser definido e testado antes da troca |
 | Limite de conexões por `split` | Existe | **T** `rpc_http_options::split_and_server_caps_…` | — |
 | Encerrar com o processo pai (`--stop-with-process`) | Existe no Unix (`kill -0`) e Windows (`tasklist`) | Unix: **NT** direto; Windows: nunca executado | Validar no Windows |
-| Logs JSON Lines sem segredos | Existe | revisão de código; sem teste dedicado nesta revisão | Teste de ausência de token/query na saída |
+| Logs JSON Lines sem segredos | Existe `redact_url` (`engine.rs`) | **NT**: nenhum teste verifica a saída de log; não li todos os pontos de log | Teste de ausência de token, senha e query na saída |
 
 ## O que vem a seguir (ordem de prioridade da retomada)
 
