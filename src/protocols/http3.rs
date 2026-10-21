@@ -25,6 +25,12 @@ where
         .connect_timeout(Duration::from_secs(10))
         .read_timeout(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::limited(3));
+    // reqwest binds its QUIC socket to the IPv6 wildcard by default. A host without
+    // IPv6 (disabled in the kernel or by policy) then fails every HTTP/3 request with
+    // EAFNOSUPPORT even for IPv4 servers, so use the IPv4 wildcard there.
+    if std::net::UdpSocket::bind((std::net::Ipv6Addr::UNSPECIFIED, 0)).is_err() {
+        builder = builder.local_address(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+    }
     if let Some(path) = &options.ca_certificate {
         builder =
             builder.add_root_certificate(reqwest::Certificate::from_der(&std::fs::read(path)?)?);

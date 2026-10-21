@@ -76,8 +76,18 @@ async fn announces_with_a_bad_token_are_refused() {
     assert!(found.peers.is_empty(), "nothing was stored");
 }
 
+/// IPv6 loopback can be absent from the host (kernel or policy); that is an
+/// environment limit, not an implementation failure.
+fn ipv6_loopback_available() -> bool {
+    std::net::UdpSocket::bind("[::1]:0").is_ok()
+}
+
 #[tokio::test]
 async fn ipv6_nodes_bootstrap_announce_and_find_peers() {
+    if !ipv6_loopback_available() {
+        eprintln!("IPv6 loopback unavailable on this host; skipping the IPv6 DHT test");
+        return;
+    }
     let start = |bootstrap| async {
         Dht::start(DhtConfig {
             bind: "::1".parse().unwrap(),
