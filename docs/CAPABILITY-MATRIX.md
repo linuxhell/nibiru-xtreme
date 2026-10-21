@@ -1,8 +1,8 @@
 # Nibiru Xtreme — matriz de capacidades (21/10/2026)
 
-Base inspecionada: branch publicada `work/native-rpc-ed2k` em `8a679994`, mais as
-correções desta revisão. O commit `dd92f6ee` citado na retomada **não existe no
-remoto**; se ele trouxer trabalho além de `8a679994`, esta matriz não o cobre.
+Base inspecionada: branch de auditoria `audit/code-review-2026-10-21`, incluindo as
+correções desta revisão. A matriz registra evidência observada durante a auditoria; resultados
+de CI só são promovidos a "passou" quando o workflow correspondente termina com sucesso.
 Legenda: **T** = testado automaticamente aqui; **I** = interoperabilidade com cliente
 independente aqui; **NT** = existe no código mas não foi exercitado aqui; **—** = ausente.
 Nada abaixo foi medido em rede pública ou com NAT real. A evidência de uso real
@@ -80,7 +80,7 @@ Limites do ambiente que afetam a leitura:
 | `capabilities --json`, `serve`, namespace `nibiru.*`, identidade `nibiru-xtreme`, schema 1 | Existe | **T** `native_contract` (2) | — |
 | Métodos: `getVersion`, `addUri`, `addTorrent`, `tellStatus`, `pause`, `resume`, `remove`, `removeResult`, `changeOption`, `changeGlobalOption`, `tellActive/Waiting/Stopped`, `getGlobalStat`, `getFiles`, `getPeers`, `streamUrl` | Existem; aliases `aria2.*` também | **T** `rpc_contract`, `rpc_bittorrent`, `rpc_http_options` | `getGlobalStat` agora devolve `numWaiting`/`numStopped`/`numStoppedTotal` reais (**T**); novo `nibiru.getSessionInfo` |
 | Subconjunto usado pelo ADM `main` com aria2 (`addUri`, `addTorrent`, `changeOption`, `changeGlobalOption`, `pause`, `unpause`, `remove`/`forceRemove`, `removeDownloadResult`, `tellStatus`, `getVersion`) | Coberto pelo Xtreme | comparação de `aria2.rs` da `main` com `src/rpc.rs` | O ADM ainda passa opções que o Xtreme ignora (`--input-file`/`--save-session`) |
-| Persistência da tabela de tarefas | **Existe** com `serve --session-file`: GIDs estáveis, tarefas restauradas pausadas, sem credenciais em disco, arquivo atômico e 0600 | **T** `rpc_session` (7): HTTP e torrent reiniciados, binário real morto com SIGKILL e recuperado, credenciais ausentes do arquivo, arquivo corrompido preservado, contadores | Só o namespace nativo; `--save-session`/`--input-file` do modo aria2 continuam ignorados; tarefas com credenciais não são restauradas (o ADM recria) |
+| Persistência da tabela de tarefas | **Existe** com `serve --session-file`: GIDs estáveis, tarefas restauradas pausadas, escrita serializada/atômica, modo 0600 em Unix e filtragem conservadora de segredos; `Referer` e URLs diretas com query não são persistidos | **T** `rpc_session` e unitários de `rpc::session`; sidecar HTTP usa fingerprint SHA-256 e migra o formato legado | Só o namespace nativo; `--save-session`/`--input-file` do modo aria2 continuam ignorados; tarefas excluídas por conter dados potencialmente sensíveis são recriadas pelo ADM |
 | Limite de conexões por `split` | Existe | **T** `rpc_http_options::split_and_server_caps_…` | — |
 | Encerrar com o processo pai (`--stop-with-process`) | Existe no Unix (`kill -0`) e Windows (`tasklist`) | Parser do CSV Windows corrigido e testado no Linux nesta auditoria; processo real Windows ainda NT | Validar ciclo de vida no Windows |
 | Logs JSON Lines sem segredos | Existe `redact_url` (`engine.rs`) | **T** `http_identity::failed_cli_requests_do_not_print_url_secrets` (CLI e JSONL, erro HTTP) | Ainda não cobre todos os protocolos e pontos de log |
