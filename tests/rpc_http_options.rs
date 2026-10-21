@@ -370,3 +370,84 @@ async fn split_and_server_caps_bound_actual_concurrent_http_requests() {
     }
     server.abort();
 }
+
+#[tokio::test]
+async fn native_and_legacy_launchers_apply_the_initial_global_http_limit() {
+    let body = vec![19u8; 400_000];
+    let origin = picky_server(body.clone(), Seen::default()).await;
+    let client = reqwest::Client::new();
+    for legacy in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_nibiru-xtreme"));
+        if legacy {
+            command
+                .args(["--enable-rpc=true", "--rpc-secret=k"])
+                .arg(format!("--rpc-listen-port={port}"));
+        } else {
+            command
+                .args(["serve", "--secret=k"])
+                .arg(format!("--port={port}"));
+        }
+        let mut child = command
+            .args([
+                "--enable-dht=false",
+                "--enable-dht6=false",
+                "--enable-utp=false",
+                "--max-overall-download-limit=100K",
+            ])
+            .arg(format!("--dir={}", directory.path().display()))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let endpoint = format!("http://127.0.0.1:{port}/jsonrpc");
+        let mut ready = false;
+        for _ in 0..100 {
+            if client
+                .post(&endpoint)
+                .json(&json!({"jsonrpc":"2.0","id":1,
+                "method":"nibiru.getVersion","params":["token:k"]}))
+                .send()
+                .await
+                .is_ok()
+            {
+                ready = true;
+                break;
+            }
+            assert!(child.try_wait().unwrap().is_none(), "launcher exited early");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(ready, "RPC did not start");
+        let started = Instant::now();
+        let gid = call(
+            port,
+            &client,
+            "nibiru.addUri",
+            vec![
+                json!([format!("http://127.0.0.1:{origin}/startup.bin")]),
+                json!({"out":"startup.bin", "header":["Cookie: sid=42"],
+                "referer":"https://site.example/page"}),
+            ],
+        )
+        .await;
+        let done = finish(port, &client, gid.as_str().unwrap()).await;
+        assert_eq!(done["status"], "complete", "{done}");
+        assert!(
+            started.elapsed() > Duration::from_millis(1800),
+            "initial 100K cap was ignored: legacy={legacy}, elapsed={:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            std::fs::read(directory.path().join("startup.bin")).unwrap(),
+            body
+        );
+        child.kill().await.unwrap();
+        child.wait().await.unwrap();
+    }
+}

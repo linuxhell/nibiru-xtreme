@@ -263,9 +263,11 @@ async fn main() -> Result<()> {
             std::fs::create_dir_all(&args.dir)?;
             let log = Arc::new(LogSink::new(args.log.as_deref())?);
             let engine = Engine::new(log.clone())?;
+            let global_download_limit = config.session.download_limit;
             let service = BtService::start(config).await?;
             let mut server = RpcServer::new(engine, log.clone(), args.secret.clone())
                 .with_default_dir(args.dir.clone())
+                .with_global_download_limit(global_download_limit)
                 .with_bittorrent(service);
             if args.ed2k {
                 server = server.with_ed2k(start_ed2k(&args, &log).await?);
@@ -382,6 +384,7 @@ async fn run_aria2_compatible_rpc(args: &[String]) -> Result<()> {
     let log = Arc::new(LogSink::new(log_path.as_deref())?);
     let engine = Engine::new(log.clone())?;
     let default_dir = bt.default_dir.clone();
+    let global_download_limit = bt.session.download_limit;
     let service = BtService::start(bt).await?;
     log.info(
         "bittorrent.started",
@@ -389,6 +392,7 @@ async fn run_aria2_compatible_rpc(args: &[String]) -> Result<()> {
     );
     RpcServer::new(engine, log, secret)
         .with_default_dir(default_dir)
+        .with_global_download_limit(global_download_limit)
         .with_bittorrent(service)
         .serve(port)
         .await

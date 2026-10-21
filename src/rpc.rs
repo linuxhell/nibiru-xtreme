@@ -87,6 +87,12 @@ impl RpcServer {
         self
     }
 
+    /// Applies the launcher's speed cap before any restored or new HTTP task starts.
+    pub fn with_global_download_limit(self, bytes_per_second: u64) -> Self {
+        self.global_limit.set_rate(bytes_per_second);
+        self
+    }
+
     /// Keeps unfinished tasks in `path`: restores them (paused, same GIDs) now and
     /// rewrites the file whenever the table changes.
     pub async fn with_session(mut self, path: PathBuf) -> Result<Self> {
