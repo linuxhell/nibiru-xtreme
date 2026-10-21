@@ -38,6 +38,12 @@ jobs:
           python -m pip install libtorrent==2.1.1
           cargo build --locked --bin nibiru-xtreme
           python tests/interop_libtorrent.py --binary target/debug/nibiru-xtreme
+      - name: Independent ED2K interoperability (aMule)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends amule-daemon
+          python tests/interop_amule.py --binary target/debug/nibiru-xtreme
       - name: Release build
         run: cargo build --locked --release
       - name: Package Windows x64

@@ -6,6 +6,7 @@ mod kad;
 pub mod kad_session;
 mod listener;
 pub mod metadata;
+pub mod obfuscation;
 mod peer;
 mod server;
 mod share;
@@ -23,6 +24,10 @@ pub use transfer::{
 pub use upload::{
     Admission, FileUploadStats, UploadClientInfo, UploadConfig, UploadManager, UploadSnapshot,
 };
+/// Parses a 32-digit hexadecimal ED2K user hash.
+pub fn user_hash(value: &str) -> Result<[u8; 16]> {
+    server::file_hash(value).map_err(|_| anyhow::anyhow!("invalid ED2K user hash"))
+}
 pub const SERVER_LIST_URL: &str = "https://upd.emule-security.org/server.met";
 pub const NODE_LIST_URL: &str = "https://upd.emule-security.org/nodes.dat";
 

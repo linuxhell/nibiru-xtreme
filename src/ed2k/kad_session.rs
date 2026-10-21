@@ -1005,7 +1005,11 @@ fn source_response(
     }
     let mut result = Vec::new();
     for _ in 0..count {
-        reader.take(16)?;
+        // The entry id of a source is the source's own user hash: the key for obfuscation.
+        let user_hash: [u8; 16] = reader
+            .take(16)?
+            .try_into()
+            .map_err(|_| "kad_short_source_id".to_owned())?;
         let tags = reader.byte()?;
         if tags > 64 {
             return Err("kad_tag_limit".into());
@@ -1023,19 +1027,16 @@ fn source_response(
                 }
             }
         }
-        // Only high-ID direct sources are usable here; buddy/UDP callbacks and required crypt are not.
+        // Only high-ID direct sources are usable here; buddy/UDP callbacks are not (yet).
         let ip = Ipv4Addr::from(u32::try_from(host).unwrap_or(0).to_be_bytes());
-        if matches!(kind, 1 | 4)
-            && port > 0
-            && port <= u64::from(u16::MAX)
-            && valid_ip(ip, local)
-            && crypto & 4 == 0
-        {
+        if matches!(kind, 1 | 4) && port > 0 && port <= u64::from(u16::MAX) && valid_ip(ip, local) {
             result.push(FileSource {
                 client_id: u32::from_le_bytes(ip.octets()),
                 host: Some(ip),
                 port: port as u16,
                 requires_callback: false,
+                user_hash: (user_hash != [0; 16]).then_some(user_hash),
+                crypt: (crypto & 0x07) as u8,
             });
         }
     }

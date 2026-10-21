@@ -266,3 +266,26 @@ os dois formatos, o codificador segue o do libtorrent.
   (0x04) e hole punching (0x08) dos pares que o relay conhece.
 - `SessionConfig::emulate_restricted_nat` (apenas para testes, nunca pela CLI) faz uma sessão só aceitar
   de quem ela discou há menos de 60 s, para exercitar o fluxo numa máquina só.
+
+## Ofuscação ED2K cliente↔cliente
+
+Handshake básico, conforme o formato documentado no código do aMule e conferido contra um aMule 2.3.3
+real (o aMule serve só de oráculo de teste; nenhum código dele foi copiado):
+
+1. O iniciador (A) conhece o **user hash do alvo (B)** e sorteia 4 bytes (`random`).
+2. Chaves RC4: `MD5(hashB | 34 | random)` para A→B e `MD5(hashB | 203 | random)` para B→A; os
+   primeiros 1024 bytes do fluxo de cada chave são descartados.
+3. A envia em claro: 1 byte marcador (qualquer byte que **não** seja `0xE3`, `0xC5` ou `0xD4`) e os 4
+   bytes `random`; em seguida, cifrado: `magic 0x835E6FC4` (LE), métodos suportados (0), preferido (0),
+   tamanho do preenchimento e preenchimento aleatório.
+4. B responde cifrado: `magic`, método escolhido (0), tamanho do preenchimento e preenchimento. Daí em
+   diante todo o tráfego, nos dois sentidos, segue o mesmo fluxo RC4.
+5. O receptor distingue ofuscado de simples pelo primeiro byte: protocolo ED2K conhecido = simples.
+
+O hash que importa é o que o par **anuncia**: o aMule grava um hash em `preferences.dat` e troca dois bytes
+marcadores (posições 5 e 14) ao carregá-lo, então a chave usa o hash anunciado, não o do arquivo.
+
+Modos: `off` (só simples; pares que exigem ofuscação são pulados), `prefer` (ofusca quando o hash do par é
+conhecido e ele suporta; tenta de novo sem ofuscação se o handshake falhar; aceita os dois), `require`
+(nunca usa nem aceita conexão simples). O login no servidor anuncia suporte (0x200) e desejo (0x400) de
+ofuscação, exceto em `off`.

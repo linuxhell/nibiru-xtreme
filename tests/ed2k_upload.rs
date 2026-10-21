@@ -2,8 +2,8 @@
 //! listener, and a raw wire client exercising the queue and the safety limits.
 
 use nibiru_xtreme::ed2k::{
-    FileLink, FileSource, IncomingListener, ShareRegistry, UploadConfig, UploadManager,
-    download_from_sources,
+    FileLink, FileSource, IncomingListener, ShareRegistry, TransferOptions, UploadConfig,
+    UploadManager, download_from_sources, download_with_options, obfuscation::Obfuscation,
 };
 use std::{
     net::Ipv4Addr,
@@ -131,6 +131,8 @@ async fn nibiru_downloads_a_two_part_file_from_a_nibiru_listener() {
         host: Some(Ipv4Addr::LOCALHOST),
         port: f.listener.status().tcp_port,
         requires_callback: false,
+        user_hash: None,
+        crypt: 0,
     };
     let path = download_from_sources(
         &f.link,
@@ -327,4 +329,87 @@ async fn the_bandwidth_limit_applies_to_real_transfers() {
         "{:?}",
         started.elapsed()
     );
+}
+
+async fn fetch(
+    f: &Fixture,
+    mode: Obfuscation,
+    hash: Option<[u8; 16]>,
+) -> anyhow::Result<std::path::PathBuf> {
+    let out = tempfile::tempdir().unwrap();
+    let mut source = FileSource::direct(Ipv4Addr::LOCALHOST, f.listener.status().tcp_port);
+    if let Some(hash) = hash {
+        source.user_hash = Some(hash);
+        source.crypt = 0x01;
+    }
+    let path = download_with_options(
+        &f.link,
+        out.path(),
+        &[source],
+        TransferOptions {
+            identity: [2; 16],
+            client_id: 0x0100007f,
+            callbacks: None,
+            obfuscation: mode,
+        },
+        Arc::new(AtomicBool::new(false)),
+        |_| {},
+    )
+    .await?;
+    // Keep the bytes after the temporary directory is gone.
+    let kept = std::env::temp_dir().join(format!("nibiru-ed2k-test-{}", uuid::Uuid::new_v4()));
+    std::fs::copy(&path, &kept)?;
+    Ok(kept)
+}
+
+#[tokio::test]
+async fn obfuscated_download_works_and_the_listener_counts_it() {
+    let f = fixture(1_300_000, UploadConfig::default()).await;
+    let path = fetch(&f, Obfuscation::Require, Some([5; 16]))
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), f.bytes);
+    std::fs::remove_file(path).unwrap();
+    let status = f.listener.status();
+    assert_eq!(status.obfuscated_handshakes, 1);
+    assert_eq!(status.completed_handshakes, 1);
+}
+
+#[tokio::test]
+async fn a_listener_that_requires_obfuscation_refuses_plain_peers() {
+    let f = fixture(200_000, UploadConfig::default()).await;
+    f.listener.set_obfuscation(Obfuscation::Require);
+    assert!(fetch(&f, Obfuscation::Disabled, None).await.is_err());
+    assert_eq!(f.listener.status().completed_handshakes, 0);
+    let path = fetch(&f, Obfuscation::Prefer, Some([5; 16])).await.unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), f.bytes);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn a_listener_with_obfuscation_off_is_reached_by_falling_back_to_plain() {
+    let f = fixture(200_000, UploadConfig::default()).await;
+    f.listener.set_obfuscation(Obfuscation::Disabled);
+    // Require does not fall back: the handshake is refused and the transfer fails.
+    assert!(
+        fetch(&f, Obfuscation::Require, Some([5; 16]))
+            .await
+            .is_err()
+    );
+    // Prefer retries plain and succeeds.
+    let path = fetch(&f, Obfuscation::Prefer, Some([5; 16])).await.unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), f.bytes);
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(f.listener.status().obfuscated_handshakes, 0);
+}
+
+#[tokio::test]
+async fn a_wrong_user_hash_cannot_complete_an_obfuscated_handshake() {
+    let f = fixture(200_000, UploadConfig::default()).await;
+    assert!(
+        fetch(&f, Obfuscation::Require, Some([6; 16]))
+            .await
+            .is_err()
+    );
+    assert_eq!(f.listener.status().completed_handshakes, 0);
 }

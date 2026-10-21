@@ -45,6 +45,7 @@ const KEPT_OPTIONS: &[&str] = &[
     "ssh-host-key",
     "ssh-identity",
     "x-nibiru-ed2k-source",
+    "x-nibiru-ed2k-obfuscation",
     "referer",
     "user-agent",
 ];

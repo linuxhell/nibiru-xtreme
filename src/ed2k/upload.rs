@@ -10,10 +10,7 @@ use std::{
     sync::{Arc, Mutex, RwLock},
     time::{Duration, Instant},
 };
-use tokio::{
-    net::TcpStream,
-    sync::{mpsc, watch},
-};
+use tokio::sync::{mpsc, watch};
 
 /// Payload bytes per `OP_SENDINGPART` packet (the size eMule/aMule use).
 pub const CHUNK: usize = 10_240;
@@ -495,7 +492,7 @@ fn queue_ranking(rank: u16) -> Vec<u8> {
 }
 
 async fn send_status(
-    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+    writer: &mut tokio::io::WriteHalf<super::obfuscation::PeerStream>,
     admission: Admission,
 ) -> Result<()> {
     match admission {
@@ -507,13 +504,13 @@ async fn send_status(
 
 /// Serves one connected peer after the hello exchange.
 pub(crate) async fn serve(
-    stream: TcpStream,
+    stream: super::obfuscation::PeerStream,
     ip: IpAddr,
     hello: HelloInfo,
     shares: ShareRegistry,
     manager: UploadManager,
 ) -> Result<()> {
-    let (mut reader, mut writer) = stream.into_split();
+    let (mut reader, mut writer) = tokio::io::split(stream);
     let (frames, mut incoming) = mpsc::channel(8);
     let read_task = tokio::spawn(async move {
         while let Ok(frame) = peer::frame(&mut reader).await {

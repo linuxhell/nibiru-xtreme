@@ -122,6 +122,9 @@ struct ServeArgs {
     ed2k_state_dir: Option<PathBuf>,
     #[arg(long, default_value_t = 4662)]
     ed2k_tcp_port: u16,
+    /// Protocol obfuscation for ED2K peers: off, prefer (default) or require.
+    #[arg(long, default_value = "prefer")]
+    ed2k_obfuscation: nibiru_xtreme::ed2k::obfuscation::Obfuscation,
 }
 
 impl ServeArgs {
@@ -450,6 +453,7 @@ async fn start_ed2k(
         default_dir: args.dir.clone(),
         identity,
         tcp_port: args.ed2k_tcp_port,
+        obfuscation: args.ed2k_obfuscation,
         servers,
         kad,
     }))

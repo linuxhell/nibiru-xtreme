@@ -1665,6 +1665,7 @@ dependencies = [
  "librqbit-dualstack-sockets",
  "librqbit-utp",
  "md4",
+ "md5",
  "num-bigint 0.5.1",
  "percent-encoding",
  "quinn",

@@ -1,4 +1,5 @@
 //! Baseline ED2K peer transport, with bounded frames and verified part hashsets.
+use super::obfuscation::{self, Obfuscation, PeerStream};
 use super::{
     FileLink, FileSource,
     file::{BLOCK_SIZE, PART_SIZE},
@@ -143,7 +144,7 @@ pub(crate) fn hello_answer(data: &[u8]) -> Result<bool> {
 }
 
 type PartMetadata = (Vec<bool>, Vec<[u8; 16]>);
-async fn metadata(stream: &mut TcpStream, file: &FileLink) -> Result<PartMetadata> {
+async fn metadata(stream: &mut PeerStream, file: &FileLink) -> Result<PartMetadata> {
     send(stream, 0xe3, 0x58, &file.hash).await?;
     if file.part_count() > 1 {
         send(stream, 0xe3, 0x4f, &file.hash).await?;
@@ -220,7 +221,7 @@ async fn metadata(stream: &mut TcpStream, file: &FileLink) -> Result<PartMetadat
 }
 
 pub(crate) struct Peer {
-    stream: TcpStream,
+    stream: PeerStream,
     file: FileLink,
     pub hashes: Vec<[u8; 16]>,
     parts: Vec<bool>,
@@ -228,11 +229,44 @@ pub(crate) struct Peer {
     cancel: Arc<AtomicBool>,
 }
 impl Peer {
+    /// Connects, obfuscating when the mode and the source allow it. In `Prefer` mode a failed
+    /// obfuscated handshake is retried once as a plain connection (old or misreporting peers).
     pub async fn connect(
         source: &FileSource,
         file: &FileLink,
         identity: [u8; 16],
         client_id: u32,
+        mode: Obfuscation,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Self> {
+        let first =
+            Self::connect_once(source, file, identity, client_id, mode, cancel.clone()).await;
+        match first {
+            Err(error)
+                if mode == Obfuscation::Prefer
+                    && source.can_obfuscate()
+                    && source.crypt & 0x04 == 0
+                    && format!("{error:#}").contains("obfuscated handshake failed") =>
+            {
+                Self::connect_once(
+                    source,
+                    file,
+                    identity,
+                    client_id,
+                    Obfuscation::Disabled,
+                    cancel,
+                )
+                .await
+            }
+            other => other,
+        }
+    }
+    async fn connect_once(
+        source: &FileSource,
+        file: &FileLink,
+        identity: [u8; 16],
+        client_id: u32,
+        mode: Obfuscation,
         cancel: Arc<AtomicBool>,
     ) -> Result<Self> {
         check_cancel(&cancel)?;
@@ -240,9 +274,32 @@ impl Peer {
         if source.requires_callback || source.port == 0 {
             bail!("peer requires an incoming callback");
         }
+        // Obfuscation needs the target's user hash as key material, so it is only possible
+        // when a server or Kad told us the hash and that the peer supports it.
+        let use_crypt = match mode {
+            Obfuscation::Disabled => {
+                if source.crypt & 0x04 != 0 {
+                    bail!("peer requires obfuscation, which is disabled");
+                }
+                false
+            }
+            Obfuscation::Prefer => source.can_obfuscate() || source.crypt & 0x04 != 0,
+            Obfuscation::Require => true,
+        };
+        if use_crypt && source.user_hash.is_none() {
+            bail!("obfuscation needs the peer's user hash, which is unknown");
+        }
         let open = async {
-            let mut stream = TcpStream::connect((host, source.port)).await?;
+            let stream = TcpStream::connect((host, source.port)).await?;
             stream.set_nodelay(true)?;
+            let mut stream = match source.user_hash.filter(|_| use_crypt) {
+                Some(hash) => PeerStream::Crypt(Box::new(
+                    obfuscation::initiate(stream, &hash)
+                        .await
+                        .context("obfuscated handshake failed")?,
+                )),
+                None => PeerStream::Plain(stream),
+            };
             send(&mut stream, 0xe3, 1, &hello(identity, client_id)).await?;
             let large = loop {
                 let (protocol, op, data) = frame(&mut stream).await?;
@@ -261,7 +318,7 @@ impl Peer {
         Self::from_incoming(stream, file, large, cancel).await
     }
     pub(crate) async fn from_incoming(
-        mut stream: TcpStream,
+        mut stream: PeerStream,
         file: &FileLink,
         large: bool,
         cancel: Arc<AtomicBool>,
@@ -499,12 +556,15 @@ mod tests {
             host: Some(std::net::Ipv4Addr::LOCALHOST),
             port,
             requires_callback: false,
+            user_hash: None,
+            crypt: 0,
         };
         let mut peer = Peer::connect(
             &source,
             &file,
             [2; 16],
             123,
+            Obfuscation::Disabled,
             Arc::new(AtomicBool::new(false)),
         )
         .await

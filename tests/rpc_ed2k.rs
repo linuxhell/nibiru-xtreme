@@ -40,6 +40,7 @@ async fn node(session: &Path, downloads: &Path) -> Node {
         tcp_port: 4662,
         servers: Vec::new(),
         kad: None,
+        obfuscation: nibiru_xtreme::ed2k::obfuscation::Obfuscation::Prefer,
     });
     let server = RpcServer::new(Engine::new(log.clone()).unwrap(), log, "k".into())
         .with_ed2k(ed2k)

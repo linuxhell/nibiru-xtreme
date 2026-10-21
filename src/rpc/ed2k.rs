@@ -7,7 +7,7 @@
 use super::session::{self, Entry};
 use crate::ed2k::{
     FileLink, FileSource, TransferOptions, TransferProgress, TransferStage, download_with_options,
-    kad_session::KadSession, metadata::Server,
+    kad_session::KadSession, metadata::Server, obfuscation::Obfuscation,
 };
 use anyhow::{Result, anyhow, bail, ensure};
 use serde_json::{Map, Value, json};
@@ -32,6 +32,7 @@ pub struct Ed2kConfig {
     pub tcp_port: u16,
     pub servers: Vec<Server>,
     pub kad: Option<Arc<KadSession>>,
+    pub obfuscation: Obfuscation,
 }
 
 struct Task {
@@ -40,6 +41,7 @@ struct Task {
     dir: PathBuf,
     options: Map<String, Value>,
     extra_sources: Vec<FileSource>,
+    obfuscation: Obfuscation,
     status: &'static str,
     total: u64,
     completed: u64,
@@ -70,20 +72,25 @@ fn parse_sources(options: Option<&Map<String, Value>>) -> Result<Vec<FileSource>
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     for item in text.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-        let addr: SocketAddr = item
+        // `ip:port` or `ip:port#<32 hex user hash>`; the hash marks a peer that supports obfuscation.
+        let (endpoint, hash) = match item.split_once('#') {
+            Some((endpoint, hash)) => (endpoint, Some(crate::ed2k::user_hash(hash)?)),
+            None => (item, None),
+        };
+        let addr: SocketAddr = endpoint
             .parse()
-            .map_err(|_| anyhow!("invalid ED2K source (expected ipv4:port)"))?;
+            .map_err(|_| anyhow!("invalid ED2K source (expected ipv4:port[#userhash])"))?;
         let SocketAddr::V4(addr) = addr else {
             bail!("ED2K sources must be IPv4");
         };
         ensure!(addr.port() != 0, "invalid ED2K source port");
         if seen.insert(addr) {
-            out.push(FileSource {
-                client_id: u32::from_le_bytes(addr.ip().octets()),
-                host: Some(*addr.ip()),
-                port: addr.port(),
-                requires_callback: false,
-            });
+            let mut source = FileSource::direct(*addr.ip(), addr.port());
+            if let Some(hash) = hash {
+                source.user_hash = Some(hash);
+                source.crypt = 0x01;
+            }
+            out.push(source);
         }
     }
     ensure!(out.len() <= MAX_EXTRA_SOURCES, "too many ED2K sources");
@@ -135,6 +142,12 @@ impl Ed2kService {
             dir,
             options: persisted,
             extra_sources,
+            obfuscation: options
+                .and_then(|o| o.get("x-nibiru-ed2k-obfuscation"))
+                .and_then(Value::as_str)
+                .map(str::parse)
+                .transpose()?
+                .unwrap_or(self.config.obfuscation),
             status: "paused",
             total: file.size,
             completed: 0,
@@ -189,7 +202,7 @@ impl Ed2kService {
 
     /// Launches (or relaunches) the transfer; a previous run is cancelled first.
     fn start(self: &Arc<Self>, gid: &str) {
-        let (file, dir, extra, cancel) = {
+        let (file, dir, extra, obfuscation, cancel) = {
             let mut tasks = self.tasks.lock().unwrap();
             let Some(task) = tasks.get_mut(gid) else {
                 return;
@@ -203,6 +216,7 @@ impl Ed2kService {
                 task.link.clone(),
                 task.dir.clone(),
                 task.extra_sources.clone(),
+                task.obfuscation,
                 task.cancel.clone(),
             )
         };
@@ -210,7 +224,9 @@ impl Ed2kService {
         let service = self.clone();
         let gid = gid.to_owned();
         tokio::spawn(async move {
-            let outcome = service.run(&gid, &file, &dir, extra, &cancel).await;
+            let outcome = service
+                .run(&gid, &file, &dir, extra, obfuscation, &cancel)
+                .await;
             let mut tasks = service.tasks.lock().unwrap();
             if let Some(task) = tasks.get_mut(&gid) {
                 // pause/remove already set their own state; a stale run must not undo it.
@@ -227,7 +243,7 @@ impl Ed2kService {
                     Err(_) if cancel.load(Ordering::Acquire) => task.status = "paused",
                     Err(error) => {
                         task.status = "error";
-                        task.error = Some(error.to_string());
+                        task.error = Some(format!("{error:#}"));
                     }
                 }
             }
@@ -243,11 +259,12 @@ impl Ed2kService {
         let mut found = Vec::new();
         for server in self.config.servers.iter().take(3) {
             let attempt = async {
-                let connection = crate::ed2k::ServerConnection::connect(
+                let connection = crate::ed2k::ServerConnection::connect_with(
                     server.clone(),
                     self.config.identity,
                     "nibiru-xtreme",
                     self.config.tcp_port,
+                    self.config.obfuscation,
                 )
                 .await?;
                 let list = connection.sources(&hash).await;
@@ -282,6 +299,7 @@ impl Ed2kService {
         file: &FileLink,
         dir: &std::path::Path,
         extra: Vec<FileSource>,
+        obfuscation: Obfuscation,
         cancel: &Arc<AtomicBool>,
     ) -> Result<()> {
         let sources = self.discover(file, extra).await;
@@ -299,6 +317,7 @@ impl Ed2kService {
                 identity: self.config.identity,
                 client_id: 0,
                 callbacks: None,
+                obfuscation,
             },
             cancel.clone(),
             |p: TransferProgress| {
@@ -449,6 +468,7 @@ mod tests {
             tcp_port: 4662,
             servers: Vec::new(),
             kad: None,
+            obfuscation: Obfuscation::Prefer,
         })
     }
     fn options(dir: &std::path::Path, port: u16) -> Map<String, Value> {

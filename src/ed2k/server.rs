@@ -33,6 +33,29 @@ pub struct FileSource {
     pub host: Option<std::net::Ipv4Addr>,
     pub port: u16,
     pub requires_callback: bool,
+    /// The source's user hash, when a server or Kad reported it; the key for obfuscation.
+    #[serde(default)]
+    pub user_hash: Option<[u8; 16]>,
+    /// eMule "crypt options" byte: 0x01 supports obfuscation, 0x02 requests it, 0x04 requires it.
+    #[serde(default)]
+    pub crypt: u8,
+}
+impl FileSource {
+    /// A directly reachable source with nothing known about obfuscation.
+    pub fn direct(host: std::net::Ipv4Addr, port: u16) -> Self {
+        Self {
+            client_id: u32::from_le_bytes(host.octets()),
+            host: Some(host),
+            port,
+            requires_callback: false,
+            user_hash: None,
+            crypt: 0,
+        }
+    }
+    /// Whether obfuscation can be used with this source (its hash is known and it supports it).
+    pub fn can_obfuscate(&self) -> bool {
+        self.user_hash.is_some() && self.crypt & 0x01 != 0
+    }
 }
 
 pub(crate) fn file_hash(value: &str) -> Result<[u8; 16]> {
@@ -46,13 +69,19 @@ pub(crate) fn file_hash(value: &str) -> Result<[u8; 16]> {
     Ok(hash)
 }
 
-fn file_sources(data: &[u8], expected: &[u8; 16]) -> Result<Vec<FileSource>> {
+/// `OP_FOUNDSOURCES` (6 bytes per source) or `OP_FOUNDSOURCES_OBFU`, where every source also carries
+/// a crypt-options byte and, when its 0x80 bit is set, the source's 16-byte user hash.
+fn file_sources(
+    data: &[u8],
+    expected: &[u8; 16],
+    with_obfuscation: bool,
+) -> Result<Vec<FileSource>> {
     let mut reader = Reader::new(data);
     if reader.take(16)? != expected {
         bail!("ED2K source response has a different file hash");
     }
     let count = reader.u8()? as usize;
-    if data.len() != 17 + count * 6 {
+    if !with_obfuscation && data.len() != 17 + count * 6 {
         bail!("invalid ED2K source response length");
     }
     let mut sources = Vec::with_capacity(count);
@@ -60,6 +89,14 @@ fn file_sources(data: &[u8], expected: &[u8; 16]) -> Result<Vec<FileSource>> {
     for _ in 0..count {
         let id = reader.u32()?;
         let port = reader.u16()?;
+        let (mut crypt, mut user_hash) = (0u8, None);
+        if with_obfuscation {
+            let options = reader.u8()?;
+            crypt = options & 0x7f;
+            if options & 0x80 != 0 {
+                user_hash = Some(reader.take(16)?.try_into()?);
+            }
+        }
         if id == 0 || port == 0 || !seen.insert((id, port)) {
             continue;
         }
@@ -69,7 +106,14 @@ fn file_sources(data: &[u8], expected: &[u8; 16]) -> Result<Vec<FileSource>> {
             host: (!low_id).then(|| std::net::Ipv4Addr::from(id.to_le_bytes())),
             port,
             requires_callback: low_id,
+            user_hash,
+            crypt,
         });
+    }
+    if with_obfuscation {
+        reader
+            .done()
+            .map_err(|_| anyhow!("invalid ED2K obfuscated source response length"))?;
     }
     Ok(sources)
 }
@@ -125,7 +169,12 @@ fn number_tag(data: &mut Vec<u8>, id: u8, value: u32) {
     data.push(id);
     data.extend(value.to_le_bytes());
 }
-fn login(hash: [u8; 16], nickname: &str, tcp_port: u16) -> Result<Vec<u8>> {
+fn login(
+    hash: [u8; 16],
+    nickname: &str,
+    tcp_port: u16,
+    obfuscation: super::obfuscation::Obfuscation,
+) -> Result<Vec<u8>> {
     if nickname.len() > 128 || nickname.chars().any(char::is_control) {
         bail!("invalid ED2K nickname");
     }
@@ -136,8 +185,13 @@ fn login(hash: [u8; 16], nickname: &str, tcp_port: u16) -> Result<Vec<u8>> {
     data.extend(3u32.to_le_bytes());
     string_tag(&mut data, 1, nickname);
     number_tag(&mut data, 0x11, 60);
-    // Advertise only implemented tag encoding and Unicode, not obfuscation/AICH.
-    number_tag(&mut data, 0x20, 0x18);
+    // New tags (0x08) and Unicode (0x10), plus, unless disabled, support for the obfuscation
+    // layer (0x200) and the wish to use it (0x400) so the server answers with source hashes.
+    let crypt = match obfuscation {
+        super::obfuscation::Obfuscation::Disabled => 0,
+        _ => 0x200 | 0x400,
+    };
+    number_tag(&mut data, 0x20, 0x18 | crypt);
     Ok(data)
 }
 fn results(data: &[u8]) -> Result<Vec<SearchResult>> {
@@ -313,12 +367,35 @@ impl ServerConnection {
         nickname: &str,
         tcp_port: u16,
     ) -> Result<Self> {
+        Self::connect_with(
+            server,
+            user_hash,
+            nickname,
+            tcp_port,
+            super::obfuscation::Obfuscation::Disabled,
+        )
+        .await
+    }
+
+    /// Like [`Self::connect`], also announcing obfuscation support to the server.
+    pub async fn connect_with(
+        server: Server,
+        user_hash: [u8; 16],
+        nickname: &str,
+        tcp_port: u16,
+        obfuscation: super::obfuscation::Obfuscation,
+    ) -> Result<Self> {
         let (stream, client_id, tcp_flags) = tokio::time::timeout(Duration::from_secs(15), async {
             let mut stream = TcpStream::connect((server.host.as_str(), server.port))
                 .await
                 .context("cannot connect to ED2K server")?;
             stream.set_nodelay(true)?;
-            send(&mut stream, 0x01, &login(user_hash, nickname, tcp_port)?).await?;
+            send(
+                &mut stream,
+                0x01,
+                &login(user_hash, nickname, tcp_port, obfuscation)?,
+            )
+            .await?;
             for _ in 0..32 {
                 let (opcode, bytes) = frame(&mut stream).await?;
                 match opcode {
@@ -413,13 +490,13 @@ impl ServerConnection {
                     },
                     packet = incoming.recv() => match packet {
                         Some(Ok((0x33,data))) => if let Some(reply) = pending.take() { let _ = reply.send(results(&data)); },
-                        Some(Ok((0x42,data))) => {
+                        Some(Ok((opcode @ (0x42 | 0x44),data))) => {
                             if let Some((hash,_)) = pending_sources.as_ref() {
                                 // Ignore unrelated unsolicited packets; never attach another
                                 // file's sources to the pending request.
                                 if data.get(..16) == Some(hash.as_slice()) {
                                     let (hash,reply) = pending_sources.take().expect("pending source lookup");
-                                    let _ = reply.send(file_sources(&data,&hash));
+                                    let _ = reply.send(file_sources(&data,&hash,opcode==0x44));
                                 }
                             }
                         },
@@ -731,17 +808,53 @@ mod tests {
             data.extend(id.to_le_bytes());
             data.extend(port.to_le_bytes());
         }
-        let sources = file_sources(&data, &[9; 16]).unwrap();
+        let sources = file_sources(&data, &[9; 16], false).unwrap();
         assert_eq!(sources.len(), 2);
         assert_eq!(sources[0].host.unwrap().to_string(), "1.2.3.4");
         assert!(!sources[0].requires_callback);
         assert!(sources[1].host.is_none());
         assert!(sources[1].requires_callback);
-        assert!(file_sources(&data, &[8; 16]).is_err());
+        assert!(file_sources(&data, &[8; 16], false).is_err());
         data.pop();
-        assert!(file_sources(&data, &[9; 16]).is_err());
+        assert!(file_sources(&data, &[9; 16], false).is_err());
         data.extend([0, 0]);
-        assert!(file_sources(&data, &[9; 16]).is_err());
+        assert!(file_sources(&data, &[9; 16], false).is_err());
+    }
+
+    #[test]
+    fn obfuscated_source_records_carry_crypt_options_and_the_user_hash() {
+        let mut data = vec![9; 16];
+        data.push(3);
+        // High-ID source, supports obfuscation, hash included (0x80 | 0x01).
+        data.extend(0x04030201u32.to_le_bytes());
+        data.extend(4662u16.to_le_bytes());
+        data.push(0x81);
+        data.extend([0x77; 16]);
+        // High-ID source without crypt info.
+        data.extend(0x08070605u32.to_le_bytes());
+        data.extend(4663u16.to_le_bytes());
+        data.push(0);
+        // Low-ID source that requires it, with hash (for the callback path).
+        data.extend(77u32.to_le_bytes());
+        data.extend(4664u16.to_le_bytes());
+        data.push(0x84);
+        data.extend([0x66; 16]);
+        let sources = file_sources(&data, &[9; 16], true).unwrap();
+        assert_eq!(sources.len(), 3);
+        assert_eq!(sources[0].user_hash, Some([0x77; 16]));
+        assert_eq!(sources[0].crypt, 0x01);
+        assert!(sources[0].can_obfuscate());
+        assert_eq!(sources[1].user_hash, None);
+        assert!(!sources[1].can_obfuscate());
+        assert!(sources[2].requires_callback);
+        assert_eq!(sources[2].crypt, 0x04);
+        // A hash flagged but cut short, or trailing bytes, is rejected.
+        let mut short = data.clone();
+        short.truncate(short.len() - 5);
+        assert!(file_sources(&short, &[9; 16], true).is_err());
+        let mut long = data;
+        long.push(0);
+        assert!(file_sources(&long, &[9; 16], true).is_err());
     }
 
     #[tokio::test]

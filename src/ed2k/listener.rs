@@ -1,3 +1,4 @@
+use super::obfuscation::{self, Obfuscation, PeerStream};
 use super::{FileLink, FileSource, ServerConnection, ShareRegistry, UploadManager, peer, upload};
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
@@ -16,7 +17,7 @@ use tokio::{
 };
 
 pub(crate) struct IncomingPeer {
-    stream: TcpStream,
+    stream: PeerStream,
     large: bool,
 }
 type PendingCallback = (u64, oneshot::Sender<IncomingPeer>);
@@ -106,6 +107,8 @@ pub struct IncomingStatus {
     pub running: bool,
     pub active_connections: usize,
     pub completed_handshakes: u64,
+    /// Of those, how many arrived obfuscated.
+    pub obfuscated_handshakes: u64,
 }
 /// Incoming ED2K hello/probe service. It lets servers test the advertised TCP
 /// port. No file is shared implicitly, and unsupported file requests get NoFile.
@@ -115,8 +118,10 @@ pub struct IncomingListener {
     client_id: Arc<AtomicU32>,
     active: Arc<AtomicUsize>,
     handshakes: Arc<AtomicU64>,
+    obfuscated: Arc<AtomicU64>,
     callbacks: CallbackRegistry,
     uploads: UploadManager,
+    obfuscation: Arc<std::sync::atomic::AtomicU8>,
     task: tokio::task::AbortHandle,
 }
 impl Drop for IncomingListener {
@@ -165,10 +170,14 @@ impl IncomingListener {
         let peers = active.clone();
         let handshakes = Arc::new(AtomicU64::new(0));
         let completed = handshakes.clone();
+        let obfuscated = Arc::new(AtomicU64::new(0));
+        let obfuscated_count = obfuscated.clone();
         let callbacks = CallbackRegistry::default();
         let registry = callbacks.clone();
         let shared = shares.clone();
         let upload_manager = uploads.clone();
+        let mode = Arc::new(std::sync::atomic::AtomicU8::new(Obfuscation::Prefer.code()));
+        let mode_for_task = mode.clone();
         let task = tokio::spawn(async move {
             struct Offline(Arc<AtomicBool>);
             impl Drop for Offline {
@@ -191,13 +200,14 @@ impl IncomingListener {
                             if *count >= MAX_PER_IP {drop(stream);continue;}
                             *count += 1;
                         }
-                        let active=peers.clone();let id=id.clone();let completed=completed.clone();let registry=registry.clone();let shared=shared.clone();let uploads=upload_manager.clone();let per_ip=per_ip.clone();
+                        let active=peers.clone();let id=id.clone();let completed=completed.clone();let registry=registry.clone();let shared=shared.clone();let uploads=upload_manager.clone();let per_ip=per_ip.clone();let mode=mode_for_task.clone();let obfuscated=obfuscated_count.clone();
                         sessions.spawn(async move {
                             struct Active(Arc<AtomicUsize>);impl Drop for Active {fn drop(&mut self){self.0.fetch_sub(1,Ordering::AcqRel);}}
                             struct PerIp(Arc<Mutex<HashMap<std::net::IpAddr, usize>>>, std::net::IpAddr);
                             impl Drop for PerIp {fn drop(&mut self){if let Ok(mut c)=self.0.lock()&&let Some(n)=c.get_mut(&self.1){*n=n.saturating_sub(1);if *n==0{c.remove(&self.1);}}}}
                             active.fetch_add(1,Ordering::AcqRel);let _active=Active(active);let _ip=PerIp(per_ip,ip);
-                            let _=session(stream,ip,identity,id,completed,registry,shared,uploads).await;
+                            let mode = Obfuscation::from_code(mode.load(Ordering::Acquire));
+                            let _=session(stream,ip,identity,mode,obfuscated,id,completed,registry,shared,uploads).await;
                         });
                     },
                     _=sessions.join_next(), if !sessions.is_empty()=>{},
@@ -210,8 +220,10 @@ impl IncomingListener {
             client_id,
             active,
             handshakes,
+            obfuscated,
             callbacks,
             uploads,
+            obfuscation: mode,
             task: task.abort_handle(),
         })
     }
@@ -222,6 +234,10 @@ impl IncomingListener {
         self.callbacks.clone()
     }
     /// Upload slots, queue, limits and statistics of this listener.
+    /// Whether incoming connections may be plain, obfuscated or must be obfuscated.
+    pub fn set_obfuscation(&self, mode: Obfuscation) {
+        self.obfuscation.store(mode.code(), Ordering::Release);
+    }
     pub fn uploads(&self) -> UploadManager {
         self.uploads.clone()
     }
@@ -231,6 +247,7 @@ impl IncomingListener {
             running: self.alive.load(Ordering::Acquire),
             active_connections: self.active.load(Ordering::Acquire),
             completed_handshakes: self.handshakes.load(Ordering::Acquire),
+            obfuscated_handshakes: self.obfuscated.load(Ordering::Acquire),
         }
     }
 }
@@ -239,15 +256,27 @@ const MAX_PER_IP: usize = 4;
 
 #[allow(clippy::too_many_arguments)]
 async fn session(
-    mut stream: TcpStream,
+    stream: TcpStream,
     ip: std::net::IpAddr,
     identity: [u8; 16],
+    mode: Obfuscation,
+    obfuscated: Arc<AtomicU64>,
     client_id: Arc<AtomicU32>,
     completed: Arc<AtomicU64>,
     callbacks: CallbackRegistry,
     shares: ShareRegistry,
     uploads: UploadManager,
 ) -> Result<()> {
+    // The obfuscation handshake (when the peer starts one) is part of the time-boxed exchange.
+    let mut stream = tokio::time::timeout(
+        Duration::from_secs(30),
+        obfuscation::accept(stream, &identity, mode),
+    )
+    .await
+    .context("incoming peer handshake timed out")??;
+    if stream.is_obfuscated() {
+        obfuscated.fetch_add(1, Ordering::AcqRel);
+    }
     // Only the hello exchange is time-boxed; afterwards the uploader applies its own idle rules.
     let hello = tokio::time::timeout(Duration::from_secs(30), async {
         let (protocol, op, data) = peer::frame(&mut stream).await?;
@@ -380,6 +409,7 @@ mod tests {
         .unwrap();
         listener.set_client_id(connection.client_id);
         let options = TransferOptions {
+            obfuscation: Obfuscation::Disabled,
             identity: [3; 16],
             client_id: connection.client_id,
             callbacks: Some(CallbackClient::new(connection, listener.callbacks())),
@@ -390,6 +420,8 @@ mod tests {
             host: None,
             port: 4662,
             requires_callback: true,
+            user_hash: None,
+            crypt: 0,
         };
         let output = download_with_options(
             &file,

@@ -34,6 +34,7 @@ pub struct TransferOptions {
     pub identity: [u8; 16],
     pub client_id: u32,
     pub callbacks: Option<super::CallbackClient>,
+    pub obfuscation: super::obfuscation::Obfuscation,
 }
 
 /// Download from server-discovered high-ID peers. Successful parts survive
@@ -56,6 +57,7 @@ pub async fn download_from_sources(
             identity,
             client_id,
             callbacks: None,
+            obfuscation: super::obfuscation::Obfuscation::Prefer,
         },
         cancel,
         progress,
@@ -282,6 +284,7 @@ impl Context_<'_> {
                 self.file,
                 self.options.identity,
                 self.options.client_id,
+                self.options.obfuscation,
                 self.cancel.clone(),
             )
             .await
@@ -570,6 +573,8 @@ pub(crate) mod tests {
                 host: Some(std::net::Ipv4Addr::LOCALHOST),
                 port,
                 requires_callback: false,
+                user_hash: None,
+                crypt: 0,
             },
             requested,
             handle,
@@ -745,6 +750,8 @@ pub(crate) mod tests {
             host: Some(std::net::Ipv4Addr::LOCALHOST),
             port,
             requires_callback: false,
+            user_hash: None,
+            crypt: 0,
         };
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(1),
