@@ -53,7 +53,7 @@ Limites do ambiente que afetam a leitura:
 | DHT IPv4 | Existe | **T** `dht_network` (3); magnet sem tracker via RPC | Sem teste em DHT público |
 | DHT IPv6, BEP 42 | Existe no código | IPv6: **NT aqui** (teste se pula sem IPv6); BEP 42: **T** unitário com os vetores oficiais (`dht_security`) | Precisa de CI com IPv6 |
 | Hole punching | **—** | `grep` sem ocorrência | Implementar só com interoperabilidade comprovada; sem stub anunciado |
-| Descoberta local (LSD, BEP 14) | **—** | `grep` sem ocorrência | Pendente |
+| Descoberta local (LSD, BEP 14) | **Existe**, opt-in (`--enable-lpd` / `--bt-enable-lpd=true`, `--lpd-interface` / `--bt-lpd-interface`) | **T** `bittorrent_lsd` (4: magnet sem peers baixa do vizinho, sem LSD não acha ninguém, anúncio só de torrents públicos com a porta certa e no máximo 1 por intervalo, vizinho ignorado para privado/desconhecido) + **interop libtorrent 2.1.1** nos dois sentidos (`interop_libtorrent.py`, loopback) | IPv4 apenas; uma interface por vez; só testado em loopback, não numa LAN real com vários hosts; desligado por padrão (como o aria2) |
 | Streaming de torrent (`nibiru.streamUrl`) | Existe | **T** `rpc_bittorrent::stream_url_…` (Range 206, seek) | — |
 | Metalink | **—** | — | O ADM expande Metalink por conta própria hoje |
 
@@ -88,5 +88,5 @@ Limites do ambiente que afetam a leitura:
 1. ~~Persistência real das tarefas no RPC e contadores globais reais~~ (feito nesta revisão, ver `docs/protocols.md`).
 2. ~~Mover a sessão Kad para o motor e expor ED2K/Kad no RPC~~ (feito); várias fontes por arquivo (feito); resta validar contra aMule/rede real.
 3. ~~Retomada em FTP/FTPS/SFTP~~ (feito; ver `docs/protocols.md`).
-4. Hole punching e LSD **somente** com teste de interoperabilidade.
+4. ~~LSD~~ (feito, com interop libtorrent). Hole punching **somente** com teste de interoperabilidade.
 5. CI do Xtreme em Windows e macOS com IPv6; desempenho contra o aria2-ultra que o ADM usa.

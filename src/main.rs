@@ -94,6 +94,12 @@ struct ServeArgs {
     enable_utp: bool,
     #[arg(long)]
     bt_require_crypto: bool,
+    /// Local Service Discovery (BEP 14): find peers on the same network via multicast.
+    #[arg(long)]
+    enable_lpd: bool,
+    /// Local address to join/send the LSD multicast group on (default: the OS default route).
+    #[arg(long)]
+    lpd_interface: Option<std::net::Ipv4Addr>,
     #[arg(long)]
     allow_loopback_peers: bool,
     #[arg(long)]
@@ -158,6 +164,14 @@ impl ServeArgs {
             ..BtConfig::default()
         };
         config.session.enable_utp = self.enable_utp;
+        if self.enable_lpd {
+            config.session.lsd = Some(nibiru_xtreme::bittorrent::lsd::LsdConfig {
+                interface: self
+                    .lpd_interface
+                    .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED),
+                ..Default::default()
+            });
+        }
         config.session.download_limit = parse_size(&self.max_overall_download_limit)
             .ok_or_else(|| anyhow!("invalid download limit"))?;
         config.session.upload_limit = parse_size(&self.max_overall_upload_limit)
@@ -187,6 +201,9 @@ async fn main() -> Result<()> {
                         "parent_lifetime": true, "http_resume_identity": true,
                         "session_persistence": true,
                         "bittorrent": true, "ed2k_library": true,
+                        "ed2k_rpc": true, "ed2k_multi_source": true, "bt_lsd": true,
+                        "ftp_resume": cfg!(feature = "ftp"),
+                        "sftp_resume": cfg!(feature = "sftp"),
                         "ftp": cfg!(feature = "ftp"), "sftp": cfg!(feature = "sftp"),
                         "http3": cfg!(feature = "http3")}
                 })
@@ -287,6 +304,7 @@ async fn run_aria2_compatible_rpc(args: &[String]) -> Result<()> {
     let mut log_path = None;
     let mut stop_with = None;
     let mut bt = BtConfig::default();
+    let (mut lpd_enabled, mut lpd_interface) = (false, None::<std::net::Ipv4Addr>);
     for arg in args {
         let Some((name, value)) = arg.strip_prefix("--").and_then(|a| a.split_once('=')) else {
             continue;
@@ -325,6 +343,8 @@ async fn run_aria2_compatible_rpc(args: &[String]) -> Result<()> {
             "enable-dht" => bt.dht = value == "true",
             "enable-dht6" => bt.dht6 = value == "true",
             "enable-utp" => bt.session.enable_utp = value == "true",
+            "bt-enable-lpd" => lpd_enabled = value == "true",
+            "bt-lpd-interface" => lpd_interface = value.parse().ok(),
             "x-nibiru-enable-tcp" => bt.enable_tcp = value == "true",
             "bt-force-encryption" | "bt-require-crypto" => bt.require_encryption |= value == "true",
             "dht-file-path" => bt.dht_file = Some(PathBuf::from(value)),
@@ -332,6 +352,12 @@ async fn run_aria2_compatible_rpc(args: &[String]) -> Result<()> {
             "x-nibiru-allow-loopback-peers" => bt.allow_loopback_peers = value == "true",
             _ => {}
         }
+    }
+    if lpd_enabled {
+        bt.session.lsd = Some(nibiru_xtreme::bittorrent::lsd::LsdConfig {
+            interface: lpd_interface.unwrap_or(std::net::Ipv4Addr::UNSPECIFIED),
+            ..Default::default()
+        });
     }
     if bt.dht && bt.dht_file.is_none() {
         bt.dht_file = Some(PathBuf::from("dht.dat"));

@@ -12,6 +12,15 @@ fn capabilities_expose_the_real_native_rpc_and_resume_contract() {
     assert_eq!(value["features"]["native_rpc"], true);
     assert_eq!(value["features"]["http_resume_identity"], true);
     assert_eq!(value["features"]["session_persistence"], true);
+    for key in [
+        "ed2k_rpc",
+        "ed2k_multi_source",
+        "bt_lsd",
+        "ftp_resume",
+        "sftp_resume",
+    ] {
+        assert_eq!(value["features"][key], true, "{key}");
+    }
 }
 #[test]
 fn invalid_native_serve_configuration_is_rejected_before_starting_a_service() {

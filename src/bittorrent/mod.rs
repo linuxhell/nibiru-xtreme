@@ -5,6 +5,7 @@ pub mod bitfield;
 pub mod dht;
 pub mod dht_security;
 pub mod limiter;
+pub mod lsd;
 pub mod magnet;
 pub mod message;
 pub mod metainfo;

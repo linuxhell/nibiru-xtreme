@@ -43,7 +43,7 @@ def add(session, info, directory):
 
 
 @contextlib.contextmanager
-def engine(binary, root, utp, encrypted):
+def engine(binary, root, utp, encrypted, extra=()):
     port, peer_port = free_port(), free_port()
     secret = secrets.token_hex(16)
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -67,6 +67,7 @@ def engine(binary, root, utp, encrypted):
             f"--enable-utp={str(utp).lower()}",
             f"--x-nibiru-enable-tcp={str(not utp).lower()}",
             f"--bt-force-encryption={str(encrypted).lower()}",
+            *extra,
         ], stdout=log, stderr=log)
         try:
             for _ in range(100):
@@ -153,12 +154,61 @@ def scenario(binary, utp, encrypted, incoming, protocol="v1"):
             del session
 
 
+def lsd_scenario(binary, incoming):
+    """Neither side is told the other's address: only BEP 14 multicast announcements connect them."""
+    with tempfile.TemporaryDirectory(prefix="nibiru-lsd-") as directory:
+        root = pathlib.Path(directory)
+        seed, output = root / "seed", root / "output"
+        seed.mkdir()
+        output.mkdir()
+        content = bytes((i * 11 + i // 199) % 256 for i in range(600_001))
+        (seed / "payload.bin").write_bytes(content)
+        fs = lt.file_storage()
+        fs.add_file("payload.bin", len(content))
+        create = lt.create_torrent(fs, 65_536, flags=lt.create_torrent.v1_only)
+        lt.set_piece_hashes(create, str(seed))
+        encoded = lt.bencode(create.generate())
+        info = lt.torrent_info(encoded)
+        session = lt.session({
+            "listen_interfaces": "127.0.0.1:0", "enable_dht": False, "enable_lsd": True,
+            "enable_upnp": False, "enable_natpmp": False, "enable_ip_notifier": False,
+            "allow_multiple_connections_per_ip": True,
+        })
+        try:
+            with engine(binary, root, False, False,
+                        ["--bt-enable-lpd=true", "--bt-lpd-interface=127.0.0.1"]) as (rpc, port):
+                assert "LSD" in rpc("aria2.getVersion", [])["enabledFeatures"]
+                if incoming:
+                    # Nibiru seeds; libtorrent has only the infohash (a magnet) and must find it.
+                    gid = rpc("aria2.addTorrent", [base64.b64encode(encoded).decode(), [], {"dir": str(seed)}])
+                    wait(lambda: rpc("aria2.tellStatus", [gid])["seeder"] == "true", "Nibiru seeder ready")
+                    params = lt.parse_magnet_uri(f"magnet:?xt=urn:btih:{info.info_hashes().v1}")
+                    params.save_path = str(output)
+                    peer = session.add_torrent(params)
+                    wait(lambda: peer.status().is_seeding, "libtorrent finds Nibiru through LSD", 60)
+                else:
+                    peer = add(session, info, seed)
+                    wait(lambda: peer.status().is_seeding, "libtorrent seeder ready")
+                    magnet = f"magnet:?xt=urn:btih:{info.info_hashes().v1}"
+                    gid = rpc("aria2.addUri", [[magnet], {"dir": str(output), "seed-time": "0"}])
+                    wait(lambda: rpc("aria2.tellStatus", [gid])["status"] == "complete",
+                         "Nibiru finds libtorrent through LSD", 60)
+                assert (output / "payload.bin").read_bytes() == content
+                print(json.dumps({"feature": "lsd", "direction": "libtorrent finds nibiru" if incoming else "nibiru finds libtorrent",
+                                  "bytes_verified": len(content), "result": "passed"}), flush=True)
+        finally:
+            session.pause()
+            del session
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=pathlib.Path, required=True)
     parser.add_argument("--protocols",default="v1,v2,hybrid")
     args = parser.parse_args()
     print(json.dumps({"independent_client": "libtorrent", "version": lt.__version__}), flush=True)
+    for incoming in [False, True]:
+        lsd_scenario(args.binary.resolve(), incoming)
     for protocol in args.protocols.split(","):
         for utp, encrypted in [(False, True), (True, False), (True, True)]:
             for incoming in [False, True]:

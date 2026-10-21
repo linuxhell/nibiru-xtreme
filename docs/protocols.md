@@ -227,3 +227,19 @@ Uma transferência FTP/FTPS/SFTP interrompida (cancelamento, queda de conexão, 
 - Limite conhecido: o trecho anterior ao overlap não é recomparado; um servidor que troque o
   conteúdo mantendo tamanho e data e preserve os últimos 8 MiB passaria despercebido. HTTP usa
   ETag/Last-Modified e é tratado à parte.
+
+
+## Local Service Discovery (BEP 14)
+
+Opt-in (`serve --enable-lpd [--lpd-interface IP]`, ou `--bt-enable-lpd=true` no modo aria2). O
+motor entra no grupo multicast `239.192.152.143:6771` (IPv4, TTL 1), anuncia cada torrent
+**público com metadados** a cada 5 minutos (primeiro anúncio em até 2 s) e aceita anúncios de
+vizinhos para torrents que já tem e que não são privados.
+
+- Formato conferido contra pacotes reais do libtorrent 2.1.1: `BT-SEARCH * HTTP/1.1`, `Host`, `Port`,
+  `Infohash` (40 hex, repetível; no máximo 4 aceitos) e `cookie`, que identifica a sessão para ignorar
+  o próprio anúncio devolvido pelo loopback multicast.
+- Defesas: datagrama até 1400 bytes, limite de 40 pacotes por segundo, só origem privada, loopback ou
+  link-local, `Port` 1–65535, cabeçalhos desconhecidos ignorados, torrents privados nunca anunciados
+  nem aceitos, magnet sem metadados não é anunciado (ainda não se sabe se é privado).
+- Limite: uma interface por vez (a da rota padrão, ou a indicada); sem IPv6 (`ff15::efc0:988f`).

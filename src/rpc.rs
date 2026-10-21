@@ -379,6 +379,13 @@ impl RpcServer {
                         "DHT-IPv6",
                         "PEX",
                     ]);
+                    if self
+                        .bt
+                        .as_ref()
+                        .is_some_and(|bt| bt.session().lsd_enabled())
+                    {
+                        features.push("LSD");
+                    }
                 }
                 if self.ed2k.is_some() {
                     features.extend(["ED2K", "Kad2-sources"]);

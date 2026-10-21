@@ -35,6 +35,8 @@ pub struct SessionConfig {
     pub dht6: Option<DhtConfig>,
     /// Listen for uTP on the TCP peer port. DHT uses its own UDP socket/port.
     pub enable_utp: bool,
+    /// Local Service Discovery (BEP 14) on the multicast group.
+    pub lsd: Option<super::lsd::LsdConfig>,
 }
 
 impl Default for SessionConfig {
@@ -49,6 +51,7 @@ impl Default for SessionConfig {
             dht: None,
             dht6: None,
             enable_utp: true,
+            lsd: None,
         }
     }
 }
@@ -63,6 +66,7 @@ pub struct Session {
     dht: Option<Arc<Dht>>,
     dht6: Option<Arc<Dht>>,
     utp: Option<Arc<librqbit_utp::UtpSocketUdp>>,
+    lsd: std::sync::OnceLock<super::lsd::Lsd>,
 }
 
 fn new_peer_id() -> [u8; 20] {
@@ -146,7 +150,14 @@ impl Session {
             dht,
             dht6,
             utp: utp.clone(),
+            lsd: std::sync::OnceLock::new(),
         });
+        if let Some(lsd) = config.lsd.clone() {
+            // Best effort: a host without multicast simply runs without LSD.
+            if let Ok(lsd) = super::lsd::Lsd::start(lsd, port, Arc::downgrade(&session)) {
+                let _ = session.lsd.set(lsd);
+            }
+        }
         let gate = Arc::new(Semaphore::new(config.max_pending_handshakes.max(1)));
         let weak = Arc::downgrade(&session);
         tokio::spawn(async move {
@@ -211,6 +222,11 @@ impl Session {
         Ok(session)
     }
 
+    /// Whether Local Service Discovery is running on this session.
+    pub fn lsd_enabled(&self) -> bool {
+        self.lsd.get().is_some()
+    }
+
     pub fn port(&self) -> u16 {
         self.port
     }
@@ -234,6 +250,43 @@ impl Session {
     fn register(&self, handle: TorrentHandle) -> TorrentHandle {
         let mut torrents = self.torrents.lock().unwrap_or_else(|e| e.into_inner());
         torrents.entry(handle.info_hash()).or_insert(handle).clone()
+    }
+
+    /// A neighbour announced `info_hash` over LSD; ignored for private or unknown torrents.
+    pub(crate) fn lsd_peer(&self, info_hash: &[u8; 20], addr: SocketAddr) {
+        if let Some(handle) = self.existing(info_hash)
+            && !handle.is_stopped()
+            && !handle.shared.lock().private
+        {
+            handle.add_peer(addr);
+        }
+    }
+
+    /// Wire identities of the public torrents whose LSD announcement is due, grouped per torrent.
+    pub(crate) fn lsd_due(
+        &self,
+        last: &mut HashMap<[u8; 20], std::time::Instant>,
+        interval: Duration,
+    ) -> Vec<Vec<[u8; 20]>> {
+        let torrents = self.list();
+        last.retain(|hash, _| torrents.iter().any(|t| t.info_hash() == *hash));
+        let mut due = Vec::new();
+        for handle in torrents {
+            // A magnet's privacy is unknown until its metadata arrives: do not announce it yet.
+            if handle.is_stopped() || {
+                let core = handle.shared.lock();
+                core.private || core.ready().is_none()
+            } {
+                continue;
+            }
+            let key = handle.info_hash();
+            if last.get(&key).is_none_or(|at| at.elapsed() >= interval) {
+                last.insert(key, std::time::Instant::now());
+                due.push(handle.shared.wire_hashes());
+            }
+        }
+        due.truncate(10);
+        due
     }
 
     fn accepted_hashes(&self) -> Vec<[u8; 20]> {

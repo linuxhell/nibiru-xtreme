@@ -43,6 +43,7 @@ russh = { version = "0.64", optional = true, default-features = false, features 
 russh-sftp = { version = "3", optional = true }
 uuid = { version = "1", features = ["v4"] }
 getrandom = "0.4"
+socket2 = { version = "0.6", features = ["all"] }
 num-bigint = "0.5"
 librqbit-utp = "0.7"
 librqbit-dualstack-sockets = "0.7"
