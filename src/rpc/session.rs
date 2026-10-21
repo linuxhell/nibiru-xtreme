@@ -330,12 +330,8 @@ mod tests {
                 "{url} must stay out of the session file"
             );
         }
-        assert!(
-            persistable_options(Some("https://example.test/file"), None).is_some()
-        );
-        assert!(
-            persistable_options(Some("magnet:?xt=urn:btih:abc"), None).is_some()
-        );
+        assert!(persistable_options(Some("https://example.test/file"), None).is_some());
+        assert!(persistable_options(Some("magnet:?xt=urn:btih:abc"), None).is_some());
     }
 
     #[test]
