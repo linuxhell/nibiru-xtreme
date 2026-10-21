@@ -443,6 +443,10 @@ async fn a_paused_torrent_survives_a_restart_and_downloads_verified_data() {
     let info = build_info("Show", 65_536, &[(&["movie.mkv"], &data)]);
     let seed = Session::start(SessionConfig {
         bind: "127.0.0.1".parse().unwrap(),
+        // This persistence test exercises TCP. On Windows, a TCP ephemeral port can
+        // belong to an excluded UDP range, so binding uTP to the same port may fail
+        // with WSAEACCES even though the TCP listener is valid.
+        enable_utp: false,
         ..SessionConfig::default()
     })
     .await
