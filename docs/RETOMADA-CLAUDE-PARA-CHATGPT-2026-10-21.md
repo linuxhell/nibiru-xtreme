@@ -13,6 +13,50 @@ Vocabulário usado em todo o projeto (não misture):
 
 ---
 
+## Atualização do ChatGPT — auditoria posterior no mesmo dia
+
+A partir da retomada acima, o ChatGPT continuou a revisão na branch
+`audit/code-review-2026-10-21`. **Esta branch passa a ser a fonte de verdade para a
+auditoria atual**; as referências abaixo à cabeça da branch do Claude são históricas.
+
+Correções publicadas nesta continuação, em ordem lógica:
+
+- `d80ba615`: corrige `CryptStream::poll_write` ED2K sob escrita parcial/backpressure; o estado RC4
+  real só avança pelos bytes efetivamente aceitos pelo writer.
+- `7dd8422d`: `change_option` valida `select-file` antes de persistir/aplicar mudanças, evitando
+  mutação parcial em pedido inválido.
+- `0ed80cf0`: fecha a corrida entre `existing()` e `register()`; uma instância duplicada de torrent
+  criada em concorrência é explicitamente encerrada.
+- `566431cf`: serializa comparação, substituição atômica e cache de `SessionStore::save`, impedindo
+  snapshot antigo de vencer corrida de gravação.
+- `d91dd1b6`: tokens DHT expiram também em validação, mesmo sem novos `get_peers`.
+- `c7d89502`: exclusão de storage BitTorrent passa a ser terminal; writes atrasados não recriam arquivos
+  depois de `delete_files()`.
+- `a120bca4`: upload ED2K recusa arquivo compartilhado modificado com mesmo tamanho se o mtime mudou.
+- `929695e3` e `2f48825d`: `Referer` e URLs diretas com query deixam de ser persistidos no session file.
+- `1d9536bc`, `c344e8ea`: sidecar HTTP de retomada grava fingerprints SHA-256 das URLs; sidecars legados
+  em claro só são aceitos com correspondência exata e são migrados imediatamente.
+- `e0972fbe`, `02d7205c`: GitHub Actions do CI/release fixadas em revisões imutáveis.
+- `2f7643ce`: CI cancela execuções superadas da mesma ref.
+- `fa167f70`, `0b122c61`, `2dde1ff6`, `10f6cd64`: documentação, release notes e ignore de sidecars
+  alinhados ao comportamento auditado.
+
+Evidência importante já observada nesta continuação:
+
+- O head `d91dd1b6` concluiu CI completo com sucesso nas três plataformas.
+- A migração HTTP em `c344e8ea` passou `fmt`, Clippy, a suíte Rust no Ubuntu, a interoperabilidade
+  BitTorrent e a interoperabilidade ED2K/aMule; no último ponto observado, o release build ainda rodava
+  e os jobs Windows/macOS ainda estavam em andamento.
+- Uma falha anterior do aMule em `d80ba615` foi intermitente: a mesma correção passou em execução posterior
+  e, depois, no CI cumulativo.
+- `Cargo.lock` v4 não contém dependências `git+`; builds usam `--locked`.
+- A revisão dedicada cobriu todos os módulos de produção Rust listados em `src/`; buscas por
+  `TODO`, `FIXME`, `todo!`, `unimplemented!` e `panic!` não encontraram pendências de produção
+  explícitas. Isso **não equivale a validar rede pública, NAT real ou uso real Windows/macOS**.
+
+Antes de merge/tag/release, confirme o CI do head atual da branch
+`audit/code-review-2026-10-21`. Não houve autorização para merge em `main`, criação de tag ou release.
+
 ## 1. Decisão vigente do usuário (prevalece sobre qualquer plano antigo)
 
 1. O **ADM continua como está**. Só o **aria2-ultra** será substituído pelo **Nibiru Xtreme**, e **só depois**
