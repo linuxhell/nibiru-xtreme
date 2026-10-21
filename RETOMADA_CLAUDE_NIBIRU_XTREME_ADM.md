@@ -1,3 +1,13 @@
+> [!WARNING]
+> **DOCUMENTO HISTÓRICO — SUPERADO. NÃO USAR COMO CHECKPOINT ATUAL.**
+>
+> Este arquivo registra o estado de 20/10/2026 e contém decisões e lacunas que já mudaram.
+> A fonte de verdade para continuar o trabalho em 21/10/2026 é
+> `docs/RETOMADA-CLAUDE-PARA-CHATGPT-2026-10-21.md`, na branch
+> `audit/code-review-2026-10-21`. Em particular, **não** use daqui a orientação antiga de
+> substituir N_m3u8DL-RE/nibiru-m3u8, nem a lista antiga de capacidades ausentes do Xtreme.
+> Preserve o restante apenas como histórico de evolução.
+
 # REPOSITÓRIOS (abrir estes 3 na nova tela)
 
 | # | Repositório | URL | Branch com o trabalho | Último commit enviado | Papel |
