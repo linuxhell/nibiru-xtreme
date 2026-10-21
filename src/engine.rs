@@ -509,10 +509,23 @@ impl Engine {
                     .unwrap_or(false),
                 "existing file has no verified HTTP resume identity"
             );
-            let saved: HttpIdentity = serde_json::from_slice(&fs::read(&identity_path).await?)
+            let mut saved: HttpIdentity = serde_json::from_slice(&fs::read(&identity_path).await?)
                 .context("invalid HTTP resume identity")?;
+            let expected_origin = url_identity(&parsed);
+            if saved.origin == parsed.as_str() {
+                // Migrate legacy sidecars that stored URLs in cleartext. Accept them only
+                // when the original URL matches exactly, then immediately replace both
+                // stored URLs with fingerprints.
+                let legacy_final =
+                    Url::parse(&saved.final_url).context("invalid legacy HTTP resume identity")?;
+                saved.origin = expected_origin.clone();
+                saved.final_url = url_identity(&legacy_final);
+                let temp = identity_path.with_extension("tmp");
+                fs::write(&temp, serde_json::to_vec(&saved)?).await?;
+                fs::rename(&temp, &identity_path).await?;
+            }
             anyhow::ensure!(
-                saved.origin == url_identity(&parsed)
+                saved.origin == expected_origin
                     && (saved.etag.is_some() || saved.modified.is_some()),
                 "cannot safely resume without the same origin and validator"
             );
