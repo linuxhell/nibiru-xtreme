@@ -409,7 +409,7 @@ impl BtService {
                 self.add_magnet_as(Some(gid.clone()), uri, Some(options))
                     .await?
             }
-            Entry::Direct { .. } => bail!("not a BitTorrent entry"),
+            Entry::Direct { .. } | Entry::Ed2k { .. } => bail!("not a BitTorrent entry"),
         };
         self.pause(&id)
     }

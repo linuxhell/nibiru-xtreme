@@ -279,7 +279,7 @@ pub async fn download_with_options(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::super::{peer, server};
     use super::*;
     use std::{
@@ -287,7 +287,7 @@ mod tests {
         sync::{Mutex, atomic::Ordering},
     };
 
-    fn fixture_file(data: &[u8]) -> (FileLink, Vec<[u8; 16]>) {
+    pub(crate) fn fixture_file(data: &[u8]) -> (FileLink, Vec<[u8; 16]>) {
         let mut hashes: Vec<_> = data.chunks(PART_SIZE as usize).map(digest).collect();
         if (data.len() as u64).is_multiple_of(PART_SIZE) {
             hashes.push(digest(&[]));
@@ -306,7 +306,7 @@ mod tests {
             hashes,
         )
     }
-    async fn fixture(
+    pub(crate) async fn fixture(
         data: Vec<u8>,
         corrupt: bool,
         bad_hashset: bool,

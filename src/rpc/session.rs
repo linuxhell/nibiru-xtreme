@@ -44,6 +44,7 @@ const KEPT_OPTIONS: &[&str] = &[
     "ca-certificate",
     "ssh-host-key",
     "ssh-identity",
+    "x-nibiru-ed2k-source",
     "referer",
     "user-agent",
 ];
@@ -68,14 +69,21 @@ pub enum Entry {
         uri: String,
         options: Map<String, Value>,
     },
+    /// Standard `ed2k://|file|…|/` link; downloaded bytes are re-hashed on resume.
+    Ed2k {
+        gid: String,
+        link: String,
+        options: Map<String, Value>,
+    },
 }
 
 impl Entry {
     pub fn gid(&self) -> &str {
         match self {
-            Entry::Direct { gid, .. } | Entry::Torrent { gid, .. } | Entry::Magnet { gid, .. } => {
-                gid
-            }
+            Entry::Direct { gid, .. }
+            | Entry::Torrent { gid, .. }
+            | Entry::Magnet { gid, .. }
+            | Entry::Ed2k { gid, .. } => gid,
         }
     }
 }

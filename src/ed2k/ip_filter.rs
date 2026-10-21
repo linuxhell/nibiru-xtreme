@@ -109,6 +109,10 @@ impl IpFilter {
         self.ranges.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.ranges.is_empty()
+    }
+
     /// Lines that were neither comments nor a readable IPv4 range.
     pub fn skipped(&self) -> usize {
         self.skipped

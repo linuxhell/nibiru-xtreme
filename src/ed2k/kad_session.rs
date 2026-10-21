@@ -72,13 +72,12 @@ struct PendingGuard {
 }
 impl Drop for PendingGuard {
     fn drop(&mut self) {
-        if let Ok(mut pending) = self.inner.pending.lock() {
-            if pending
+        if let Ok(mut pending) = self.inner.pending.lock()
+            && pending
                 .get(&self.peer)
                 .is_some_and(|p| p.serial == self.serial)
-            {
-                pending.remove(&self.peer);
-            }
+        {
+            pending.remove(&self.peer);
         }
     }
 }
@@ -369,13 +368,12 @@ impl Inner {
         Ok(())
     }
     fn failed(&self, node: &Node) {
-        if let Ok(mut table) = self.contacts.lock() {
-            if let Some(c) = table
+        if let Ok(mut table) = self.contacts.lock()
+            && let Some(c) = table
                 .get_mut(&node.id)
                 .filter(|c| address(&c.node) == address(node))
-            {
-                c.failed = c.failed.saturating_add(1);
-            }
+        {
+            c.failed = c.failed.saturating_add(1);
         }
     }
     fn register(
@@ -406,10 +404,10 @@ impl Inner {
                 },
             );
         }
-        if let Ok(mut table) = self.contacts.lock() {
-            if let Some(c) = table.get_mut(&node.id).filter(|c| address(&c.node) == peer) {
-                c.attempted = Some(Instant::now());
-            }
+        if let Ok(mut table) = self.contacts.lock()
+            && let Some(c) = table.get_mut(&node.id).filter(|c| address(&c.node) == peer)
+        {
+            c.attempted = Some(Instant::now());
         }
         Ok(PendingGuard {
             inner: self.clone(),
@@ -481,10 +479,9 @@ impl Inner {
             if let Some(c) = table
                 .get(&node.id)
                 .filter(|c| address(&c.node) == address(node))
+                && c.is_verified()
             {
-                if c.is_verified() {
-                    return Ok(c.node.clone());
-                }
+                return Ok(c.node.clone());
             }
         }
         let reply = self
@@ -586,15 +583,13 @@ impl KadSession {
             ip_filter: std::sync::RwLock::new(Arc::new(super::ip_filter::IpFilter::default())),
         });
         // Stored contacts are candidates until a fresh HELLO and random challenge succeed.
-        if let Ok(meta) = std::fs::metadata(&inner.path) {
-            if meta.len() <= 1024 * 1024 {
-                if let Ok(bytes) = std::fs::read(&inner.path) {
-                    if let Ok(nodes) = serde_json::from_slice::<Vec<Node>>(&bytes) {
-                        for node in nodes.into_iter().take(MAX_CONTACTS) {
-                            inner.add(node);
-                        }
-                    }
-                }
+        if let Ok(meta) = std::fs::metadata(&inner.path)
+            && meta.len() <= 1024 * 1024
+            && let Ok(bytes) = std::fs::read(&inner.path)
+            && let Ok(nodes) = serde_json::from_slice::<Vec<Node>>(&bytes)
+        {
+            for node in nodes.into_iter().take(MAX_CONTACTS) {
+                inner.add(node);
             }
         }
         for node in seeds.into_iter().take(MAX_CONTACTS) {
@@ -627,17 +622,16 @@ impl KadSession {
                     }
                     Err(_) => break,
                 };
-                if length < 2
-                    || length > MAX_PAYLOAD_BYTES + 2
+                if !(2..=MAX_PAYLOAD_BYTES + 2).contains(&length)
                     || !matches!(buffer[0], 0xe4 | 0xe5)
                     || !peer.is_ipv4()
                 {
                     continue;
                 }
-                if let SocketAddr::V4(v4) = peer {
-                    if receive.blocked(*v4.ip()) {
-                        continue;
-                    }
+                if let SocketAddr::V4(v4) = peer
+                    && receive.blocked(*v4.ip())
+                {
+                    continue;
                 }
                 let opcode = buffer[1];
                 if !matches!(opcode, 0x11 | 0x19 | 0x21 | 0x29 | 0x3b | 0x60) {

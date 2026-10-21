@@ -102,6 +102,20 @@ struct ServeArgs {
     /// Tasks whose request carries credentials are never written.
     #[arg(long)]
     session_file: Option<PathBuf>,
+    /// Accept `ed2k://|file|…|/` links (sources: `x-nibiru-ed2k-source`, servers, Kad).
+    #[arg(long)]
+    ed2k: bool,
+    /// ED2K server `host:port` to ask for sources (repeatable).
+    #[arg(long = "ed2k-server")]
+    ed2k_servers: Vec<String>,
+    /// Join Kad2 for source lookup, seeded from this `nodes.dat`.
+    #[arg(long)]
+    ed2k_nodes_file: Option<PathBuf>,
+    /// Where the ED2K identity and Kad routing table are kept (default: `<dir>/.nibiru-ed2k`).
+    #[arg(long)]
+    ed2k_state_dir: Option<PathBuf>,
+    #[arg(long, default_value_t = 4662)]
+    ed2k_tcp_port: u16,
 }
 
 impl ServeArgs {
@@ -229,8 +243,12 @@ async fn main() -> Result<()> {
             let log = Arc::new(LogSink::new(args.log.as_deref())?);
             let engine = Engine::new(log.clone())?;
             let service = BtService::start(config).await?;
-            let mut server = RpcServer::new(engine, log, args.secret).with_bittorrent(service);
-            if let Some(path) = args.session_file {
+            let mut server =
+                RpcServer::new(engine, log.clone(), args.secret.clone()).with_bittorrent(service);
+            if args.ed2k {
+                server = server.with_ed2k(start_ed2k(&args, &log).await?);
+            }
+            if let Some(path) = args.session_file.clone() {
                 server = server.with_session(path).await?;
             }
             if let Some(pid) = args.stop_with_process {
@@ -340,6 +358,74 @@ async fn run_aria2_compatible_rpc(args: &[String]) -> Result<()> {
         .with_bittorrent(service)
         .serve(port)
         .await
+}
+
+/// Builds the ED2K service: a persistent random user hash, configured servers and, when a
+/// `nodes.dat` is given, a Kad2 session whose routing table survives restarts.
+async fn start_ed2k(
+    args: &ServeArgs,
+    log: &Arc<LogSink>,
+) -> Result<Arc<nibiru_xtreme::rpc::ed2k::Ed2kService>> {
+    use nibiru_xtreme::{
+        ed2k::{kad_session::KadSession, metadata},
+        rpc::ed2k::{Ed2kConfig, Ed2kService},
+    };
+    let state = args
+        .ed2k_state_dir
+        .clone()
+        .unwrap_or_else(|| args.dir.join(".nibiru-ed2k"));
+    std::fs::create_dir_all(&state)?;
+    let identity_path = state.join("user-hash");
+    let identity: [u8; 16] = match std::fs::read(&identity_path) {
+        Ok(bytes) if bytes.len() == 16 && bytes != [0; 16] => bytes.try_into().unwrap(),
+        _ => {
+            let mut hash = [0u8; 16];
+            getrandom::fill(&mut hash).map_err(|e| anyhow::anyhow!("no randomness: {e}"))?;
+            hash[5] = 14;
+            hash[14] = 111;
+            std::fs::write(&identity_path, hash)?;
+            hash
+        }
+    };
+    let mut servers = Vec::new();
+    for item in &args.ed2k_servers {
+        let (host, port) = item
+            .rsplit_once(':')
+            .ok_or_else(|| anyhow::anyhow!("--ed2k-server expects host:port"))?;
+        servers.push(metadata::Server {
+            host: host.to_owned(),
+            port: port.parse()?,
+            name: String::new(),
+            description: String::new(),
+        });
+    }
+    let kad = match &args.ed2k_nodes_file {
+        Some(file) => {
+            let seeds = metadata::parse_nodes(&std::fs::read(file)?)?;
+            let session = KadSession::start(
+                identity,
+                args.ed2k_tcp_port,
+                state.join("kad-routing.json"),
+                seeds,
+                false,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("cannot start Kad: {e}"))?;
+            log.info(
+                "ed2k.kad_started",
+                &format!("udp_port={}", session.status().udp_port),
+            );
+            Some(session)
+        }
+        None => None,
+    };
+    Ok(Ed2kService::new(Ed2kConfig {
+        default_dir: args.dir.clone(),
+        identity,
+        tcp_port: args.ed2k_tcp_port,
+        servers,
+        kad,
+    }))
 }
 
 /// Returns when the process is asked to stop (Ctrl-C everywhere, SIGTERM on Unix).

@@ -9,7 +9,7 @@ pub mod metadata;
 mod peer;
 mod server;
 mod share;
-mod transfer;
+pub(crate) mod transfer;
 mod upload;
 
 pub use file::FileLink;

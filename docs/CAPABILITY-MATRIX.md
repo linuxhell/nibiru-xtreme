@@ -65,9 +65,9 @@ Limites do ambiente que afetam a leitura:
 | Download de peer (MD4 por partes, hashset, comprimido, 32/64 bits, retomada por re-hash, sem sobrescrever) | Existe | **T** `transfer::real_peer_download_…` | **Um peer por vez**; sem coordenação de partes entre fontes |
 | Callback Low-ID por servidor | Parcial | **T** unitários | Exige solicitante High-ID e porta acessível |
 | Upload, fila, slots, limite, compartilhamento explícito, publicação | Existe | **T** `ed2k_upload` (6) | Sem créditos |
-| Créditos persistentes, identificação segura, AICH, ofuscação, source exchange, filtro de IP | **—** no Xtreme | — | O filtro de IP foi feito no **ADM** (branch do checkpoint), não aqui |
-| Kad | **Só bootstrap/probe** neste repositório (`src/ed2k/kad.rs`, 95 linhas) | **T** unitário do bootstrap | A sessão persistente (tabela de roteamento, HELLO verificado, lookup, fontes) vive hoje no **ADM** (`ed2k_ui/kad.rs`), não no motor; precisa migrar para o Xtreme |
-| ED2K/Kad via RPC | **—** (`addUri ed2k://` não existe; ED2K é biblioteca em processo no ADM) | `src/rpc.rs` | Uma biblioteca que não chega às tarefas/RPC não conclui a migração |
+| Créditos persistentes, identificação segura, AICH, ofuscação, source exchange | **—** no Xtreme | — | Filtro de IP (`ipfilter.dat`) agora existe no motor (`src/ed2k/ip_filter.rs`, **T** unitários) e é aplicado pela sessão Kad |
+| Kad | **Sessão no motor** (`src/ed2k/kad_session.rs`, portada do ADM): tabela de roteamento limitada, HELLO v5 com desafio, lookup, fontes diretas (tipos 1/4), candidatos persistidos, filtro de IP; `kad.rs` segue como probe de bootstrap | **T** 54 testes ed2k (UDP real em loopback) | Sem ofuscação, sem callbacks de firewall/buddy, sem busca por palavra-chave nem publicação; **não validada contra a rede Kad pública nem contra aMule** |
+| ED2K/Kad via RPC | **Existe**: `addUri ed2k://|file|…|/` com `serve --ed2k` (`src/rpc/ed2k.rs`); fontes = `x-nibiru-ed2k-source=ip:porta`, `--ed2k-server` e Kad (`--ed2k-nodes-file`); `tellStatus`/`pause`/`resume`/`remove`/`removeResult`/`tell*`/`getGlobalStat`, `nibiru.getKadStatus`; persistência no `--session-file` (restaura pausada, re-hash na retomada) | **T** `rpc::ed2k` (5) + `rpc_ed2k` (JSON-RPC real, reinício, 2 partes) — uploader é o próprio Nibiru | Um peer por vez; fontes Low-ID não usam callback pelo RPC; **nunca rodou contra rede ED2K/Kad real** |
 | Interoperabilidade eMule/aMule | **Não testada** | — | Nenhum teste contra cliente independente de ED2K |
 
 ## RPC e contrato nativo
@@ -85,7 +85,7 @@ Limites do ambiente que afetam a leitura:
 ## O que vem a seguir (ordem de prioridade da retomada)
 
 1. ~~Persistência real das tarefas no RPC e contadores globais reais~~ (feito nesta revisão, ver `docs/protocols.md`).
-2. Mover a sessão Kad para o motor e expor ED2K/Kad como tarefas do RPC; coordenar várias fontes por arquivo.
+2. ~~Mover a sessão Kad para o motor e expor ED2K/Kad no RPC~~ (feito; resta coordenar várias fontes/partes por arquivo e validar contra aMule/rede real).
 3. Retomada em FTP/FTPS/SFTP.
 4. Hole punching e LSD **somente** com teste de interoperabilidade.
 5. CI do Xtreme em Windows e macOS com IPv6; desempenho contra o aria2-ultra que o ADM usa.

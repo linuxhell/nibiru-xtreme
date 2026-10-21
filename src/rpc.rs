@@ -15,6 +15,7 @@ use tokio::{
 };
 
 pub mod bt;
+pub mod ed2k;
 pub mod session;
 
 use self::session::{Entry, SessionStore};
@@ -51,6 +52,7 @@ pub struct RpcServer {
     secret: String,
     tasks: Arc<RwLock<HashMap<String, Task>>>,
     bt: Option<Arc<bt::BtService>>,
+    ed2k: Option<Arc<ed2k::Ed2kService>>,
     /// `max-overall-download-limit` for HTTP/FTP tasks (BitTorrent has its own session limit).
     global_limit: Arc<RateLimiter>,
     session: Option<Arc<SessionStore>>,
@@ -69,6 +71,7 @@ impl RpcServer {
             secret,
             tasks: Arc::new(RwLock::new(HashMap::new())),
             bt: None,
+            ed2k: None,
             global_limit: Arc::new(RateLimiter::new(0)),
             session: None,
             purged: Arc::new(AtomicU64::new(0)),
@@ -83,6 +86,10 @@ impl RpcServer {
         let store = Arc::new(SessionStore::new(path));
         let (entries, skipped) = store.load()?;
         self.session = Some(store.clone());
+        if let Some(ed2k) = &self.ed2k {
+            let wake = store.clone();
+            ed2k.on_change(Arc::new(move || wake.request_flush()));
+        }
         self.skipped.store(skipped, Ordering::Release);
         for entry in entries {
             match self.restore_entry(&entry).await {
@@ -157,6 +164,9 @@ impl RpcServer {
         if let Some(bt) = &self.bt {
             entries.extend(bt.snapshot());
         }
+        if let Some(ed2k) = &self.ed2k {
+            entries.extend(ed2k.snapshot());
+        }
         entries
     }
 
@@ -187,6 +197,11 @@ impl RpcServer {
                 );
                 Ok(())
             }
+            Entry::Ed2k { .. } => self
+                .ed2k
+                .as_ref()
+                .ok_or_else(|| anyhow!("ED2K is not enabled"))?
+                .restore(entry),
             other => self.bt()?.restore(other).await,
         }
     }
@@ -194,6 +209,12 @@ impl RpcServer {
     /// Enables BitTorrent and Magnet downloads through this server.
     pub fn with_bittorrent(mut self, service: Arc<bt::BtService>) -> Self {
         self.bt = Some(service);
+        self
+    }
+
+    /// Enables `ed2k://` file links (and Kad/server source discovery) through this server.
+    pub fn with_ed2k(mut self, service: Arc<ed2k::Ed2kService>) -> Self {
+        self.ed2k = Some(service);
         self
     }
 
@@ -342,6 +363,7 @@ impl RpcServer {
     async fn dispatch_inner(&self, method: &str, params: Vec<Value>) -> Result<Value> {
         let gid = params.first().and_then(Value::as_str).unwrap_or_default();
         let bt_gid = self.bt.as_ref().filter(|bt| bt.owns(gid));
+        let ed2k_gid = self.ed2k.as_ref().filter(|e| e.owns(gid));
         let options_at = |index: usize| params.get(index).and_then(Value::as_object);
         match method {
             "aria2.getVersion" | "nibiru.getVersion" => {
@@ -357,6 +379,9 @@ impl RpcServer {
                         "DHT-IPv6",
                         "PEX",
                     ]);
+                }
+                if self.ed2k.is_some() {
+                    features.extend(["ED2K", "Kad2-sources"]);
                 }
                 if cfg!(feature = "ftp") {
                     features.extend(["FTP", "FTPS"]);
@@ -385,6 +410,11 @@ impl RpcServer {
                             .await?,
                     ));
                 }
+                if let (Some(uri), Some(ed2k)) = (uri, self.ed2k.as_ref())
+                    && ed2k::is_ed2k(uri)
+                {
+                    return Ok(Value::String(ed2k.add(uri, options_at(1))?));
+                }
                 self.add_uri(params).await
             }
             "aria2.addTorrent" | "nibiru.addTorrent" => {
@@ -407,11 +437,25 @@ impl RpcServer {
                         });
                     return bt.tell_status(gid, keys.as_deref());
                 }
+                if let Some(ed2k) = ed2k_gid {
+                    let keys: Option<Vec<String>> =
+                        params.get(1).and_then(Value::as_array).map(|keys| {
+                            keys.iter()
+                                .filter_map(Value::as_str)
+                                .map(str::to_owned)
+                                .collect()
+                        });
+                    return ed2k.tell_status(gid, keys.as_deref());
+                }
                 self.tell_status(params).await
             }
             "aria2.pause" | "aria2.forcePause" | "nibiru.pause" => {
                 if let Some(bt) = bt_gid {
                     bt.pause(gid)?;
+                    return Ok(Value::String(gid.to_owned()));
+                }
+                if let Some(ed2k) = ed2k_gid {
+                    ed2k.pause(gid)?;
                     return Ok(Value::String(gid.to_owned()));
                 }
                 self.pause(params).await
@@ -421,6 +465,10 @@ impl RpcServer {
                     bt.resume(gid)?;
                     return Ok(Value::String(gid.to_owned()));
                 }
+                if let Some(ed2k) = ed2k_gid {
+                    ed2k.resume(gid)?;
+                    return Ok(Value::String(gid.to_owned()));
+                }
                 self.resume(params).await
             }
             "aria2.remove" | "aria2.forceRemove" | "nibiru.remove" => {
@@ -428,11 +476,18 @@ impl RpcServer {
                     bt.remove(gid)?;
                     return Ok(Value::String(gid.to_owned()));
                 }
+                if let Some(ed2k) = ed2k_gid {
+                    ed2k.remove(gid)?;
+                    return Ok(Value::String(gid.to_owned()));
+                }
                 self.remove(params).await
             }
             "aria2.removeDownloadResult" | "nibiru.removeResult" => {
                 if let Some(bt) = bt_gid {
                     bt.remove_result(gid)?;
+                    self.purged.fetch_add(1, Ordering::AcqRel);
+                } else if let Some(ed2k) = ed2k_gid {
+                    ed2k.remove_result(gid)?;
                     self.purged.fetch_add(1, Ordering::AcqRel);
                 } else {
                     let mut tasks = self.tasks.write().await;
@@ -492,6 +547,10 @@ impl RpcServer {
             },
             "aria2.getGlobalStat" | "nibiru.getGlobalStat" => {
                 let (active, down, up) = self.bt.as_ref().map(|bt| bt.totals()).unwrap_or_default();
+                let (ed2k_active, ed2k_speed) =
+                    self.ed2k.as_ref().map(|e| e.totals()).unwrap_or_default();
+                let (ed2k_waiting, ed2k_stopped) =
+                    self.ed2k.as_ref().map(|e| e.counts()).unwrap_or_default();
                 let http_active = self
                     .tasks
                     .read()
@@ -519,7 +578,10 @@ impl RpcServer {
                             .count(),
                     )
                 };
-                let stopped = bt_stopped + http_stopped;
+                let stopped = bt_stopped + http_stopped + ed2k_stopped;
+                let bt_waiting = bt_waiting + ed2k_waiting;
+                let down = down + ed2k_speed;
+                let active = active + ed2k_active;
                 Ok(json!({
                     "downloadSpeed": (down + http_speed).to_string(),
                     "uploadSpeed": up.to_string(),
@@ -533,6 +595,12 @@ impl RpcServer {
             "aria2.tellWaiting" | "nibiru.tellWaiting" => self.list_tasks("waiting", params).await,
             "aria2.tellStopped" | "nibiru.tellStopped" => self.list_tasks("stopped", params).await,
             // Not part of aria2: whether tasks survive a restart and what was restored.
+            // Not part of aria2: state of the engine's own Kad session (absent when ED2K is off).
+            "nibiru.getKadStatus" => self
+                .ed2k
+                .as_ref()
+                .and_then(|e| e.kad_status())
+                .ok_or_else(|| anyhow!("Kad is not enabled")),
             "nibiru.getSessionInfo" => Ok(json!({
                 "persistent": self.session.is_some(),
                 "restored": self.restored.load(Ordering::Acquire),
@@ -571,6 +639,16 @@ impl RpcServer {
         if let Some(bt) = &self.bt {
             for gid in bt.list_ids() {
                 if let (Some(created), Ok(status)) = (bt.created(&gid), bt.tell_status(&gid, None))
+                    && matches(status["status"].as_str().unwrap_or(""))
+                {
+                    rows.push((created, status));
+                }
+            }
+        }
+        if let Some(ed2k) = &self.ed2k {
+            for gid in ed2k.list_ids() {
+                if let (Some(created), Ok(status)) =
+                    (ed2k.created(&gid), ed2k.tell_status(&gid, None))
                     && matches(status["status"].as_str().unwrap_or(""))
                 {
                     rows.push((created, status));
