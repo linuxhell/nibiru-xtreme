@@ -217,8 +217,6 @@ pub struct CryptStream<S> {
     inner: S,
     send: Rc4,
     receive: Rc4,
-    /// Encrypted bytes accepted from the caller that the socket has not taken yet.
-    pending: Vec<u8>,
 }
 impl<S> CryptStream<S> {
     fn new(inner: S, send: Rc4, receive: Rc4) -> Self {
@@ -226,7 +224,6 @@ impl<S> CryptStream<S> {
             inner,
             send,
             receive,
-            pending: Vec::new(),
         }
     }
     pub fn get_ref(&self) -> &S {
@@ -257,28 +254,24 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for CryptStream<S> {
         data: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = &mut *self;
-        // Keystream bytes are spent once, so encrypted output is kept until the socket takes it.
-        if this.pending.is_empty() {
-            let mut sealed = data.to_vec();
-            this.send.apply(&mut sealed);
-            this.pending = sealed;
-        } else if this.pending.len() < data.len() {
-            // A retry with more data than before: the original prefix is still queued.
-            let mut extra = data[this.pending.len()..].to_vec();
-            this.send.apply(&mut extra);
-            this.pending.extend(extra);
-        }
-        while !this.pending.is_empty() {
-            match Pin::new(&mut this.inner).poll_write(cx, &this.pending) {
-                Poll::Ready(Ok(0)) => return Poll::Ready(Err(io::ErrorKind::WriteZero.into())),
-                Poll::Ready(Ok(n)) => {
-                    this.pending.drain(..n);
-                }
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Pending => return Poll::Pending,
+        // Encrypt speculatively with a clone. The real RC4 state advances only for bytes
+        // that the underlying writer actually accepts, preserving AsyncWrite retry semantics.
+        let mut speculative = this.send.clone();
+        let mut sealed = data.to_vec();
+        speculative.apply(&mut sealed);
+        match Pin::new(&mut this.inner).poll_write(cx, &sealed) {
+            Poll::Ready(Ok(0)) if !data.is_empty() => {
+                Poll::Ready(Err(io::ErrorKind::WriteZero.into()))
             }
+            Poll::Ready(Ok(n)) => {
+                debug_assert!(n <= data.len());
+                let mut accepted = data[..n].to_vec();
+                this.send.apply(&mut accepted);
+                Poll::Ready(Ok(n))
+            }
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Pending => Poll::Pending,
         }
-        Poll::Ready(Ok(data.len()))
     }
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.inner).poll_flush(cx)
@@ -406,6 +399,37 @@ mod tests {
     const PINNED_INITIATOR_KEYSTREAM: [u8; 16] = [
         162, 194, 68, 222, 109, 146, 205, 25, 35, 122, 23, 213, 235, 87, 150, 55,
     ];
+
+    #[tokio::test]
+    async fn partial_socket_writes_preserve_every_encrypted_byte_under_backpressure() {
+        let hash = [0x42; 16];
+        let random = [1, 2, 3, 4];
+        let (send, receive) = ciphers(&hash, random, true);
+        let (_, mut decrypt) = ciphers(&hash, random, false);
+        let data: Vec<u8> = (0..8192).map(|index| (index % 251) as u8).collect();
+        let expected = data.clone();
+        // Forces Ready(partial) followed by Pending during repeated logical writes.
+        let (socket, mut remote) = tokio::io::duplex(17);
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let writer = async move {
+                let mut stream = CryptStream::new(socket, send, receive);
+                stream.write_all(&data).await.unwrap();
+                stream.shutdown().await.unwrap();
+            };
+            let reader = async {
+                let mut wire = Vec::new();
+                remote.read_to_end(&mut wire).await.unwrap();
+                wire
+            };
+            let (_, wire) = tokio::join!(writer, reader);
+            wire
+        })
+        .await
+        .expect("encrypted write stalled under backpressure");
+        let mut plaintext = outcome;
+        decrypt.apply(&mut plaintext);
+        assert_eq!(plaintext, expected);
+    }
 
     #[tokio::test]
     async fn the_handshake_encrypts_both_directions() {
