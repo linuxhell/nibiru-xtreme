@@ -1206,28 +1206,35 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let session = unseeded_session(root.path().join("routing.json")).await;
         let local = session.inner.socket.local_addr().unwrap();
-        let blocked = UdpSocket::bind("127.0.0.2:0").await.unwrap();
+        // macOS only routes 127.0.0.1 by default; without the 127.0.0.2 alias the on-the-wire half
+        // cannot run there (the contact-table half below does not need it).
+        let blocked = UdpSocket::bind("127.0.0.2:0").await.ok();
+        if blocked.is_none() {
+            eprintln!("skipped: this host has no 127.0.0.2 loopback address");
+        }
         let allowed = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         session.set_ip_filter(Arc::new(IpFilter::parse(
             "127.0.0.2 - 127.0.0.2 , 1 , test block\n",
             DEFAULT_LEVEL,
         )));
 
-        // The blocked peer gets no HELLO answer and no PONG either.
-        blocked
-            .send_to(&fixture_hello(0x11, [3; 16], 5), local)
-            .await
-            .unwrap();
-        blocked.send_to(&[0xe4, 0x60], local).await.unwrap();
-        // The allowed peer is served, which also proves the blocked packets were processed first.
-        packet_barrier(&allowed, local).await;
-        let mut buffer = [0; 2048];
-        assert!(
-            tokio::time::timeout(Duration::from_millis(200), blocked.recv_from(&mut buffer))
+        if let Some(blocked) = &blocked {
+            // The blocked peer gets no HELLO answer and no PONG either.
+            blocked
+                .send_to(&fixture_hello(0x11, [3; 16], 5), local)
                 .await
-                .is_err(),
-            "a blocked address must not receive any reply"
-        );
+                .unwrap();
+            blocked.send_to(&[0xe4, 0x60], local).await.unwrap();
+            // The allowed peer is served, which also proves the blocked packets were processed first.
+            packet_barrier(&allowed, local).await;
+            let mut buffer = [0; 2048];
+            assert!(
+                tokio::time::timeout(Duration::from_millis(200), blocked.recv_from(&mut buffer))
+                    .await
+                    .is_err(),
+                "a blocked address must not receive any reply"
+            );
+        }
 
         // Blocked addresses are refused as contacts, and a newly loaded filter evicts them.
         let mut node = node(4663);
@@ -1741,7 +1748,15 @@ mod tests {
         let mut oversized = vec![0; 40000];
         oversized[0] = 0xe4;
         oversized[1] = 0x11;
-        fixture.send_to(&oversized, to).await.unwrap();
+        // macOS refuses datagrams above net.inet.udp.maxdgram (9216) on the sender side.
+        if let Err(error) = fixture.send_to(&oversized, to).await {
+            eprintln!(
+                "skipped: this host cannot send a {}-byte datagram: {error}",
+                oversized.len()
+            );
+            session.stop();
+            return;
+        }
         packet_barrier(&fixture, to).await;
         assert!(session.status().running);
         assert_eq!(session.status().contacts, 0);
