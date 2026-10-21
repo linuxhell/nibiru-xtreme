@@ -22,8 +22,8 @@ complete multiprotocol release.
 New direct protocols use bounded streaming buffers, observe cancellation during
 network stalls, verify known lengths and FTP completion replies, sync the output,
 and publish without overwriting another destination. Failed/truncated transfers
-must not create a completed file. These new paths currently restart instead of
-resuming; HTTP retains its existing resume behaviour.
+must not create a completed file. FTP/FTPS/SFTP retain validated partials for resume; see the dedicated resume
+section below. HTTP retains its separate identity-checked resume path.
 
 Examples:
 
@@ -65,8 +65,8 @@ client: v1/v2/hybrid download through metadata exchange and upload, TCP with MSE
 uTP plaintext and uTP with MSE (18 scenarios). Payloads are compared byte for
 byte; v2 uses over 128 pieces to exercise multiple hash requests. Rust tests
 exercise IPv6 transport/DHT and corrupted Merkle proofs. These loopback tests do
-not prove public tracker availability or NAT traversal. Hole punching and local
-service discovery remain unimplemented.
+not prove public tracker availability or NAT traversal. BEP 55 hole punching and BEP 14 local service discovery are implemented; their
+loopback evidence and remaining limits are described below.
 
 ## RPC task persistence
 
@@ -157,11 +157,13 @@ regular file with the same size.
   modified ones.
 
 Verified with real-socket tests, including Nibiru downloading a two-part file
-from a Nibiru listener. Not interoperability-tested against eMule/aMule yet.
+from a Nibiru listener. The later independent aMule download and Kad tests are recorded in the capability
+matrix; this does not prove every upload/queue feature against an independent client.
 
-Kad bootstrap is **not** persistent Kad routing. Credits, AICH, peer
-obfuscation, secure identification, source exchange, Kad lookup/publishing and
-messaging are not implemented; the hello deliberately does not advertise them.
+The legacy `kad.rs` bootstrap probe is separate from the persistent Kad2 session
+in `kad_session.rs` (source lookup, verification, IP filtering and UDP obfuscation).
+Peer obfuscation is implemented. Credits, AICH, secure identification, source
+exchange, Kad keyword search/publication and messaging remain incomplete.
 The alpha must not be advertised as complete.
 
 ## Reference research
@@ -197,9 +199,9 @@ blocks, an out-of-order raw response, a resumed multipart file, an independently
 verified MD4 test vector, exact ED2K part-boundary hashing, corrupted data and
 hashsets, cancellation during a stalled handshake, 64-bit offsets beyond 4 GiB,
 and a destination-created-during-finalization race. These fixtures do not prove
-interoperability with every public client or server. Transfers currently use
-one peer and one bounded block request at a time, rotate across up to 16 supplied
-direct sources and retain verified partial data on incomplete attempts.
+interoperability with every public client or server. Transfers use up to four sources concurrently, with an entire part reserved to
+one source. They retain verified partial data on incomplete attempts; dividing
+a single part among multiple peers remains unimplemented.
 
 Incoming TCP tests exercise the advertised identity and no-file responses. A real
 TCP server/callback fixture requests a Low-ID source through OP_CALLBACKREQUEST,
