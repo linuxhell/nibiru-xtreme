@@ -306,9 +306,11 @@ impl Session {
             if last.get(&key).is_none_or(|at| at.elapsed() >= interval) {
                 last.insert(key, std::time::Instant::now());
                 due.push(handle.shared.wire_hashes());
+                if due.len() == 10 {
+                    break;
+                }
             }
         }
-        due.truncate(10);
         due
     }
 
@@ -444,5 +446,52 @@ impl Session {
         for handle in handles {
             handle.shutdown(false);
         }
+    }
+}
+
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+    use crate::bittorrent::metainfo::build_info;
+
+    #[tokio::test]
+    async fn lsd_budget_defers_excess_torrents_without_marking_them_announced() {
+        let session = Session::start(SessionConfig {
+            bind: "127.0.0.1".parse().unwrap(),
+            enable_utp: false,
+            ..SessionConfig::default()
+        })
+        .await
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        for index in 0..11 {
+            let name = format!("sample-{index}");
+            let info = build_info(&name, 16384, &[(&[name.as_str()], &[1u8])]);
+            let torrent = Torrent::from_info(&info, Extras::default()).unwrap();
+            std::fs::write(dir.path().join(&name), [1u8]).unwrap();
+            let mut settings = Settings::new(dir.path());
+            settings.seed_ratio = None;
+            session
+                .add_torrent(torrent, settings)
+                .wait_complete(Duration::from_secs(3))
+                .await
+                .unwrap();
+        }
+        let mut last = HashMap::new();
+        let first = session.lsd_due(&mut last, Duration::from_secs(300));
+        assert_eq!(first.len(), 10);
+        assert_eq!(last.len(), 10, "unsent announcements must stay pending");
+        let second = session.lsd_due(&mut last, Duration::from_secs(300));
+        assert_eq!(second.len(), 1);
+        let mut hashes: Vec<_> = first.into_iter().chain(second).flatten().collect();
+        hashes.sort();
+        hashes.dedup();
+        assert_eq!(hashes.len(), 11);
+        assert!(
+            session
+                .lsd_due(&mut last, Duration::from_secs(300))
+                .is_empty()
+        );
+        session.shutdown();
     }
 }

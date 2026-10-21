@@ -199,6 +199,9 @@ fn parse_range(header: &str, length: u64) -> Result<Option<(u64, u64)>, ()> {
     if spec.contains(',') {
         return Ok(None); // multi-range requests are answered with the whole file
     }
+    if length == 0 {
+        return Err(());
+    }
     let (from, to) = spec.split_once('-').ok_or(())?;
     let (start, end) = match (from.trim(), to.trim()) {
         ("", suffix) => {
@@ -308,7 +311,7 @@ pub async fn serve<W: AsyncWrite + Unpin>(
     }
     let mut position = start;
     while position <= end {
-        let want = ((end - position + 1) as usize).min(CHUNK);
+        let want = (end - position + 1).min(CHUNK as u64) as usize;
         let data = handle
             .read_file(file, position, want, CHUNK_PATIENCE)
             .await?;
@@ -340,6 +343,8 @@ mod tests {
         assert_eq!(parse_range("bytes=0-1,5-6", 1000), Ok(None));
         assert_eq!(parse_range("items=0-1", 1000), Ok(None));
         assert_eq!(parse_range("bytes=0-", 0), Err(()));
+        assert_eq!(parse_range("bytes=-1", 0), Err(()));
+        assert_eq!(parse_range("bytes=-5000", 0), Err(()));
     }
 
     #[test]

@@ -706,41 +706,6 @@ fn dht_checkpoint_path(file: &Path) -> PathBuf {
     PathBuf::from(path)
 }
 
-#[cfg(test)]
-mod audit_tests {
-    use super::*;
-
-    #[test]
-    fn ipv4_and_ipv6_dht_checkpoints_never_share_a_temporary_path() {
-        let ipv4 = Path::new("state/dht.dat");
-        let ipv6 = ipv4.with_extension("ipv6");
-        assert_ne!(dht_checkpoint_path(ipv4), dht_checkpoint_path(&ipv6));
-        assert_ne!(dht_checkpoint_path(ipv4), ipv4);
-    }
-
-    #[tokio::test]
-    async fn invalid_rpc_seeding_options_return_an_error_instead_of_panicking() {
-        let service = BtService::start(BtConfig {
-            dht: false,
-            dht6: false,
-            ..BtConfig::default()
-        })
-        .await
-        .unwrap();
-        let uri = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567";
-        for options in [
-            json!({"seed-time":"inf"}),
-            json!({"seed-time":"NaN"}),
-            json!({"seed-time":"1e300"}),
-            json!({"seed-ratio":"NaN"}),
-        ] {
-            assert!(service.add_magnet(uri, options.as_object()).await.is_err());
-        }
-        assert!(service.list_ids().is_empty());
-        service.shutdown();
-    }
-}
-
 fn aria_status(status: &TorrentStatus, task: &BtTask, saved: Option<&Path>) -> &'static str {
     if task.removed {
         return "removed";
@@ -843,4 +808,39 @@ fn status_json(gid: &str, task: &BtTask, saved: Option<&Path>) -> Value {
         map.insert("metadataFile".into(), json!(path.to_string_lossy()));
     }
     value
+}
+
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+
+    #[test]
+    fn ipv4_and_ipv6_dht_checkpoints_never_share_a_temporary_path() {
+        let ipv4 = Path::new("state/dht.dat");
+        let ipv6 = ipv4.with_extension("ipv6");
+        assert_ne!(dht_checkpoint_path(ipv4), dht_checkpoint_path(&ipv6));
+        assert_ne!(dht_checkpoint_path(ipv4), ipv4);
+    }
+
+    #[tokio::test]
+    async fn invalid_rpc_seeding_options_return_an_error_instead_of_panicking() {
+        let service = BtService::start(BtConfig {
+            dht: false,
+            dht6: false,
+            ..BtConfig::default()
+        })
+        .await
+        .unwrap();
+        let uri = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567";
+        for options in [
+            json!({"seed-time":"inf"}),
+            json!({"seed-time":"NaN"}),
+            json!({"seed-time":"1e300"}),
+            json!({"seed-ratio":"NaN"}),
+        ] {
+            assert!(service.add_magnet(uri, options.as_object()).await.is_err());
+        }
+        assert!(service.list_ids().is_empty());
+        service.shutdown();
+    }
 }
