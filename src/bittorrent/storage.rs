@@ -9,7 +9,10 @@ use std::{
     fs::{File, OpenOptions},
     io,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 /// Open file handles kept at once; torrents can have thousands of files.
@@ -90,6 +93,8 @@ pub struct Storage {
     v2_mode: bool,
     v2_hashes: Mutex<Vec<Option<[u8; 32]>>>,
     open: Mutex<HashMap<(usize, bool), std::sync::Arc<File>>>,
+    mutation: Mutex<()>,
+    deleted: AtomicBool,
 }
 
 impl Storage {
@@ -128,6 +133,8 @@ impl Storage {
                     .unwrap_or_default(),
             ),
             open: Mutex::new(HashMap::new()),
+            mutation: Mutex::new(()),
+            deleted: AtomicBool::new(false),
         }
     }
 
@@ -258,6 +265,13 @@ impl Storage {
             .is_none_or(|end| end > self.total)
         {
             bail!("write beyond the end of the torrent");
+        }
+        let _mutation = self
+            .mutation
+            .lock()
+            .map_err(|_| anyhow::anyhow!("storage mutation lock poisoned"))?;
+        if self.deleted.load(Ordering::Acquire) {
+            bail!("torrent storage has been deleted");
         }
         let mut consumed = 0usize;
         let mut cursor = offset;
@@ -528,6 +542,11 @@ impl Storage {
 
     /// Removes every file of the torrent (and emptied directories up to the download root).
     pub fn delete_files(&self) {
+        // Make deletion terminal before waiting for any in-flight writer.
+        self.deleted.store(true, Ordering::Release);
+        let Ok(_mutation) = self.mutation.lock() else {
+            return;
+        };
         if let Ok(mut open) = self.open.lock() {
             open.clear();
         }
@@ -774,6 +793,24 @@ mod tests {
         s.delete_files();
         assert!(!dir.path().join("pack").exists());
         assert!(dir.path().exists());
+    }
+
+    #[test]
+    fn deletion_is_terminal_and_late_piece_writes_cannot_recreate_files() {
+        let (torrent, parts) = fixture();
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(&torrent, dir.path());
+        let bytes = whole(&parts);
+        storage.write(0, &bytes).unwrap();
+        assert!(dir.path().join("pack/a.bin").exists());
+
+        storage.delete_files();
+        assert!(!dir.path().join("pack").exists());
+        assert!(storage.write(0, &bytes).is_err());
+        assert!(
+            !dir.path().join("pack").exists(),
+            "a late write after delete must not recreate torrent files"
+        );
     }
 
     #[cfg(unix)]
