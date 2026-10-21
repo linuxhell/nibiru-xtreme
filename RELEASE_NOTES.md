@@ -68,8 +68,10 @@ waiting for the tracker's next announce interval.
 
 ## Not implemented yet
 
-- Local Service Discovery, hole punching and Metalink.
-- Kad persistent sessions, ED2K credits/secure identification/obfuscation.
+- Metalink.
+- Full Kad keyword search and publishing.
+- ED2K credits and secure identification.
+- ED2K client-to-server obfuscation.
 
 
 ## Files
