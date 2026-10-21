@@ -539,6 +539,20 @@ impl BtService {
 
     pub fn change_option(&self, gid: &str, options: &Map<String, Value>) -> Result<()> {
         self.with_task(gid, |task| -> Result<()> {
+            // Validate fallible changes before mutating either the live task or its
+            // persisted options, so an invalid request is atomic.
+            let selected = if let Some(select) = text(Some(options), "select-file") {
+                let count = task
+                    .handle
+                    .status()
+                    .files
+                    .len()
+                    .max(task.handle.torrent().map(|t| t.files.len()).unwrap_or(0));
+                Some(parse_select_file(select, count)?)
+            } else {
+                None
+            };
+
             if let Ok(mut saved) = task.persist.lock()
                 && let Some(saved) = saved.as_mut()
             {
@@ -555,15 +569,8 @@ impl BtService {
             }
             let options = Some(options);
             self.apply_limits(&task.handle, options);
-            if let Some(select) = text(options, "select-file") {
-                let count = task
-                    .handle
-                    .status()
-                    .files
-                    .len()
-                    .max(task.handle.torrent().map(|t| t.files.len()).unwrap_or(0));
-                task.handle
-                    .select_files(Some(parse_select_file(select, count)?));
+            if let Some(selected) = selected {
+                task.handle.select_files(Some(selected));
             }
             if let Some(on) = flag(options, "x-nibiru-sequential") {
                 task.handle.set_sequential(on);
@@ -820,6 +827,39 @@ mod audit_tests {
         let ipv6 = ipv4.with_extension("ipv6");
         assert_ne!(dht_checkpoint_path(ipv4), dht_checkpoint_path(&ipv6));
         assert_ne!(dht_checkpoint_path(ipv4), ipv4);
+    }
+
+    #[tokio::test]
+    async fn invalid_select_file_does_not_partially_persist_other_changes() {
+        let service = BtService::start(BtConfig {
+            dht: false,
+            dht6: false,
+            ..BtConfig::default()
+        })
+        .await
+        .unwrap();
+        let uri = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567";
+        let gid = service.add_magnet(uri, None).await.unwrap();
+
+        let before = {
+            let tasks = service.tasks.lock().unwrap();
+            tasks[&gid].persist.lock().unwrap().clone()
+        };
+        let options = json!({
+            "max-download-limit": "123",
+            "select-file": "1"
+        });
+        assert!(
+            service
+                .change_option(&gid, options.as_object().unwrap())
+                .is_err()
+        );
+        let after = {
+            let tasks = service.tasks.lock().unwrap();
+            tasks[&gid].persist.lock().unwrap().clone()
+        };
+        assert_eq!(after, before);
+        service.shutdown();
     }
 
     #[tokio::test]
