@@ -1106,6 +1106,8 @@ impl Drop for KadSession {
     }
 }
 
+/// A tag's name, its numeric value and, for string tags, the bytes of the text.
+type TagWithText<'a> = (u8, Option<u64>, Option<&'a [u8]>);
 struct Reader<'a>(&'a [u8]);
 impl<'a> Reader<'a> {
     fn take(&mut self, n: usize) -> Result<&'a [u8], String> {
@@ -1129,7 +1131,7 @@ impl<'a> Reader<'a> {
         self.tag_text().map(|(name, value, _)| (name, value))
     }
     /// Like `tag`, also returning the bytes of a string tag.
-    fn tag_text(&mut self) -> Result<(u8, Option<u64>, Option<&'a [u8]>), String> {
+    fn tag_text(&mut self) -> Result<TagWithText<'a>, String> {
         let mut text = None;
         let raw = self.byte()?;
         let kind = raw & 0x7f;
@@ -1355,10 +1357,7 @@ mod tests {
             assert_eq!(buddy.id[..4], [0x00, 0x11, 0x22, 0x33]);
         }
         // A private buddy address, a malformed hash or a direct type with a buddy tag are not callbacks.
-        let private = buddy_sources_packet(peer, target, 3, hash)
-            .iter()
-            .copied()
-            .collect::<Vec<_>>();
+        let private = buddy_sources_packet(peer, target, 3, hash);
         assert_eq!(
             source_response(&private, peer, target, true).unwrap().len(),
             1
