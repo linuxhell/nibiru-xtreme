@@ -272,7 +272,15 @@ impl Session {
 
     fn register(&self, handle: TorrentHandle) -> TorrentHandle {
         let mut torrents = self.torrents.lock().unwrap_or_else(|e| e.into_inner());
-        torrents.entry(handle.info_hash()).or_insert(handle).clone()
+        if let Some(existing) = torrents.get(&handle.info_hash()).cloned() {
+            // A concurrent add may have spawned the same torrent after the caller's
+            // initial existing() check. Stop the losing instance so its background
+            // loops cannot continue orphaned after its handle is dropped.
+            handle.shutdown(false);
+            return existing;
+        }
+        torrents.insert(handle.info_hash(), handle.clone());
+        handle
     }
 
     /// A neighbour announced `info_hash` over LSD; ignored for private or unknown torrents.
@@ -453,6 +461,39 @@ impl Session {
 mod audit_tests {
     use super::*;
     use crate::bittorrent::metainfo::build_info;
+
+    #[tokio::test]
+    async fn duplicate_registration_stops_the_losing_spawned_instance() {
+        let session = Session::start(SessionConfig {
+            bind: "127.0.0.1".parse().unwrap(),
+            enable_utp: false,
+            ..SessionConfig::default()
+        })
+        .await
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let hash = [7u8; 20];
+
+        let make_start = || Start {
+            torrent: None,
+            info_hash: hash,
+            v2_info_hash: None,
+            name: Some("duplicate".to_owned()),
+            extras: Extras::default(),
+        };
+        let first = session.spawn(make_start(), Settings::new(dir.path()));
+        let winner = session.register(first);
+        let losing = session.spawn(make_start(), Settings::new(dir.path()));
+        let losing_probe = losing.clone();
+        let returned = session.register(losing);
+
+        assert!(Arc::ptr_eq(&winner.shared, &returned.shared));
+        assert!(
+            losing_probe.is_stopped(),
+            "the duplicate spawned instance must be shut down"
+        );
+        session.shutdown();
+    }
 
     #[tokio::test]
     async fn lsd_budget_defers_excess_torrents_without_marking_them_announced() {
