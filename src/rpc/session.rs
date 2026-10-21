@@ -250,11 +250,13 @@ impl SessionStore {
             bytes.len() as u64 <= MAX_FILE_BYTES,
             "session exceeds supported size limit"
         );
-        {
-            let last = self.last.lock().unwrap_or_else(|e| e.into_inner());
-            if last.as_deref() == Some(bytes.as_slice()) {
-                return Ok(false);
-            }
+        // Keep comparison, replacement and cache update in one critical section.
+        // Otherwise two concurrent flushes can both pass the comparison and the
+        // older snapshot may persist after the newer one, leaving disk and `last`
+        // out of sync.
+        let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
+        if last.as_deref() == Some(bytes.as_slice()) {
+            return Ok(false);
         }
         let parent = self
             .path
@@ -275,7 +277,7 @@ impl SessionStore {
         temporary
             .persist(&self.path)
             .map_err(|error| anyhow::anyhow!(error.error))?;
-        *self.last.lock().unwrap_or_else(|e| e.into_inner()) = Some(bytes);
+        *last = Some(bytes);
         Ok(true)
     }
 }
@@ -386,6 +388,38 @@ mod tests {
             1,
             "no temporary file is left"
         );
+    }
+
+    #[test]
+    fn concurrent_saves_keep_disk_and_cached_snapshot_consistent() {
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        let store = Arc::new(SessionStore::new(path.clone()));
+        let a = Arc::clone(&store);
+        let b = Arc::clone(&store);
+        let left = std::thread::spawn(move || {
+            for index in 0..64 {
+                let gid = format!("a{index:x}");
+                a.save(&[direct(&gid)]).unwrap();
+            }
+        });
+        let right = std::thread::spawn(move || {
+            for index in 0..64 {
+                let gid = format!("b{index:x}");
+                b.save(&[direct(&gid)]).unwrap();
+            }
+        });
+        left.join().unwrap();
+        right.join().unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        let parsed: SessionFile = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed.tasks.len(), 1);
+        // Saving exactly what is on disk must be recognized as unchanged. This also
+        // proves the in-memory cache corresponds to the winning atomic replacement.
+        assert!(!store.save(&parsed.tasks).unwrap());
     }
 
     #[test]
