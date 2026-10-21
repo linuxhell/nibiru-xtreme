@@ -1252,9 +1252,9 @@ mod tests {
         MAX_HTTP_RANGE_SIZE, RANGE_CHUNK_SIZE, claim_range, safe_output_name,
         suggested_worker_count, url_identity, validate_content_range,
     };
-    use url::Url;
     use reqwest::header::HeaderValue;
     use std::sync::{Arc, atomic::AtomicU64};
+    use url::Url;
 
     #[test]
     fn http_resume_identity_never_stores_url_secrets_in_cleartext() {
