@@ -25,26 +25,21 @@ respective licenses; this file records the transport dependencies added here.
 
 ## Direct dependencies
 
-Inventory from this branch’s `Cargo.lock` and downloaded crate manifests.
-Optional transports retain their feature gates. This is a direct-dependency
-inventory; transitive dependencies retain their own notices and licenses.
+Inventory of crates declared directly in `Cargo.toml`, with the locked version used by this branch.
+Optional transports retain their feature gates. Transitive dependencies retain their own notices and licenses.
 
 | Crate | Locked version | License expression |
 | --- | --- | --- |
 | `anyhow` | 1.0.104 | MIT OR Apache-2.0 |
 | `base64` | 0.22.1 | MIT OR Apache-2.0 |
-| `base64` | 0.23.1 | MIT OR Apache-2.0 |
 | `clap` | 4.6.7 | MIT OR Apache-2.0 |
 | `flate2` | 1.1.10 | MIT OR Apache-2.0 |
 | `futures-util` | 0.3.34 | MIT OR Apache-2.0 |
-| `getrandom` | 0.2.17 | MIT OR Apache-2.0 |
-| `getrandom` | 0.3.4 | MIT OR Apache-2.0 |
 | `getrandom` | 0.4.3 | MIT OR Apache-2.0 |
 | `librqbit-dualstack-sockets` | 0.7.0 | Apache-2.0 |
 | `librqbit-utp` | 0.7.0 | Apache-2.0 |
 | `md4` | 0.10.2 | MIT OR Apache-2.0 |
 | `md5` | 0.8.1 | Apache-2.0 OR MIT |
-| `num-bigint` | 0.4.8 | MIT OR Apache-2.0 |
 | `num-bigint` | 0.5.1 | MIT OR Apache-2.0 |
 | `percent-encoding` | 2.3.2 | MIT OR Apache-2.0 |
 | `reqwest` | 0.12.28 | MIT OR Apache-2.0 |
@@ -54,9 +49,7 @@ inventory; transitive dependencies retain their own notices and licenses.
 | `serde` | 1.0.229 | MIT OR Apache-2.0 |
 | `serde_json` | 1.0.154 | MIT OR Apache-2.0 |
 | `sha1` | 0.10.7 | MIT OR Apache-2.0 |
-| `sha1` | 0.11.0 | MIT OR Apache-2.0 |
 | `sha2` | 0.10.9 | MIT OR Apache-2.0 |
-| `sha2` | 0.11.1 | MIT OR Apache-2.0 |
 | `socket2` | 0.6.5 | MIT OR Apache-2.0 |
 | `suppaftp` | 12.2.1 | MIT OR Apache-2.0 |
 | `tempfile` | 3.27.0 | MIT OR Apache-2.0 |
