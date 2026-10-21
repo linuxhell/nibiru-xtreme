@@ -8,6 +8,7 @@ use std::{
 
 pub struct LogSink {
     file: Option<Mutex<File>>,
+    echo: bool,
 }
 
 impl LogSink {
@@ -23,7 +24,14 @@ impl LogSink {
             }
             None => None,
         };
-        Ok(Self { file })
+        Ok(Self { file, echo: true })
+    }
+
+    /// Like `new`, but records go only to the file, not to stderr.
+    pub fn file_only(path: &Path) -> std::io::Result<Self> {
+        let mut sink = Self::new(Some(path))?;
+        sink.echo = false;
+        Ok(sink)
     }
 
     pub fn info(&self, event: &str, detail: &str) {
@@ -50,7 +58,9 @@ impl LogSink {
             "detail": detail,
         });
         let line = record.to_string();
-        eprintln!("{line}");
+        if self.echo {
+            eprintln!("{line}");
+        }
         if let Some(file) = &self.file
             && let Ok(mut file) = file.lock()
         {

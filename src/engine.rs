@@ -81,11 +81,36 @@ fn http_identity_path(destination: &Path) -> PathBuf {
     PathBuf::from(path)
 }
 
-fn claim_range(next: &AtomicU64, total: u64, workers: usize) -> Option<(u64, u64)> {
+/// Hands out the next stretch of missing bytes. Blocks a previous run already wrote (`done`) are
+/// skipped; a stretch never spans one, so every request covers only bytes still needed.
+fn claim_range(
+    next: &AtomicU64,
+    total: u64,
+    workers: usize,
+    done: &[AtomicBool],
+) -> Option<(u64, u64)> {
+    let is_done = |offset: u64| {
+        done.get((offset / RANGE_CHUNK_SIZE) as usize)
+            .is_some_and(|block| block.load(Ordering::Acquire))
+    };
     loop {
         let start = next.load(Ordering::Acquire);
         if start >= total {
             return None;
+        }
+        let mut first = start;
+        while first < total && is_done(first) {
+            first = (first / RANGE_CHUNK_SIZE + 1) * RANGE_CHUNK_SIZE;
+        }
+        if first != start {
+            // Publish the skip so the other workers do not rescan the same blocks.
+            let _ = next.compare_exchange_weak(
+                start,
+                first.min(total),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+            continue;
         }
         let remaining = total - start;
         let size = if remaining > MAX_HTTP_RANGE_SIZE * workers as u64 {
@@ -93,7 +118,15 @@ fn claim_range(next: &AtomicU64, total: u64, workers: usize) -> Option<(u64, u64
         } else {
             RANGE_CHUNK_SIZE
         };
-        let end_exclusive = start + remaining.min(size);
+        let mut end_exclusive = start + remaining.min(size);
+        let mut probe = start + RANGE_CHUNK_SIZE;
+        while probe < end_exclusive {
+            if is_done(probe) {
+                end_exclusive = probe;
+                break;
+            }
+            probe += RANGE_CHUNK_SIZE;
+        }
         if next
             .compare_exchange_weak(start, end_exclusive, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
@@ -103,16 +136,147 @@ fn claim_range(next: &AtomicU64, total: u64, workers: usize) -> Option<(u64, u64
     }
 }
 
+/// Where an unfinished segmented download keeps its bytes and the record of finished blocks.
+fn partial_paths(destination: &Path) -> (PathBuf, PathBuf) {
+    let mut part = destination.as_os_str().to_owned();
+    part.push(".nibiru-http.part");
+    let mut state = part.clone();
+    state.push(".json");
+    (PathBuf::from(part), PathBuf::from(state))
+}
+
+/// What a later run needs to trust the partial file: the resource it came from (the URL without
+/// its query, so a refreshed signed link still matches) and the blocks that are on disk.
+#[derive(Serialize, Deserialize)]
+struct PartialState {
+    version: u32,
+    total: u64,
+    block: u64,
+    origin: String,
+    etag: Option<String>,
+    modified: Option<String>,
+    done: String,
+}
+
+const PARTIAL_STATE_VERSION: u32 = 1;
+
+fn resume_key(url: &Url) -> String {
+    let mut stripped = url.clone();
+    stripped.set_query(None);
+    stripped.set_fragment(None);
+    url_identity(&stripped)
+}
+
+fn encode_blocks(blocks: &[bool]) -> String {
+    let mut bytes = vec![0_u8; blocks.len().div_ceil(8)];
+    for (index, done) in blocks.iter().enumerate() {
+        if *done {
+            bytes[index / 8] |= 1 << (index % 8);
+        }
+    }
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn decode_blocks(text: &str, count: usize) -> Option<Vec<bool>> {
+    if text.len() != count.div_ceil(8) * 2 || !text.is_ascii() {
+        return None;
+    }
+    let mut blocks = Vec::with_capacity(count);
+    for index in 0..count {
+        let byte = u8::from_str_radix(&text[index / 8 * 2..index / 8 * 2 + 2], 16).ok()?;
+        blocks.push(byte & (1 << (index % 8)) != 0);
+    }
+    Some(blocks)
+}
+
+fn block_len(index: usize, total: u64) -> u64 {
+    total
+        .saturating_sub(index as u64 * RANGE_CHUNK_SIZE)
+        .min(RANGE_CHUNK_SIZE)
+}
+
+/// Writes the finished-block record. The blocks are noted first and flushed to disk before the
+/// record is replaced, so a record never claims bytes that a crash could still lose.
+async fn save_partial_state(
+    file: Arc<std::fs::File>,
+    state_path: PathBuf,
+    mut state: PartialState,
+    done: Arc<Vec<AtomicBool>>,
+) -> Result<()> {
+    let blocks: Vec<bool> = done
+        .iter()
+        .map(|block| block.load(Ordering::Acquire))
+        .collect();
+    tokio::task::spawn_blocking(move || file.sync_data())
+        .await
+        .map_err(|error| anyhow!("storage worker failed: {error}"))??;
+    state.done = encode_blocks(&blocks);
+    let mut temporary = state_path.as_os_str().to_owned();
+    temporary.push(".tmp");
+    let temporary = PathBuf::from(temporary);
+    fs::write(&temporary, serde_json::to_vec(&state)?).await?;
+    fs::rename(&temporary, &state_path).await?;
+    Ok(())
+}
+
+type ResourceIdentity = (String, Option<String>, Option<String>);
+
+/// The record for the current transfer, or `None` when the server gave nothing to validate a
+/// later run against (such a download is not resumable).
+fn partial_template(
+    identity: &std::sync::Mutex<Option<ResourceIdentity>>,
+    total: u64,
+    origin: &str,
+) -> Option<PartialState> {
+    let (_, etag, modified) = identity.lock().ok()?.as_ref()?.clone();
+    if etag.is_none() && modified.is_none() {
+        return None;
+    }
+    Some(PartialState {
+        version: PARTIAL_STATE_VERSION,
+        total,
+        block: RANGE_CHUNK_SIZE,
+        origin: origin.to_owned(),
+        etag,
+        modified,
+        done: String::new(),
+    })
+}
+
+/// Leaves an interrupted download resumable, or removes the partial file when it cannot be.
+async fn suspend_partial(
+    file: Arc<std::fs::File>,
+    part_path: &Path,
+    state_path: &Path,
+    state: Option<PartialState>,
+    done: Arc<Vec<AtomicBool>>,
+) {
+    if let Some(state) = state
+        && save_partial_state(file, state_path.to_path_buf(), state, done)
+            .await
+            .is_ok()
+    {
+        return;
+    }
+    let _ = fs::remove_file(part_path).await;
+    let _ = fs::remove_file(state_path).await;
+}
+
 async fn write_range_block(
     file: Arc<std::fs::File>,
     offset: u64,
     buffer: Vec<u8>,
-    completed: &AtomicU64,
+    completed: Arc<AtomicU64>,
+    done: Arc<Vec<AtomicBool>>,
 ) -> Result<u64> {
     let len = buffer.len() as u64;
     let started = Instant::now();
     storage::write_at(file, offset, buffer).await?;
     completed.fetch_add(len, Ordering::AcqRel);
+    // Writes start on block boundaries, so each one finishes exactly one block.
+    if let Some(block) = done.get((offset / RANGE_CHUNK_SIZE) as usize) {
+        block.store(true, Ordering::Release);
+    }
     Ok(started.elapsed().as_micros() as u64)
 }
 
@@ -349,6 +513,14 @@ impl Engine {
     pub fn with_transport_options(mut self, options: crate::protocols::TransportOptions) -> Self {
         self.transport_options = options;
         self
+    }
+
+    /// A client configured like the engine's own, for the diagnostics.
+    pub fn probe_client() -> Result<Client> {
+        Self::client_builder(false)
+            .pool_max_idle_per_host(64)
+            .build()
+            .context("failed to build HTTP client")
     }
 
     fn client_builder(http1_only: bool) -> reqwest::ClientBuilder {
@@ -740,6 +912,88 @@ impl Engine {
         Ok(())
     }
 
+    /// Reads the record left by an interrupted run and asks the server whether the resource is
+    /// still the one it describes. Returns the finished blocks and the resource identity, or
+    /// `None` (after deleting the stale files) when the partial cannot be trusted.
+    async fn load_partial(
+        &self,
+        url: &Url,
+        part_path: &Path,
+        state_path: &Path,
+        total: u64,
+        block_count: usize,
+        origin: &str,
+    ) -> Option<(Vec<bool>, ResourceIdentity)> {
+        let record = fs::read(state_path).await.ok();
+        let part_len = fs::metadata(part_path).await.ok().map(|m| m.len());
+        if record.is_none() && part_len.is_none() {
+            return None;
+        }
+        let trusted = async {
+            let record = record.filter(|bytes| bytes.len() <= 1 << 20)?;
+            let state: PartialState = serde_json::from_slice(&record).ok()?;
+            if state.version != PARTIAL_STATE_VERSION
+                || state.total != total
+                || state.block != RANGE_CHUNK_SIZE
+                || state.origin != origin
+                || part_len != Some(total)
+            {
+                return None;
+            }
+            let blocks = decode_blocks(&state.done, block_count)?;
+            let validator = state.etag.clone().or_else(|| state.modified.clone())?;
+            let response = self
+                .client
+                .get(url.clone())
+                .header(RANGE, "bytes=0-0")
+                .header(IF_RANGE, validator)
+                .send()
+                .await
+                .ok()?;
+            let value = |key| {
+                response
+                    .headers()
+                    .get(key)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned)
+            };
+            let etag = value(ETAG).filter(|etag| !etag.starts_with("W/"));
+            let modified = value(LAST_MODIFIED);
+            let same = if state.etag.is_some() {
+                etag == state.etag
+            } else {
+                modified.is_some() && modified == state.modified
+            };
+            if response.status() != StatusCode::PARTIAL_CONTENT
+                || !same
+                || validate_content_range(response.headers().get(CONTENT_RANGE), 0, 0, total)
+                    .is_err()
+            {
+                return None;
+            }
+            Some((blocks, (response.url().to_string(), etag, modified)))
+        }
+        .await;
+        match &trusted {
+            Some((blocks, _)) => self.log.info(
+                "http.resume_partial",
+                &format!(
+                    "blocks_done={} blocks_total={block_count}",
+                    blocks.iter().filter(|done| **done).count()
+                ),
+            ),
+            None => {
+                self.log.warn(
+                    "http.resume_discarded",
+                    "reason=partial_not_verifiable_against_the_server",
+                );
+                let _ = fs::remove_file(part_path).await;
+                let _ = fs::remove_file(state_path).await;
+            }
+        }
+        trusted
+    }
+
     async fn download_segmented<F>(
         &self,
         parsed: Url,
@@ -753,17 +1007,49 @@ impl Engine {
     {
         let started = Instant::now();
         let workers = self.connection_count(total);
-        let parent = destination
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        // A unique owned partial cannot truncate a previous interrupted transfer.
-        let temporary = tempfile::Builder::new()
-            .prefix(".nibiru-http-")
-            .suffix(".part")
-            .tempfile_in(parent)?;
-        let (file, part_path) = temporary.into_parts();
-        file.set_len(total)?;
+        let (part_path, state_path) = partial_paths(destination);
+        let block_count = total.div_ceil(RANGE_CHUNK_SIZE) as usize;
+        let origin = resume_key(&parsed);
+        // A partial from an earlier run is reused only after the server confirms it is still the
+        // same resource; anything else is discarded and the transfer starts over.
+        let resumed = self
+            .load_partial(
+                &parsed,
+                &part_path,
+                &state_path,
+                total,
+                block_count,
+                &origin,
+            )
+            .await;
+        let done_blocks: Arc<Vec<AtomicBool>> = Arc::new(
+            (0..block_count)
+                .map(|index| AtomicBool::new(resumed.as_ref().is_some_and(|r| r.0[index])))
+                .collect(),
+        );
+        let resumed_bytes: u64 = resumed
+            .as_ref()
+            .map(|r| {
+                r.0.iter()
+                    .enumerate()
+                    .filter(|(_, done)| **done)
+                    .map(|(index, _)| block_len(index, total))
+                    .sum()
+            })
+            .unwrap_or(0);
+        let identity_seed = resumed.map(|r| r.1);
+        if identity_seed.is_none() {
+            let _ = fs::remove_file(&state_path).await;
+        }
+        let file = StdOpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(identity_seed.is_none())
+            .open(&part_path)?;
+        if identity_seed.is_none() {
+            file.set_len(total)?;
+        }
         let file = Arc::new(file);
         let mut checkpoints = if self.sync_interval_bytes > 0 {
             Some(storage::checkpoints::BackgroundSync::start(
@@ -775,11 +1061,9 @@ impl Engine {
             None
         };
 
-        let identity = Arc::new(std::sync::Mutex::new(
-            None::<(String, Option<String>, Option<String>)>,
-        ));
+        let identity = Arc::new(std::sync::Mutex::new(identity_seed));
         let next_offset = Arc::new(AtomicU64::new(0));
-        let completed = Arc::new(AtomicU64::new(0));
+        let completed = Arc::new(AtomicU64::new(resumed_bytes));
         let metrics = Arc::new(RangeMetrics::default());
         let mut set = JoinSet::new();
         let (adaptive_limit, _) = tokio::sync::watch::channel(workers);
@@ -795,7 +1079,7 @@ impl Engine {
         self.log.info(
             "http.segmented_started",
             &format!(
-                "url={} destination={} total={} workers={} chunk_size={} max_range_size={MAX_HTTP_RANGE_SIZE} sync_interval_bytes={}",
+                "url={} destination={} total={} workers={} chunk_size={} max_range_size={MAX_HTTP_RANGE_SIZE} sync_interval_bytes={} resumed_bytes={resumed_bytes}",
                 redact_url(&parsed),
                 destination.display(),
                 total,
@@ -812,6 +1096,7 @@ impl Engine {
             let file = file.clone();
             let next_offset = next_offset.clone();
             let completed = completed.clone();
+            let done_blocks = done_blocks.clone();
             let cancelled = cancelled.clone();
             let metrics = metrics.clone();
             let log = self.log.clone();
@@ -839,7 +1124,9 @@ impl Engine {
                     } else {
                         workers
                     };
-                    let Some((start, end)) = claim_range(&next_offset, total, range_workers) else {
+                    let Some((start, end)) =
+                        claim_range(&next_offset, total, range_workers, &done_blocks)
+                    else {
                         break;
                     };
                     if end + 1 == total
@@ -967,7 +1254,8 @@ impl Engine {
                                     file.clone(),
                                     start + written,
                                     block,
-                                    &completed,
+                                    completed.clone(),
+                                    done_blocks.clone(),
                                 )
                                 .await?;
                                 written += RANGE_CHUNK_SIZE;
@@ -982,9 +1270,14 @@ impl Engine {
                         );
                     }
                     if !buffer.is_empty() {
-                        storage_wait_us +=
-                            write_range_block(file.clone(), start + written, buffer, &completed)
-                                .await?;
+                        storage_wait_us += write_range_block(
+                            file.clone(),
+                            start + written,
+                            buffer,
+                            completed.clone(),
+                            done_blocks.clone(),
+                        )
+                        .await?;
                     }
                     metrics
                         .body_wait_us
@@ -997,9 +1290,11 @@ impl Engine {
             });
         }
 
-        let mut telemetry = TransferLog::new("segmented", started, 0);
+        let mut telemetry = TransferLog::new("segmented", started, resumed_bytes);
         let mut last_at = Instant::now();
-        let mut last_bytes = 0_u64;
+        let mut last_bytes = resumed_bytes;
+        let mut saver: Option<tokio::task::JoinHandle<Result<()>>> = None;
+        let mut ticks = 0_u32;
         let mut ticker = time::interval(Duration::from_millis(250));
         ticker.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
 
@@ -1010,8 +1305,19 @@ impl Engine {
                         set.abort_all();
                         while set.join_next().await.is_some() {}
                         let _ = storage::checkpoints::finish(checkpoints.take()).await;
+                        if let Some(saver) = saver.take() {
+                            saver.abort();
+                            let _ = saver.await;
+                        }
+                        suspend_partial(
+                            file.clone(),
+                            &part_path,
+                            &state_path,
+                            partial_template(&identity, total, &origin),
+                            done_blocks.clone(),
+                        )
+                        .await;
                         drop(file);
-                        let _ = fs::remove_file(&part_path).await;
                         return Err(anyhow!("cancelled"));
                     }
                     let now = Instant::now();
@@ -1044,6 +1350,18 @@ impl Engine {
                     if let Some(worker) = checkpoints.as_mut() {
                         worker.consider(done, total);
                     }
+                    ticks = ticks.wrapping_add(1);
+                    if ticks.is_multiple_of(8)
+                        && saver.as_ref().is_none_or(tokio::task::JoinHandle::is_finished)
+                        && let Some(state) = partial_template(&identity, total, &origin)
+                    {
+                        saver = Some(tokio::spawn(save_partial_state(
+                            file.clone(),
+                            state_path.clone(),
+                            state,
+                            done_blocks.clone(),
+                        )));
+                    }
                     last_at = now;
                     last_bytes = done;
                 }
@@ -1054,8 +1372,17 @@ impl Engine {
                             set.abort_all();
                             while set.join_next().await.is_some() {}
                             let checkpoint_result = storage::checkpoints::finish(checkpoints.take()).await;
+                            if let Some(saver) = saver.take() {
+                                saver.abort();
+                                let _ = saver.await;
+                            }
+                            // A resource that changed under us cannot be resumed; anything else
+                            // (a dropped connection) keeps the finished blocks for the next run.
+                            let template = (!error.to_string().contains("resource identity changed"))
+                                .then(|| partial_template(&identity, total, &origin))
+                                .flatten();
+                            suspend_partial(file.clone(), &part_path, &state_path, template, done_blocks.clone()).await;
                             drop(file);
-                            let _ = fs::remove_file(&part_path).await;
                             checkpoint_result?;
                             return Err(error);
                         }
@@ -1063,8 +1390,19 @@ impl Engine {
                             set.abort_all();
                             while set.join_next().await.is_some() {}
                             let checkpoint_result = storage::checkpoints::finish(checkpoints.take()).await;
+                            if let Some(saver) = saver.take() {
+                                saver.abort();
+                                let _ = saver.await;
+                            }
+                            suspend_partial(
+                                file.clone(),
+                                &part_path,
+                                &state_path,
+                                partial_template(&identity, total, &origin),
+                                done_blocks.clone(),
+                            )
+                            .await;
                             drop(file);
-                            let _ = fs::remove_file(&part_path).await;
                             checkpoint_result?;
                             return Err(anyhow!("range worker panicked: {error}"));
                         }
@@ -1074,11 +1412,22 @@ impl Engine {
             }
         }
 
+        if let Some(saver) = saver.take() {
+            saver.abort();
+            let _ = saver.await;
+        }
         let done = completed.load(Ordering::Acquire);
         if done != total {
             let checkpoint_result = storage::checkpoints::finish(checkpoints.take()).await;
+            suspend_partial(
+                file.clone(),
+                &part_path,
+                &state_path,
+                partial_template(&identity, total, &origin),
+                done_blocks.clone(),
+            )
+            .await;
             drop(file);
-            let _ = fs::remove_file(&part_path).await;
             checkpoint_result?;
             bail!("segmented download incomplete expected={total} got={done}");
         }
@@ -1094,8 +1443,15 @@ impl Engine {
         let checkpoint_stats = match storage::checkpoints::finish(checkpoints.take()).await {
             Ok(stats) => stats,
             Err(error) => {
+                suspend_partial(
+                    file.clone(),
+                    &part_path,
+                    &state_path,
+                    partial_template(&identity, total, &origin),
+                    done_blocks.clone(),
+                )
+                .await;
                 drop(file);
-                let _ = fs::remove_file(&part_path).await;
                 return Err(error);
             }
         };
@@ -1108,12 +1464,22 @@ impl Engine {
         let close_ms = closing.elapsed().as_millis();
 
         let renaming = Instant::now();
-        if let Err(error) = part_path.persist_noclobber(destination) {
+        let published = tempfile::TempPath::try_from_path(&part_path)
+            .map_err(|error| (error, None))
+            .and_then(|temporary| {
+                temporary
+                    .persist_noclobber(destination)
+                    .map_err(|error| (error.error, Some(error.path)))
+            });
+        if let Err((error, kept)) = published {
             // A foreign destination must survive. Retain our completed payload too.
-            let _ = error.path.keep();
-            return Err(error.error)
+            if let Some(path) = kept {
+                let _ = path.keep();
+            }
+            return Err(error)
                 .context("cannot publish completed file without overwriting another file");
         }
+        let _ = fs::remove_file(&state_path).await;
         let rename_ms = renaming.elapsed().as_millis();
         let finalize_ms = finalizing.elapsed().as_millis();
 
@@ -1291,7 +1657,7 @@ mod tests {
                 let next = next.clone();
                 std::thread::spawn(move || {
                     let mut ranges = Vec::new();
-                    while let Some(range) = claim_range(&next, total, workers) {
+                    while let Some(range) = claim_range(&next, total, workers, &[]) {
                         ranges.push(range);
                     }
                     ranges

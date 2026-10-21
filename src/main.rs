@@ -59,6 +59,37 @@ enum Command {
         #[arg(long)]
         ssh_identity: Option<PathBuf>,
     },
+    /// Find out why a download does not hold its top speed: measures the network alone, the disk
+    /// alone and the engine on the same link, then compares them.
+    Diagnose {
+        url: String,
+        /// Folder used for the temporary test files (default: the current one).
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+        /// Seconds per network test.
+        #[arg(long, default_value_t = 10)]
+        seconds: u64,
+        /// Connection counts for the network tests.
+        #[arg(long, value_delimiter = ',', default_value = "1,8,16,32")]
+        connections: Vec<usize>,
+        /// MiB written by the disk test.
+        #[arg(long, default_value_t = 2048)]
+        disk_mib: u64,
+        #[arg(long)]
+        skip_disk: bool,
+        /// Seconds the engine runs before it is stopped.
+        #[arg(long, default_value_t = 25)]
+        engine_seconds: u64,
+        /// Cap the engine at this many connections (default: its own choice, 16 for big files).
+        #[arg(long)]
+        engine_connections: Option<usize>,
+        /// Let the engine download the whole file instead of stopping it.
+        #[arg(long)]
+        full: bool,
+        /// Where the report is written.
+        #[arg(long, default_value = "nibiru-diagnose-report.txt")]
+        report: PathBuf,
+    },
     Serve(ServeArgs),
 }
 
@@ -240,13 +271,27 @@ async fn main() -> Result<()> {
                 ssh_identity,
             });
             let cancelled = Arc::new(AtomicBool::new(false));
-            engine
+            // Ctrl+C pauses: the download stops at a block boundary and keeps what it has, so the
+            // same command continues from there. A second Ctrl+C exits at once.
+            let interrupt = cancelled.clone();
+            tokio::spawn(async move {
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    interrupt.store(true, std::sync::atomic::Ordering::Release);
+                    eprintln!(
+                        "pausing… run the same command again to continue (Ctrl+C again to exit now)"
+                    );
+                    if tokio::signal::ctrl_c().await.is_ok() {
+                        std::process::exit(130);
+                    }
+                }
+            });
+            let result = engine
                 .download(
                     DownloadRequest {
                         url,
                         destination: out,
                     },
-                    cancelled,
+                    cancelled.clone(),
                     |p| {
                         eprintln!(
                             "downloaded={} total={} speed={}",
@@ -256,7 +301,38 @@ async fn main() -> Result<()> {
                         );
                     },
                 )
-                .await?;
+                .await;
+            if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                eprintln!("paused");
+                std::process::exit(130);
+            }
+            result?;
+        }
+        Some(Command::Diagnose {
+            url,
+            dir,
+            seconds,
+            connections,
+            disk_mib,
+            skip_disk,
+            engine_seconds,
+            engine_connections,
+            full,
+            report,
+        }) => {
+            nibiru_xtreme::diagnose::run(nibiru_xtreme::diagnose::Options {
+                url,
+                dir,
+                seconds,
+                connections,
+                disk_mib,
+                skip_disk,
+                engine_seconds,
+                engine_connections,
+                full,
+                report,
+            })
+            .await?;
         }
         Some(Command::Serve(args)) => {
             let config = args.config()?;

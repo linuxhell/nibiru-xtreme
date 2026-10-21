@@ -227,19 +227,11 @@ async fn segmented_publication_preserves_a_racing_destination_and_an_old_partial
         tokio::fs::read(old_partial).await.unwrap(),
         b"previous partial"
     );
-    let completed = std::fs::read_dir(dir.path())
-        .unwrap()
-        .flatten()
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".nibiru-http-")
-        })
-        .find(|entry| entry.metadata().unwrap().len() == 8 * 1024 * 1024)
-        .expect("completed download must be kept when publication is refused");
+    // The finished payload stays in the download's partial file, next to the user's own file.
+    let completed = dir.path().join("user.bin.nibiru-http.part");
     assert_eq!(
-        std::fs::read(completed.path()).unwrap(),
+        std::fs::read(completed)
+            .expect("completed download must be kept when publication is refused"),
         vec![b'A'; 8 * 1024 * 1024]
     );
 }
