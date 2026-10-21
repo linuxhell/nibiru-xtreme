@@ -79,6 +79,7 @@ struct Slot {
 }
 
 pub struct Storage {
+    download_root: PathBuf,
     root: PathBuf,
     slots: Vec<Slot>,
     piece_length: u64,
@@ -110,6 +111,7 @@ impl Storage {
             })
             .collect();
         Self {
+            download_root: directory.to_owned(),
             root,
             slots,
             piece_length: torrent.piece_length,
@@ -178,23 +180,51 @@ impl Storage {
         out
     }
 
+    fn validate_path(&self, index: usize, create: bool) -> Result<()> {
+        let slot = &self.slots[index];
+        if create {
+            std::fs::create_dir_all(&self.download_root)?;
+        }
+        let real_root = std::fs::canonicalize(&self.download_root)?;
+        // The configured download folder may itself be a user-chosen alias, but
+        // torrent-controlled descendants and file names must never be links.
+        for path in slot
+            .path
+            .ancestors()
+            .take_while(|path| *path != self.download_root)
+        {
+            match std::fs::symlink_metadata(path) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    bail!("torrent path contains a symbolic link")
+                }
+                Ok(meta) if path == slot.path && !meta.is_file() => {
+                    bail!("torrent output is not a regular file")
+                }
+                Ok(_) => {}
+                Err(error) if create && error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        if let Some(parent) = slot.path.parent() {
+            if create {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("cannot create {}", parent.display()))?;
+            }
+            let real_parent = std::fs::canonicalize(parent)?;
+            if !real_parent.starts_with(&real_root) {
+                bail!("refusing to access outside the download directory");
+            }
+        }
+        Ok(())
+    }
+
     fn handle(&self, index: usize, create: bool) -> Result<std::sync::Arc<File>> {
         let mut open = self.open.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         if let Some(file) = open.get(&(index, create)) {
             return Ok(file.clone());
         }
+        self.validate_path(index, create)?;
         let slot = &self.slots[index];
-        if create && let Some(parent) = slot.path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("cannot create {}", parent.display()))?;
-            // A planted symlink must not let a torrent write outside the download directory.
-            let real_parent = std::fs::canonicalize(parent)?;
-            let real_root =
-                std::fs::canonicalize(&self.root).or_else(|_| std::fs::canonicalize(parent))?;
-            if !real_parent.starts_with(&real_root) && !self.root.starts_with(&real_parent) {
-                bail!("refusing to write outside the download directory");
-            }
-        }
         let file = if create {
             let existed = slot.path.exists();
             let file = OpenOptions::new()
@@ -223,7 +253,10 @@ impl Storage {
 
     /// Writes bytes at `offset` in the torrent's byte space (may cross files). Padding is skipped.
     pub fn write(&self, offset: u64, data: &[u8]) -> Result<()> {
-        if offset + data.len() as u64 > self.total {
+        if offset
+            .checked_add(data.len() as u64)
+            .is_none_or(|end| end > self.total)
+        {
             bail!("write beyond the end of the torrent");
         }
         let mut consumed = 0usize;
@@ -244,7 +277,7 @@ impl Storage {
 
     /// Reads `len` bytes at `offset`; padding reads as zeros. Fails if data is missing.
     pub fn read(&self, offset: u64, len: u64) -> Result<Vec<u8>> {
-        if offset + len > self.total {
+        if offset.checked_add(len).is_none_or(|end| end > self.total) {
             bail!("read beyond the end of the torrent");
         }
         let mut out = vec![0u8; len as usize];
@@ -498,15 +531,23 @@ impl Storage {
         if let Ok(mut open) = self.open.lock() {
             open.clear();
         }
-        for slot in &self.slots {
+        let mut dirs = Vec::new();
+        for (index, slot) in self.slots.iter().enumerate() {
+            if slot.pad || self.validate_path(index, false).is_err() {
+                continue;
+            }
             let _ = std::fs::remove_file(&slot.path);
+            // Only validated descendants can contribute directories to cleanup.
+            if let Some(parent) = slot.path.parent() {
+                dirs.extend(
+                    parent
+                        .ancestors()
+                        .take_while(|path| *path != self.download_root)
+                        .map(Path::to_path_buf),
+                );
+            }
         }
         // Remove emptied folders bottom-up, but never the user's download directory itself.
-        let mut dirs: Vec<PathBuf> = self
-            .slots
-            .iter()
-            .filter_map(|s| s.path.parent().map(Path::to_path_buf))
-            .collect();
         dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
         dirs.dedup();
         for dir in dirs {
@@ -620,6 +661,8 @@ mod tests {
         );
         assert!(s.read(all.len() as u64 - 1, 2).is_err());
         assert!(s.write(all.len() as u64, &[1]).is_err());
+        assert!(s.read(u64::MAX, 2).is_err());
+        assert!(s.write(u64::MAX, &[1, 2]).is_err());
     }
 
     #[test]
@@ -746,5 +789,42 @@ mod tests {
         let result = s.write(20_000, &all[20_000..25_000]);
         assert!(result.is_err(), "write through a symlink must be refused");
         assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn torrent_root_and_final_file_symlinks_cannot_escape_for_reads_or_writes() {
+        for root_link in [true, false] {
+            let (torrent, _) = fixture();
+            let dir = tempfile::tempdir().unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            let foreign = outside.path().join("a.bin");
+            std::fs::write(&foreign, b"private data").unwrap();
+            if root_link {
+                std::os::unix::fs::symlink(outside.path(), dir.path().join("pack")).unwrap();
+            } else {
+                std::fs::create_dir(dir.path().join("pack")).unwrap();
+                std::os::unix::fs::symlink(&foreign, dir.path().join("pack/a.bin")).unwrap();
+            }
+            let storage = Storage::new(&torrent, dir.path());
+            assert!(storage.read(0, 3).is_err());
+            assert!(storage.write(0, b"bad").is_err());
+            storage.delete_files();
+            assert_eq!(std::fs::read(&foreign).unwrap(), b"private data");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refusing_a_symlink_does_not_create_directories_outside_the_download_root() {
+        let (mut torrent, _) = fixture();
+        torrent.files[1].path.insert(1, "new-directory".into());
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("pack")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("pack/sub")).unwrap();
+        let storage = Storage::new(&torrent, dir.path());
+        assert!(storage.write(20_000, &[0; 5000]).is_err());
+        assert!(!outside.path().join("new-directory").exists());
     }
 }
