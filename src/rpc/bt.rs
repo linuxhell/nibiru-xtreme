@@ -1,5 +1,6 @@
 //! BitTorrent and Magnet support for the aria2-compatible JSON-RPC server.
 
+use super::session::{self, Entry};
 use crate::bittorrent::{
     dht::DhtConfig,
     magnet::Magnet,
@@ -64,6 +65,11 @@ struct BtTask {
     saved: Arc<Mutex<Option<PathBuf>>>,
     removed: bool,
     created: std::time::Instant,
+    /// Magnet link the task was added from, until its metadata is known.
+    magnet: Option<String>,
+    /// Options safe to keep in the session file; `None` keeps the task out of it
+    /// (it carries credentials).
+    persist: Mutex<Option<Map<String, Value>>>,
 }
 
 pub struct BtService {
@@ -264,8 +270,15 @@ impl BtService {
         }
     }
 
-    fn register(&self, handle: TorrentHandle, metadata_only: bool) -> String {
-        let id = gid();
+    fn register(
+        &self,
+        id: Option<String>,
+        handle: TorrentHandle,
+        metadata_only: bool,
+        magnet: Option<String>,
+        persist: Option<Map<String, Value>>,
+    ) -> String {
+        let id = id.unwrap_or_else(gid);
         let saved = Arc::new(Mutex::new(None));
         if let Ok(mut tasks) = self.tasks.lock() {
             tasks.insert(
@@ -276,6 +289,8 @@ impl BtService {
                     saved,
                     removed: false,
                     created: std::time::Instant::now(),
+                    magnet,
+                    persist: Mutex::new(persist),
                 },
             );
         }
@@ -284,6 +299,15 @@ impl BtService {
 
     pub async fn add_magnet(
         &self,
+        uri: &str,
+        options: Option<&Map<String, Value>>,
+    ) -> Result<String> {
+        self.add_magnet_as(None, uri, options).await
+    }
+
+    async fn add_magnet_as(
+        &self,
+        id: Option<String>,
         uri: &str,
         options: Option<&Map<String, Value>>,
     ) -> Result<String> {
@@ -297,7 +321,17 @@ impl BtService {
         let dir = settings.directory.clone();
         let handle = self.session.add_magnet(&magnet, settings);
         self.apply_limits(&handle, options);
-        let id = self.register(handle.clone(), metadata_only);
+        // Metadata-only fetches are transient; everything else may be restored.
+        let persist = (!metadata_only)
+            .then(|| session::persistable_options(Some(uri), options))
+            .flatten();
+        let id = self.register(
+            id,
+            handle.clone(),
+            metadata_only,
+            Some(uri.to_owned()),
+            persist,
+        );
         if metadata_only {
             let save = flag(options, "bt-save-metadata").unwrap_or(false);
             let saved = self
@@ -334,6 +368,15 @@ impl BtService {
         base64_torrent: &str,
         options: Option<&Map<String, Value>>,
     ) -> Result<String> {
+        self.add_torrent_as(None, base64_torrent, options).await
+    }
+
+    async fn add_torrent_as(
+        &self,
+        id: Option<String>,
+        base64_torrent: &str,
+        options: Option<&Map<String, Value>>,
+    ) -> Result<String> {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(base64_torrent.trim())
             .context("the torrent is not valid base64")?;
@@ -344,7 +387,87 @@ impl BtService {
         }
         let handle = self.session.add_torrent(torrent, settings);
         self.apply_limits(&handle, options);
-        Ok(self.register(handle, false))
+        let persist = session::persistable_options(None, options);
+        Ok(self.register(id, handle, false, None, persist))
+    }
+
+    /// Recreates a task from the session file under its old GID, paused: the manager
+    /// decides when to resume, and resuming re-verifies the payload on disk.
+    pub async fn restore(&self, entry: &Entry) -> Result<()> {
+        session::validate_gid(entry.gid())?;
+        anyhow::ensure!(!self.owns(entry.gid()), "duplicate saved gid");
+        let id = match entry {
+            Entry::Torrent {
+                gid,
+                torrent,
+                options,
+            } => {
+                self.add_torrent_as(Some(gid.clone()), torrent, Some(options))
+                    .await?
+            }
+            Entry::Magnet { gid, uri, options } => {
+                self.add_magnet_as(Some(gid.clone()), uri, Some(options))
+                    .await?
+            }
+            Entry::Direct { .. } => bail!("not a BitTorrent entry"),
+        };
+        self.pause(&id)
+    }
+
+    /// Unfinished, credential-free tasks for the session file.
+    pub fn snapshot(&self) -> Vec<Entry> {
+        let Ok(tasks) = self.tasks.lock() else {
+            return Vec::new();
+        };
+        let mut entries = Vec::new();
+        for (gid, task) in tasks.iter() {
+            if task.removed || task.metadata_only {
+                continue;
+            }
+            let Some(options) = task.persist.lock().ok().and_then(|p| p.clone()) else {
+                continue;
+            };
+            let status = task.handle.status();
+            let finished = matches!(status.state, State::Complete | State::Seeding)
+                || (status.selected_length > 0
+                    && status.completed_length >= status.selected_length);
+            if finished {
+                continue;
+            }
+            let entry = match (task.handle.torrent(), &task.magnet) {
+                (Some(torrent), _) => Entry::Torrent {
+                    gid: gid.clone(),
+                    torrent: base64::engine::general_purpose::STANDARD
+                        .encode(torrent.to_torrent_file()),
+                    options,
+                },
+                (None, Some(uri)) => Entry::Magnet {
+                    gid: gid.clone(),
+                    uri: uri.clone(),
+                    options,
+                },
+                (None, None) => continue,
+            };
+            entries.push(entry);
+        }
+        entries
+    }
+
+    /// `(waiting, stopped)` task counts for the global stat call.
+    pub fn counts(&self) -> (usize, usize) {
+        let Ok(tasks) = self.tasks.lock() else {
+            return (0, 0);
+        };
+        let (mut waiting, mut stopped) = (0, 0);
+        for task in tasks.values() {
+            let saved = task.saved.lock().ok().and_then(|s| s.clone());
+            match aria_status(&task.handle.status(), task, saved.as_deref()) {
+                "paused" => waiting += 1,
+                "complete" | "error" | "removed" => stopped += 1,
+                _ => {}
+            }
+        }
+        (waiting, stopped)
     }
 
     fn with_task<T>(&self, gid: &str, f: impl FnOnce(&BtTask) -> T) -> Result<T> {
@@ -405,6 +528,20 @@ impl BtService {
 
     pub fn change_option(&self, gid: &str, options: &Map<String, Value>) -> Result<()> {
         self.with_task(gid, |task| -> Result<()> {
+            if let Ok(mut saved) = task.persist.lock()
+                && let Some(saved) = saved.as_mut()
+            {
+                for key in [
+                    "max-download-limit",
+                    "max-upload-limit",
+                    "select-file",
+                    "x-nibiru-sequential",
+                ] {
+                    if let Some(value) = options.get(key).and_then(Value::as_str) {
+                        saved.insert(key.to_owned(), Value::String(value.to_owned()));
+                    }
+                }
+            }
             let options = Some(options);
             self.apply_limits(&task.handle, options);
             if let Some(select) = text(options, "select-file") {

@@ -5,7 +5,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
 };
 use tokio::{
@@ -15,7 +15,9 @@ use tokio::{
 };
 
 pub mod bt;
+pub mod session;
 
+use self::session::{Entry, SessionStore};
 use crate::{
     VERSION,
     bittorrent::limiter::RateLimiter,
@@ -38,6 +40,8 @@ struct Task {
     http: RequestOptions,
     /// This task's own speed cap (`max-download-limit`).
     limit: Arc<RateLimiter>,
+    /// Options safe to keep in the session file; `None` keeps the task out of it.
+    persist: Option<serde_json::Map<String, Value>>,
 }
 
 #[derive(Clone)]
@@ -49,6 +53,12 @@ pub struct RpcServer {
     bt: Option<Arc<bt::BtService>>,
     /// `max-overall-download-limit` for HTTP/FTP tasks (BitTorrent has its own session limit).
     global_limit: Arc<RateLimiter>,
+    session: Option<Arc<SessionStore>>,
+    /// Finished results the manager purged; makes `numStoppedTotal` cumulative.
+    purged: Arc<AtomicU64>,
+    /// Tasks restored from the session file, and entries that could not be.
+    restored: Arc<AtomicUsize>,
+    skipped: Arc<AtomicUsize>,
 }
 
 impl RpcServer {
@@ -60,6 +70,124 @@ impl RpcServer {
             tasks: Arc::new(RwLock::new(HashMap::new())),
             bt: None,
             global_limit: Arc::new(RateLimiter::new(0)),
+            session: None,
+            purged: Arc::new(AtomicU64::new(0)),
+            restored: Arc::new(AtomicUsize::new(0)),
+            skipped: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// Keeps unfinished tasks in `path`: restores them (paused, same GIDs) now and
+    /// rewrites the file whenever the table changes.
+    pub async fn with_session(mut self, path: PathBuf) -> Result<Self> {
+        let store = Arc::new(SessionStore::new(path));
+        let (entries, skipped) = store.load()?;
+        self.session = Some(store.clone());
+        self.skipped.store(skipped, Ordering::Release);
+        for entry in entries {
+            match self.restore_entry(&entry).await {
+                Ok(()) => {
+                    self.restored.fetch_add(1, Ordering::AcqRel);
+                }
+                Err(error) => {
+                    self.skipped.fetch_add(1, Ordering::AcqRel);
+                    self.log.warn(
+                        "session.restore_failed",
+                        &format!("gid={} error={error}", entry.gid()),
+                    );
+                }
+            }
+        }
+        self.log.info(
+            "session.restored",
+            &format!(
+                "tasks={} skipped={}",
+                self.restored.load(Ordering::Acquire),
+                self.skipped.load(Ordering::Acquire)
+            ),
+        );
+        let writer = self.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = store.flush_requested() => {
+                        // Coalesce bursts (a batch of adds) into one write.
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    }
+                    // Completions and failures change the table without an RPC call.
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+                }
+                if let Err(error) = writer.flush_session().await {
+                    writer.log.warn("session.write_failed", &error.to_string());
+                }
+            }
+        });
+        Ok(self)
+    }
+
+    /// Writes the session file now if its content changed.
+    pub async fn flush_session(&self) -> Result<bool> {
+        let Some(store) = self.session.clone() else {
+            return Ok(false);
+        };
+        let entries = self.snapshot().await;
+        tokio::task::spawn_blocking(move || store.save(&entries)).await?
+    }
+
+    fn touch(&self) {
+        if let Some(store) = &self.session {
+            store.request_flush();
+        }
+    }
+
+    async fn snapshot(&self) -> Vec<Entry> {
+        let mut entries = Vec::new();
+        for (gid, task) in self.tasks.read().await.iter() {
+            if matches!(task.status.as_str(), "complete" | "removed") {
+                continue;
+            }
+            if let Some(options) = &task.persist {
+                entries.push(Entry::Direct {
+                    gid: gid.clone(),
+                    url: task.request.url.clone(),
+                    options: options.clone(),
+                });
+            }
+        }
+        if let Some(bt) = &self.bt {
+            entries.extend(bt.snapshot());
+        }
+        entries
+    }
+
+    async fn restore_entry(&self, entry: &Entry) -> Result<()> {
+        match entry {
+            Entry::Direct { gid, url, options } => {
+                session::validate_gid(gid)?;
+                let spec = direct_spec(url, Some(options))?;
+                let mut tasks = self.tasks.write().await;
+                anyhow::ensure!(!tasks.contains_key(gid), "duplicate saved gid");
+                tasks.insert(
+                    gid.clone(),
+                    Task {
+                        created: std::time::Instant::now(),
+                        io: Arc::new(tokio::sync::Mutex::new(())),
+                        status: "paused".into(),
+                        total: 0,
+                        completed: 0,
+                        speed: 0,
+                        error: None,
+                        cancel: Arc::new(AtomicBool::new(false)),
+                        request: spec.request,
+                        transport: spec.transport,
+                        http: spec.http,
+                        limit: Arc::new(RateLimiter::new(spec.limit)),
+                        persist: session::persistable_options(Some(url), Some(options)),
+                    },
+                );
+                Ok(())
+            }
+            other => self.bt()?.restore(other).await,
         }
     }
 
@@ -186,6 +314,32 @@ impl RpcServer {
     }
 
     async fn dispatch(&self, method: &str, params: Vec<Value>) -> Result<Value> {
+        let result = self.dispatch_inner(method, params).await;
+        if matches!(
+            method,
+            "aria2.addUri"
+                | "nibiru.addUri"
+                | "aria2.addTorrent"
+                | "nibiru.addTorrent"
+                | "aria2.pause"
+                | "aria2.forcePause"
+                | "nibiru.pause"
+                | "aria2.unpause"
+                | "nibiru.resume"
+                | "aria2.remove"
+                | "aria2.forceRemove"
+                | "nibiru.remove"
+                | "aria2.removeDownloadResult"
+                | "nibiru.removeResult"
+                | "aria2.changeOption"
+                | "nibiru.changeOption"
+        ) {
+            self.touch();
+        }
+        result
+    }
+
+    async fn dispatch_inner(&self, method: &str, params: Vec<Value>) -> Result<Value> {
         let gid = params.first().and_then(Value::as_str).unwrap_or_default();
         let bt_gid = self.bt.as_ref().filter(|bt| bt.owns(gid));
         let options_at = |index: usize| params.get(index).and_then(Value::as_object);
@@ -279,6 +433,7 @@ impl RpcServer {
             "aria2.removeDownloadResult" | "nibiru.removeResult" => {
                 if let Some(bt) = bt_gid {
                     bt.remove_result(gid)?;
+                    self.purged.fetch_add(1, Ordering::AcqRel);
                 } else {
                     let mut tasks = self.tasks.write().await;
                     if let Some(task) = tasks.get(gid) {
@@ -287,7 +442,9 @@ impl RpcServer {
                             "cannot purge an unfinished download"
                         );
                     }
-                    tasks.remove(gid);
+                    if tasks.remove(gid).is_some() {
+                        self.purged.fetch_add(1, Ordering::AcqRel);
+                    }
                 }
                 Ok(Value::String("OK".into()))
             }
@@ -299,9 +456,14 @@ impl RpcServer {
                         .get("max-download-limit")
                         .and_then(Value::as_str)
                         .and_then(bt::parse_size)
-                    && let Some(task) = self.tasks.read().await.get(gid)
+                    && let Some(task) = self.tasks.write().await.get_mut(gid)
                 {
                     task.limit.set_rate(limit);
+                    if let Some(saved) = task.persist.as_mut()
+                        && let Some(text) = options.get("max-download-limit")
+                    {
+                        saved.insert("max-download-limit".into(), text.clone());
+                    }
                 }
                 Ok(Value::String("OK".into()))
             }
@@ -338,18 +500,44 @@ impl RpcServer {
                     .filter(|t| t.status == "active")
                     .count();
                 let http_speed: u64 = self.tasks.read().await.values().map(|t| t.speed).sum();
+                let (bt_waiting, bt_stopped) =
+                    self.bt.as_ref().map(|bt| bt.counts()).unwrap_or_default();
+                let (http_waiting, http_stopped) = {
+                    let tasks = self.tasks.read().await;
+                    (
+                        tasks
+                            .values()
+                            .filter(|t| {
+                                matches!(t.status.as_str(), "paused" | "pausing" | "waiting")
+                            })
+                            .count(),
+                        tasks
+                            .values()
+                            .filter(|t| {
+                                matches!(t.status.as_str(), "complete" | "error" | "removed")
+                            })
+                            .count(),
+                    )
+                };
+                let stopped = bt_stopped + http_stopped;
                 Ok(json!({
                     "downloadSpeed": (down + http_speed).to_string(),
                     "uploadSpeed": up.to_string(),
                     "numActive": (active + http_active).to_string(),
-                    "numWaiting": "0",
-                    "numStopped": "0",
-                    "numStoppedTotal": "0",
+                    "numWaiting": (bt_waiting + http_waiting).to_string(),
+                    "numStopped": stopped.to_string(),
+                    "numStoppedTotal": (stopped as u64 + self.purged.load(Ordering::Acquire)).to_string(),
                 }))
             }
             "aria2.tellActive" | "nibiru.tellActive" => self.list_tasks("active", params).await,
             "aria2.tellWaiting" | "nibiru.tellWaiting" => self.list_tasks("waiting", params).await,
             "aria2.tellStopped" | "nibiru.tellStopped" => self.list_tasks("stopped", params).await,
+            // Not part of aria2: whether tasks survive a restart and what was restored.
+            "nibiru.getSessionInfo" => Ok(json!({
+                "persistent": self.session.is_some(),
+                "restored": self.restored.load(Ordering::Acquire),
+                "skipped": self.skipped.load(Ordering::Acquire),
+            })),
             // Not part of aria2: a loopback URL a media player can open to watch while downloading.
             "nibiru.streamUrl" => {
                 let file = params.get(1).and_then(Value::as_u64).map(|i| i as usize);
@@ -441,34 +629,9 @@ impl RpcServer {
             .ok_or_else(|| anyhow!("missing URI"))?
             .to_owned();
         let options = params.get(1).and_then(Value::as_object);
-        let dir = options
-            .and_then(|m| m.get("dir"))
-            .and_then(Value::as_str)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."));
-        let out = options
-            .and_then(|m| m.get("out"))
-            .and_then(Value::as_str)
-            .unwrap_or("download");
-        if !safe_output_name(out) {
-            return Err(anyhow!("invalid output filename"));
-        }
-        let request = DownloadRequest {
-            url: uri,
-            destination: dir.join(out),
-        };
-        let value = |key: &str| options.and_then(|m| m.get(key)).and_then(Value::as_str);
-        let transport = crate::protocols::TransportOptions {
-            ca_certificate: value("ca-certificate").map(PathBuf::from),
-            ssh_host_key: value("ssh-host-key").map(str::to_owned),
-            ssh_identity: value("ssh-identity").map(PathBuf::from),
-        };
-        let http = request_options(options)?;
-        let limit = Arc::new(RateLimiter::new(
-            value("max-download-limit")
-                .and_then(bt::parse_size)
-                .unwrap_or(0),
-        ));
+        let spec = direct_spec(&uri, options)?;
+        let persist = session::persistable_options(Some(&uri), options);
+        let limit = Arc::new(RateLimiter::new(spec.limit));
         let io = Arc::new(tokio::sync::Mutex::new(()));
         let gid = uuid::Uuid::new_v4().simple().to_string();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -483,13 +646,22 @@ impl RpcServer {
                 speed: 0,
                 error: None,
                 cancel: cancel.clone(),
-                request: request.clone(),
-                transport: transport.clone(),
-                http: http.clone(),
+                request: spec.request.clone(),
+                transport: spec.transport.clone(),
+                http: spec.http.clone(),
                 limit: limit.clone(),
+                persist,
             },
         );
-        self.spawn_download(gid.clone(), request, cancel, transport, http, limit, io);
+        self.spawn_download(
+            gid.clone(),
+            spec.request,
+            cancel,
+            spec.transport,
+            spec.http,
+            limit,
+            io,
+        );
         Ok(Value::String(gid))
     }
 
@@ -681,6 +853,40 @@ impl RpcServer {
         }
         Ok(Value::String(gid))
     }
+}
+
+/// What `addUri` builds from a URL and aria2-style options; shared with session restore.
+struct DirectSpec {
+    request: DownloadRequest,
+    transport: crate::protocols::TransportOptions,
+    http: RequestOptions,
+    limit: u64,
+}
+
+fn direct_spec(uri: &str, options: Option<&serde_json::Map<String, Value>>) -> Result<DirectSpec> {
+    let value = |key: &str| options.and_then(|m| m.get(key)).and_then(Value::as_str);
+    let dir = value("dir")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let out = value("out").unwrap_or("download");
+    if !safe_output_name(out) {
+        return Err(anyhow!("invalid output filename"));
+    }
+    Ok(DirectSpec {
+        request: DownloadRequest {
+            url: uri.to_owned(),
+            destination: dir.join(out),
+        },
+        transport: crate::protocols::TransportOptions {
+            ca_certificate: value("ca-certificate").map(PathBuf::from),
+            ssh_host_key: value("ssh-host-key").map(str::to_owned),
+            ssh_identity: value("ssh-identity").map(PathBuf::from),
+        },
+        http: request_options(options)?,
+        limit: value("max-download-limit")
+            .and_then(bt::parse_size)
+            .unwrap_or(0),
+    })
 }
 
 /// aria2-style HTTP options: `header`, `referer`, `user-agent`, `all-proxy*`.

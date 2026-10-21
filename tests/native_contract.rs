@@ -11,6 +11,7 @@ fn capabilities_expose_the_real_native_rpc_and_resume_contract() {
     assert_eq!(value["schema_version"], 1);
     assert_eq!(value["features"]["native_rpc"], true);
     assert_eq!(value["features"]["http_resume_identity"], true);
+    assert_eq!(value["features"]["session_persistence"], true);
 }
 #[test]
 fn invalid_native_serve_configuration_is_rejected_before_starting_a_service() {

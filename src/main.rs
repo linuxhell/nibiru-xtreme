@@ -98,6 +98,10 @@ struct ServeArgs {
     allow_loopback_peers: bool,
     #[arg(long)]
     stop_with_process: Option<u32>,
+    /// Keep unfinished tasks in this file and restore them (paused, same GIDs) on start.
+    /// Tasks whose request carries credentials are never written.
+    #[arg(long)]
+    session_file: Option<PathBuf>,
 }
 
 impl ServeArgs {
@@ -167,6 +171,7 @@ async fn main() -> Result<()> {
                     "schema_version": 1, "engine": "nibiru-xtreme", "version": VERSION,
                     "features": {"native_rpc": true, "rpc_namespace": "nibiru",
                         "parent_lifetime": true, "http_resume_identity": true,
+                        "session_persistence": true,
                         "bittorrent": true, "ed2k_library": true,
                         "ftp": cfg!(feature = "ftp"), "sftp": cfg!(feature = "sftp"),
                         "http3": cfg!(feature = "http3")}
@@ -221,23 +226,34 @@ async fn main() -> Result<()> {
         Some(Command::Serve(args)) => {
             let config = args.config()?;
             std::fs::create_dir_all(&args.dir)?;
+            let log = Arc::new(LogSink::new(args.log.as_deref())?);
+            let engine = Engine::new(log.clone())?;
+            let service = BtService::start(config).await?;
+            let mut server = RpcServer::new(engine, log, args.secret).with_bittorrent(service);
+            if let Some(path) = args.session_file {
+                server = server.with_session(path).await?;
+            }
             if let Some(pid) = args.stop_with_process {
+                let watched = server.clone();
                 tokio::spawn(async move {
                     loop {
                         tokio::time::sleep(Duration::from_secs(3)).await;
                         if !process_alive(pid).await {
+                            // Save the session before the manager's exit takes us down too.
+                            let _ = watched.flush_session().await;
                             std::process::exit(0);
                         }
                     }
                 });
             }
-            let log = Arc::new(LogSink::new(args.log.as_deref())?);
-            let engine = Engine::new(log.clone())?;
-            let service = BtService::start(config).await?;
-            RpcServer::new(engine, log, args.secret)
-                .with_bittorrent(service)
-                .serve(args.port)
-                .await?;
+            let stopping = server.clone();
+            tokio::spawn(async move {
+                wait_for_termination().await;
+                // Leave the session file current before exiting.
+                let _ = stopping.flush_session().await;
+                std::process::exit(0);
+            });
+            server.serve(args.port).await?;
         }
         None => {
             println!("Nibiru Xtreme {VERSION}");
@@ -324,6 +340,28 @@ async fn run_aria2_compatible_rpc(args: &[String]) -> Result<()> {
         .with_bittorrent(service)
         .serve(port)
         .await
+}
+
+/// Returns when the process is asked to stop (Ctrl-C everywhere, SIGTERM on Unix).
+#[cfg(unix)]
+async fn wait_for_termination() {
+    use tokio::signal::unix::{SignalKind, signal};
+    match signal(SignalKind::terminate()) {
+        Ok(mut terminate) => {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = terminate.recv() => {}
+            }
+        }
+        Err(_) => {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_termination() {
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 #[cfg(unix)]
