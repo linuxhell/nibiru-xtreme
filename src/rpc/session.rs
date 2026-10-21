@@ -46,7 +46,6 @@ const KEPT_OPTIONS: &[&str] = &[
     "ssh-identity",
     "x-nibiru-ed2k-source",
     "x-nibiru-ed2k-obfuscation",
-    "referer",
     "user-agent",
 ];
 const SAFE_HEADERS: &[&str] = &["accept", "accept-language", "accept-encoding", "origin"];
@@ -313,6 +312,20 @@ mod tests {
         assert_eq!(kept["dir"], "/data");
         assert!(!kept.contains_key("continue"));
         assert_eq!(kept["header"], json!(["Accept: */*"]));
+    }
+
+    #[test]
+    fn referers_are_dropped_so_signed_urls_or_tokens_never_reach_the_session_file() {
+        let kept = persistable_options(
+            Some("https://example.test/file.bin"),
+            Some(&options(json!({
+                "referer": "https://example.test/watch?token=super-secret",
+                "user-agent": "Nibiru-Test"
+            }))),
+        )
+        .unwrap();
+        assert!(!kept.contains_key("referer"));
+        assert_eq!(kept["user-agent"], "Nibiru-Test");
     }
 
     #[test]
