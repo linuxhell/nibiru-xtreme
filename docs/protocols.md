@@ -68,6 +68,35 @@ exercise IPv6 transport/DHT and corrupted Merkle proofs. These loopback tests do
 not prove public tracker availability or NAT traversal. Hole punching and local
 service discovery remain unimplemented.
 
+## RPC task persistence
+
+`serve --session-file=PATH` keeps unfinished tasks across restarts. Without the flag
+nothing is written and `nibiru.getSessionInfo` reports `"persistent": false`.
+
+- **What is stored.** A task is written when it is not complete or removed: its GID,
+  source (URL, `.torrent` bytes, or magnet link) and configuration options (`dir`, `out`,
+  limits, `select-file`, seeding limits, `referer`, `user-agent`, CA/host-key settings).
+  The file is rewritten atomically (temporary file, fsync, rename) shortly after every
+  task change and at least every 5 seconds, and on SIGTERM/Ctrl-C and when the parent
+  process disappears. Unchanged content is not rewritten. On Unix it is mode `0600`.
+- **What is never stored.** Any task whose request carries credentials stays out of the
+  file: URL user info, cookies or any header other than `Accept*`/`Origin`, proxy
+  user names or passwords, proxy URLs with user info. Downloaded bytes are not trusted
+  because of this file either. After a restart the manager sees an unknown GID for such a
+  task and recreates it with fresh credentials, exactly as without persistence.
+- **Restore.** On start the engine recreates the stored tasks under their old GIDs, all
+  `paused`; none starts by itself. Resuming a direct task re-checks the saved HTTP
+  validator (a changed origin restarts it), and resuming a torrent re-hashes the payload
+  on disk. `nibiru.getSessionInfo` returns `persistent`, `restored` and `skipped`.
+- **Bad files.** An unreadable file or one with another `version` is moved to
+  `<name>.corrupt-<time>` and never overwritten; individual invalid or duplicate entries
+  are skipped and counted. At most 5,000 tasks and 16 MiB are read.
+- **Counters.** `getGlobalStat` reports real `numWaiting` and `numStopped`; `numStoppedTotal`
+  also counts results the manager purged with `removeResult`.
+- **Limits.** Completed results are not persisted (the manager keeps its own history).
+  Seeding torrents that already finished are not restored. Progress counters are not stored:
+  they are recomputed when a task resumes. Metadata-only magnet fetches are transient.
+
 ## Embedding without unused transports
 
 Cargo features `ftp`, `sftp`, and `http3` are enabled in the standalone build.

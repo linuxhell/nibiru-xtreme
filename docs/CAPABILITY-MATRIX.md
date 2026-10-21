@@ -75,16 +75,16 @@ Limites do ambiente que afetam a leitura:
 | Item | Situação | Evidência | Lacuna |
 | --- | --- | --- | --- |
 | `capabilities --json`, `serve`, namespace `nibiru.*`, identidade `nibiru-xtreme`, schema 1 | Existe | **T** `native_contract` (2) | — |
-| Métodos: `getVersion`, `addUri`, `addTorrent`, `tellStatus`, `pause`, `resume`, `remove`, `removeResult`, `changeOption`, `changeGlobalOption`, `tellActive/Waiting/Stopped`, `getGlobalStat`, `getFiles`, `getPeers`, `streamUrl` | Existem; aliases `aria2.*` também | **T** `rpc_contract`, `rpc_bittorrent`, `rpc_http_options` | `getGlobalStat` devolve `numWaiting`/`numStopped`/`numStoppedTotal` fixos em "0" |
+| Métodos: `getVersion`, `addUri`, `addTorrent`, `tellStatus`, `pause`, `resume`, `remove`, `removeResult`, `changeOption`, `changeGlobalOption`, `tellActive/Waiting/Stopped`, `getGlobalStat`, `getFiles`, `getPeers`, `streamUrl` | Existem; aliases `aria2.*` também | **T** `rpc_contract`, `rpc_bittorrent`, `rpc_http_options` | `getGlobalStat` agora devolve `numWaiting`/`numStopped`/`numStoppedTotal` reais (**T**); novo `nibiru.getSessionInfo` |
 | Subconjunto usado pelo ADM `main` com aria2 (`addUri`, `addTorrent`, `changeOption`, `changeGlobalOption`, `pause`, `unpause`, `remove`/`forceRemove`, `removeDownloadResult`, `tellStatus`, `getVersion`) | Coberto pelo Xtreme | comparação de `aria2.rs` da `main` com `src/rpc.rs` | O ADM ainda passa opções que o Xtreme ignora (`--input-file`/`--save-session`) |
-| Persistência da tabela de tarefas | **—**: fica em memória; `--save-session`/`--input-file` ignorados | `src/main.rs` | Perda de fila ao reiniciar o motor; o ADM recria tarefas, mas isso precisa ser definido e testado antes da troca |
+| Persistência da tabela de tarefas | **Existe** com `serve --session-file`: GIDs estáveis, tarefas restauradas pausadas, sem credenciais em disco, arquivo atômico e 0600 | **T** `rpc_session` (7): HTTP e torrent reiniciados, binário real morto com SIGKILL e recuperado, credenciais ausentes do arquivo, arquivo corrompido preservado, contadores | Só o namespace nativo; `--save-session`/`--input-file` do modo aria2 continuam ignorados; tarefas com credenciais não são restauradas (o ADM recria) |
 | Limite de conexões por `split` | Existe | **T** `rpc_http_options::split_and_server_caps_…` | — |
 | Encerrar com o processo pai (`--stop-with-process`) | Existe no Unix (`kill -0`) e Windows (`tasklist`) | Unix: **NT** direto; Windows: nunca executado | Validar no Windows |
 | Logs JSON Lines sem segredos | Existe `redact_url` (`engine.rs`) | **NT**: nenhum teste verifica a saída de log; não li todos os pontos de log | Teste de ausência de token, senha e query na saída |
 
 ## O que vem a seguir (ordem de prioridade da retomada)
 
-1. Persistência real das tarefas no RPC (sessão em disco com validação de identidade) e contadores globais reais.
+1. ~~Persistência real das tarefas no RPC e contadores globais reais~~ (feito nesta revisão, ver `docs/protocols.md`).
 2. Mover a sessão Kad para o motor e expor ED2K/Kad como tarefas do RPC; coordenar várias fontes por arquivo.
 3. Retomada em FTP/FTPS/SFTP.
 4. Hole punching e LSD **somente** com teste de interoperabilidade.
