@@ -94,9 +94,13 @@ struct SessionFile {
     tasks: Vec<Entry>,
 }
 
-fn has_user_info(raw: &str) -> bool {
+fn has_sensitive_url_state(raw: &str) -> bool {
     url::Url::parse(raw)
-        .map(|url| !url.username().is_empty() || url.password().is_some())
+        .map(|url| {
+            !url.username().is_empty()
+                || url.password().is_some()
+                || (url.scheme() != "magnet" && url.query().is_some())
+        })
         .unwrap_or(true)
 }
 
@@ -106,7 +110,7 @@ pub fn persistable_options(
     url: Option<&str>,
     options: Option<&Map<String, Value>>,
 ) -> Option<Map<String, Value>> {
-    if url.is_some_and(|url| !url.starts_with("magnet:") && has_user_info(url)) {
+    if url.is_some_and(has_sensitive_url_state) {
         return None;
     }
     let mut kept = Map::new();
@@ -129,7 +133,7 @@ pub fn persistable_options(
             }
             "all-proxy" | "http-proxy" | "https-proxy" => {
                 let proxy = value.as_str()?;
-                if !proxy.is_empty() && has_user_info(proxy) {
+                if !proxy.is_empty() && has_sensitive_url_state(proxy) {
                     return None;
                 }
                 kept.insert(key.clone(), value.clone());
@@ -312,6 +316,26 @@ mod tests {
         assert_eq!(kept["dir"], "/data");
         assert!(!kept.contains_key("continue"));
         assert_eq!(kept["header"], json!(["Accept: */*"]));
+    }
+
+    #[test]
+    fn signed_or_query_bearing_download_urls_are_not_persisted() {
+        for url in [
+            "https://example.test/file?token=secret",
+            "https://example.test/file?X-Amz-Signature=abc",
+            "ftp://example.test/file?session=1",
+        ] {
+            assert!(
+                persistable_options(Some(url), None).is_none(),
+                "{url} must stay out of the session file"
+            );
+        }
+        assert!(
+            persistable_options(Some("https://example.test/file"), None).is_some()
+        );
+        assert!(
+            persistable_options(Some("magnet:?xt=urn:btih:abc"), None).is_some()
+        );
     }
 
     #[test]
