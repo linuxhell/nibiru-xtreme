@@ -1,6 +1,6 @@
 //! Bounded Kad2 routing and direct-source lookup, independently implemented from the wire format.
 //! Uses plain Kad2 UDP with v5 HELLO and legacy endpoint challenges; no obfuscation or firewall callbacks.
-use super::{FileSource, kad_crypto, metadata::Node};
+use super::{Buddy, FileSource, kad_crypto, metadata::Node};
 use serde::Serialize;
 use std::{
     borrow::Cow,
@@ -1010,6 +1010,38 @@ impl KadSession {
             public_reachability_verified: false,
         }
     }
+    /// Asks a firewalled source's buddy (UDP, plain: its Kad version is unknown) to tell the
+    /// source to connect to our TCP port. The first attempt writes the published buddy hash as it
+    /// is; `alternate` writes the other byte layout in use by Kad software, for a retry.
+    pub async fn request_callback(
+        &self,
+        buddy: &Buddy,
+        file_hash: &[u8; 16],
+        tcp_port: u16,
+        alternate: bool,
+    ) -> Result<(), String> {
+        if !self.inner.running.load(Ordering::Acquire) {
+            return Err("kad_not_running".into());
+        }
+        if self.inner.blocked(buddy.ip) {
+            return Err("kad_buddy_blocked".into());
+        }
+        let id = if alternate {
+            swap_groups(&buddy.id)
+        } else {
+            buddy.id
+        };
+        let mut packet = vec![0xe4, 0x52];
+        packet.extend(id);
+        packet.extend(swap_groups(file_hash));
+        packet.extend(tcp_port.to_le_bytes());
+        self.inner
+            .socket
+            .send_to(&packet, (buddy.ip, buddy.udp_port))
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
     pub fn stop(&self) {
         let _ = self.shutdown.send(true);
         self.inner.running.store(false, Ordering::Release);
@@ -1094,6 +1126,11 @@ impl<'a> Reader<'a> {
         Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
     }
     fn tag(&mut self) -> Result<(u8, Option<u64>), String> {
+        self.tag_text().map(|(name, value, _)| (name, value))
+    }
+    /// Like `tag`, also returning the bytes of a string tag.
+    fn tag_text(&mut self) -> Result<(u8, Option<u64>, Option<&'a [u8]>), String> {
+        let mut text = None;
         let raw = self.byte()?;
         let kind = raw & 0x7f;
         let name = if raw & 0x80 != 0 {
@@ -1114,7 +1151,7 @@ impl<'a> Reader<'a> {
             }
             2 => {
                 let n = usize::from(self.u16()?);
-                self.take(n)?;
+                text = Some(self.take(n)?);
                 None
             }
             4 => {
@@ -1131,13 +1168,34 @@ impl<'a> Reader<'a> {
                 None
             }
             0x11..=0x26 => {
-                self.take(usize::from(kind - 0x10))?;
+                let n = usize::from(kind - 0x10);
+                text = Some(self.take(n)?);
                 None
             }
             _ => return Err("kad_unsupported_tag".into()),
         };
-        Ok((name, value))
+        Ok((name, value, text))
     }
+}
+/// 32 hexadecimal digits to 16 bytes.
+fn hex_id(text: &[u8]) -> Option<[u8; 16]> {
+    if text.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    for (i, byte) in out.iter_mut().enumerate() {
+        let pair = std::str::from_utf8(&text[i * 2..i * 2 + 2]).ok()?;
+        *byte = u8::from_str_radix(pair, 16).ok()?;
+    }
+    Some(out)
+}
+/// Reverses each 4-byte group: the two ways Kad software lays a 128-bit ID out in bytes.
+fn swap_groups(id: &[u8; 16]) -> [u8; 16] {
+    let mut out = *id;
+    for chunk in out.chunks_exact_mut(4) {
+        chunk.reverse();
+    }
+    out
 }
 fn source_response(
     bytes: &[u8],
@@ -1165,16 +1223,21 @@ fn source_response(
             return Err("kad_tag_limit".into());
         }
         let (mut host, mut port, mut kind, mut crypto) = (0u64, 0u64, 0u64, 0u64);
+        let (mut buddy_ip, mut buddy_port, mut buddy_id) = (0u64, 0u64, None);
         for _ in 0..tags {
-            let (name, value) = reader.tag()?;
+            let (name, value, text) = reader.tag_text()?;
             if let Some(value) = value {
                 match name {
                     0xfe => host = value,
                     0xfd => port = value,
                     0xff => kind = value,
                     0xf3 => crypto = value,
+                    0xfb => buddy_ip = value,
+                    0xfa => buddy_port = value,
                     _ => {}
                 }
+            } else if name == 0xf8 {
+                buddy_id = text.and_then(hex_id);
             }
         }
         // Only high-ID direct sources are usable here; buddy/UDP callbacks are not (yet).
@@ -1187,7 +1250,32 @@ fn source_response(
                 requires_callback: false,
                 user_hash: (user_hash != [0; 16]).then_some(user_hash),
                 crypt: (crypto & 0x07) as u8,
+                buddy: None,
             });
+        } else if matches!(kind, 3 | 5)
+            && port > 0
+            && port <= u64::from(u16::MAX)
+            && user_hash != [0; 16]
+            && let Some(id) = buddy_id
+        {
+            // A firewalled source: it cannot be dialled, but its buddy can be asked to make it
+            // connect to us. The buddy's own address is what must be a usable public one.
+            let buddy_ip = Ipv4Addr::from(u32::try_from(buddy_ip).unwrap_or(0).to_be_bytes());
+            if buddy_port > 0 && buddy_port <= u64::from(u16::MAX) && valid_ip(buddy_ip, local) {
+                result.push(FileSource {
+                    client_id: 1,
+                    host: None,
+                    port: port as u16,
+                    requires_callback: true,
+                    user_hash: Some(user_hash),
+                    crypt: (crypto & 0x07) as u8,
+                    buddy: Some(Buddy {
+                        ip: buddy_ip,
+                        udp_port: buddy_port as u16,
+                        id,
+                    }),
+                });
+            }
         }
     }
     if !reader.0.is_empty() {
@@ -1221,6 +1309,96 @@ mod tests {
         data.extend(4662u16.to_le_bytes());
         data.extend([0x89, 0xff, kind]);
         data
+    }
+    fn buddy_sources_packet(peer: Id, target: Id, kind: u8, buddy_hash: &str) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend(peer);
+        data.extend(target);
+        data.extend(1u16.to_le_bytes());
+        data.extend([7; 16]); // the source's own id (its user hash)
+        data.push(6);
+        data.extend([0x83, 0xfe]);
+        data.extend(u32::from_be_bytes([10, 1, 1, 1]).to_le_bytes()); // the firewalled source (unused)
+        data.extend([0x88, 0xfd]);
+        data.extend(4662u16.to_le_bytes());
+        data.extend([0x89, 0xff, kind]);
+        data.extend([0x83, 0xfb]);
+        data.extend(u32::from_be_bytes([203, 0, 113, 9]).to_le_bytes()); // the buddy's address
+        data.extend([0x88, 0xfa]);
+        data.extend(4672u16.to_le_bytes());
+        // Ordinary string tag (type 2 with a one-byte name 0xf8), 32 hexadecimal digits.
+        data.extend([0x82, 0xf8]);
+        data.extend((buddy_hash.len() as u16).to_le_bytes());
+        data.extend(buddy_hash.as_bytes());
+        data
+    }
+    #[test]
+    fn firewalled_sources_with_a_buddy_become_callback_sources() {
+        let (peer, target) = ([8; 16], [9; 16]);
+        let hash = "00112233445566778899aabbccddeeff";
+        for kind in [3u8, 5] {
+            let sources = source_response(
+                &buddy_sources_packet(peer, target, kind, hash),
+                peer,
+                target,
+                false,
+            )
+            .unwrap();
+            assert_eq!(sources.len(), 1, "type {kind}");
+            let source = &sources[0];
+            assert!(source.requires_callback && source.host.is_none());
+            assert_eq!(source.port, 4662);
+            assert_eq!(source.user_hash, Some([7; 16]));
+            let buddy = source.buddy.as_ref().unwrap();
+            assert_eq!(buddy.ip, Ipv4Addr::new(203, 0, 113, 9));
+            assert_eq!(buddy.udp_port, 4672);
+            assert_eq!(buddy.id[..4], [0x00, 0x11, 0x22, 0x33]);
+        }
+        // A private buddy address, a malformed hash or a direct type with a buddy tag are not callbacks.
+        let private = buddy_sources_packet(peer, target, 3, hash)
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            source_response(&private, peer, target, true).unwrap().len(),
+            1
+        );
+        assert!(
+            source_response(
+                &buddy_sources_packet(peer, target, 3, "zz112233445566778899aabbccddeeff"),
+                peer,
+                target,
+                false
+            )
+            .unwrap()
+            .is_empty()
+        );
+    }
+    #[tokio::test]
+    async fn callback_requests_carry_the_buddy_id_file_hash_and_tcp_port_in_either_layout() {
+        let root = tempfile::tempdir().unwrap();
+        let session = unseeded_session(root.path().join("routing.json")).await;
+        let buddy = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target = Buddy {
+            ip: Ipv4Addr::LOCALHOST,
+            udp_port: buddy.local_addr().unwrap().port(),
+            id: *b"ABCDEFGHIJKLMNOP",
+        };
+        let file = *b"0123456789abcdef";
+        for (alternate, expected_id) in
+            [(false, *b"ABCDEFGHIJKLMNOP"), (true, *b"DCBAHGFELKJIPONM")]
+        {
+            session
+                .request_callback(&target, &file, 4662, alternate)
+                .await
+                .unwrap();
+            let (packet, _) = recv_packet(&buddy).await;
+            assert_eq!(&packet[..2], &[0xe4, 0x52]);
+            assert_eq!(&packet[2..18], &expected_id);
+            assert_eq!(&packet[18..34], b"32107654ba98fedc");
+            assert_eq!(&packet[34..], &4662u16.to_le_bytes());
+        }
+        session.stop();
     }
     // Fixtures construct the wire independently of the production packet writers.
     fn fixture_hello(opcode: u8, id: Id, version: u8) -> Vec<u8> {

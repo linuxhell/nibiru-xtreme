@@ -562,6 +562,7 @@ mod tests {
             requires_callback: false,
             user_hash: None,
             crypt: 0,
+            buddy: None,
         };
         let mut peer = Peer::connect(
             &source,

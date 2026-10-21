@@ -39,6 +39,18 @@ pub struct FileSource {
     /// eMule "crypt options" byte: 0x01 supports obfuscation, 0x02 requests it, 0x04 requires it.
     #[serde(default)]
     pub crypt: u8,
+    /// A firewalled Kad source is reached through its buddy: a UDP callback request asks the
+    /// buddy to tell the source to connect to us.
+    #[serde(default)]
+    pub buddy: Option<Buddy>,
+}
+/// The Kad buddy that relays callback requests to a firewalled source.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Buddy {
+    pub ip: std::net::Ipv4Addr,
+    pub udp_port: u16,
+    /// The buddy hash as published (16 bytes of the hex string).
+    pub id: [u8; 16],
 }
 impl FileSource {
     /// A directly reachable source with nothing known about obfuscation.
@@ -50,6 +62,7 @@ impl FileSource {
             requires_callback: false,
             user_hash: None,
             crypt: 0,
+            buddy: None,
         }
     }
     /// Whether obfuscation can be used with this source (its hash is known and it supports it).
@@ -108,6 +121,7 @@ fn file_sources(
             requires_callback: low_id,
             user_hash,
             crypt,
+            buddy: None,
         });
     }
     if with_obfuscation {

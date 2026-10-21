@@ -133,6 +133,7 @@ async fn nibiru_downloads_a_two_part_file_from_a_nibiru_listener() {
         requires_callback: false,
         user_hash: None,
         crypt: 0,
+        buddy: None,
     };
     let path = download_from_sources(
         &f.link,

@@ -397,7 +397,7 @@ async fn start_ed2k(
     log: &Arc<LogSink>,
 ) -> Result<Arc<nibiru_xtreme::rpc::ed2k::Ed2kService>> {
     use nibiru_xtreme::{
-        ed2k::{kad_session::KadSession, metadata},
+        ed2k::metadata,
         rpc::ed2k::{Ed2kConfig, Ed2kService},
     };
     let state = args
@@ -429,36 +429,23 @@ async fn start_ed2k(
             description: String::new(),
         });
     }
-    let kad = match &args.ed2k_nodes_file {
-        Some(file) => {
-            let seeds = metadata::parse_nodes(&std::fs::read(file)?)?;
-            let session = KadSession::start(
-                identity,
-                args.ed2k_tcp_port,
-                state.join("kad-routing.json"),
-                seeds,
-                false,
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("cannot start Kad: {e}"))?;
-            log.info(
-                "ed2k.kad_started",
-                &format!("udp_port={}", session.status().udp_port),
-            );
-            Some(session)
-        }
-        None => None,
-    };
     let service = Ed2kService::new(Ed2kConfig {
         default_dir: args.dir.clone(),
         identity,
         tcp_port: args.ed2k_tcp_port,
         obfuscation: args.ed2k_obfuscation,
         servers,
-        kad,
+        kad: None,
     });
     let port = service.start_listener().await?;
     log.info("ed2k.listening", &format!("tcp_port={port}"));
+    if let Some(file) = &args.ed2k_nodes_file {
+        let seeds = metadata::parse_nodes(&std::fs::read(file)?)?;
+        service
+            .start_kad(seeds, state.join("kad-routing.json"))
+            .await?;
+        log.info("ed2k.kad_started", "joined Kad");
+    }
     Ok(service)
 }
 

@@ -56,6 +56,8 @@ pub struct Ed2kService {
     config: Ed2kConfig,
     /// Accepts incoming peers: required for High-ID, server callbacks and (later) uploads.
     listener: std::sync::OnceLock<Arc<IncomingListener>>,
+    /// Kad session started after the listener, so it announces the port really in use.
+    kad_late: std::sync::OnceLock<Arc<KadSession>>,
     /// The ED2K server session kept open for callbacks; one lookup at a time uses it.
     server: tokio::sync::Mutex<Option<ServerConnection>>,
     tasks: Mutex<HashMap<String, Task>>,
@@ -107,6 +109,7 @@ impl Ed2kService {
         Arc::new(Self {
             config,
             listener: std::sync::OnceLock::new(),
+            kad_late: std::sync::OnceLock::new(),
             server: tokio::sync::Mutex::new(None),
             tasks: Mutex::new(HashMap::new()),
             changed: Mutex::new(None),
@@ -164,10 +167,35 @@ impl Ed2kService {
     }
 
     pub fn kad_status(&self) -> Option<Value> {
+        self.kad()
+            .and_then(|k| serde_json::to_value(k.status()).ok())
+    }
+
+    fn kad(&self) -> Option<Arc<KadSession>> {
         self.config
             .kad
-            .as_ref()
-            .and_then(|k| serde_json::to_value(k.status()).ok())
+            .clone()
+            .or_else(|| self.kad_late.get().cloned())
+    }
+
+    /// Joins Kad on the TCP port the listener really has (call after `start_listener`).
+    pub async fn start_kad(
+        &self,
+        seeds: Vec<crate::ed2k::metadata::Node>,
+        state: PathBuf,
+    ) -> Result<()> {
+        let session = KadSession::start(
+            self.config.identity,
+            self.announced_port(),
+            state,
+            seeds,
+            false,
+        )
+        .await
+        .map_err(|e| anyhow!("cannot start Kad: {e}"))?;
+        session.set_obfuscation(self.config.obfuscation != Obfuscation::Disabled);
+        let _ = self.kad_late.set(session);
+        Ok(())
     }
 
     pub fn owns(&self, gid: &str) -> bool {
@@ -351,7 +379,7 @@ impl Ed2kService {
             }
         }
         drop(guard);
-        if let Some(kad) = &self.config.kad
+        if let Some(kad) = self.kad()
             && let Ok(Ok(list)) =
                 tokio::time::timeout(SOURCE_DISCOVERY_TIMEOUT, kad.sources(file.hash, file.size))
                     .await
@@ -378,12 +406,20 @@ impl Ed2kService {
         let (sources, server) = self.discover(file, extra).await;
         // A Low-ID source is reached by asking the server to make it call us back, which needs our
         // listener and a High-ID server session.
-        let callbacks = match (self.listener.get(), server.as_ref()) {
-            (Some(listener), Some(server)) if !server.is_low_id() => {
-                Some(CallbackClient::new(server.clone(), listener.callbacks()))
+        let callbacks = self.listener.get().and_then(|listener| {
+            let registry = listener.callbacks();
+            let port = listener.status().tcp_port;
+            let by_server = server
+                .as_ref()
+                .filter(|server| !server.is_low_id())
+                .map(|server| CallbackClient::new(server.clone(), registry.clone()));
+            match (by_server, self.kad()) {
+                (Some(client), Some(kad)) => Some(client.with_kad(kad, port)),
+                (Some(client), None) => Some(client),
+                (None, Some(kad)) => Some(CallbackClient::kad_only(registry, kad, port)),
+                (None, None) => None,
             }
-            _ => None,
-        };
+        });
         let client_id = server.as_ref().map_or(0, |s| s.client_id);
         ensure!(
             cancel.load(Ordering::Acquire) || !sources.is_empty(),
@@ -537,7 +573,7 @@ impl Ed2kService {
         for task in self.tasks.lock().unwrap().values() {
             task.cancel.store(true, Ordering::Release);
         }
-        if let Some(kad) = &self.config.kad {
+        if let Some(kad) = self.kad() {
             kad.stop();
         }
     }

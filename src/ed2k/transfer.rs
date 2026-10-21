@@ -575,6 +575,7 @@ pub(crate) mod tests {
                 requires_callback: false,
                 user_hash: None,
                 crypt: 0,
+                buddy: None,
             },
             requested,
             handle,
@@ -752,6 +753,7 @@ pub(crate) mod tests {
             requires_callback: false,
             user_hash: None,
             crypt: 0,
+            buddy: None,
         };
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(1),
