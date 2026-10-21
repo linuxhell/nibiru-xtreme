@@ -6,6 +6,7 @@ use reqwest::{
     redirect::Policy,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     fs::OpenOptions as StdOpenOptions,
     path::{Path, PathBuf},
@@ -41,6 +42,12 @@ struct HttpIdentity {
     modified: Option<String>,
     total: Option<u64>,
 }
+
+fn url_identity(url: &Url) -> String {
+    let digest = Sha256::digest(url.as_str().as_bytes());
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 impl HttpIdentity {
     fn response(origin: &Url, response: &reqwest::Response) -> Self {
         let header = |key| {
@@ -52,18 +59,15 @@ impl HttpIdentity {
                 .map(str::to_owned)
         };
         Self {
-            origin: origin.to_string(),
-            final_url: response.url().to_string(),
+            origin: url_identity(origin),
+            final_url: url_identity(response.url()),
             etag: header(ETAG).filter(|v| !v.starts_with("W/")),
             modified: header(LAST_MODIFIED),
             total: response.content_length(),
         }
     }
-    fn matches(&self, response: &reqwest::Response) -> bool {
-        let actual = Self::response(
-            &Url::parse(&self.origin).expect("validated HTTP origin"),
-            response,
-        );
+    fn matches(&self, origin: &Url, response: &reqwest::Response) -> bool {
+        let actual = Self::response(origin, response);
         self.final_url == actual.final_url
             && self.etag.as_ref().map_or_else(
                 || self.modified.is_some() && self.modified == actual.modified,
@@ -508,7 +512,7 @@ impl Engine {
             let saved: HttpIdentity = serde_json::from_slice(&fs::read(&identity_path).await?)
                 .context("invalid HTTP resume identity")?;
             anyhow::ensure!(
-                saved.origin == parsed.as_str()
+                saved.origin == url_identity(&parsed)
                     && (saved.etag.is_some() || saved.modified.is_some()),
                 "cannot safely resume without the same origin and validator"
             );
@@ -560,7 +564,7 @@ impl Engine {
                 .await
                 .map_err(reqwest::Error::without_url)?;
             if head.status().is_success()
-                && saved.matches(&head)
+                && saved.matches(&parsed, &head)
                 && head
                     .headers()
                     .get(CONTENT_LENGTH)
@@ -583,7 +587,7 @@ impl Engine {
         }
         if let Some(saved) = &saved {
             anyhow::ensure!(
-                status == StatusCode::PARTIAL_CONTENT && saved.matches(&response),
+                status == StatusCode::PARTIAL_CONTENT && saved.matches(&parsed, &response),
                 "HTTP source changed or ignored validated resume; existing file preserved"
             );
             let content_range = response
@@ -1246,10 +1250,23 @@ pub fn safe_output_name(value: &str) -> bool {
 mod tests {
     use super::{
         MAX_HTTP_RANGE_SIZE, RANGE_CHUNK_SIZE, claim_range, safe_output_name,
-        suggested_worker_count, validate_content_range,
+        suggested_worker_count, url_identity, validate_content_range,
     };
+    use url::Url;
     use reqwest::header::HeaderValue;
     use std::sync::{Arc, atomic::AtomicU64};
+
+    #[test]
+    fn http_resume_identity_never_stores_url_secrets_in_cleartext() {
+        let origin =
+            Url::parse("https://user:pass@example.test/file?token=secret#fragment").unwrap();
+        let fingerprint = url_identity(&origin);
+        assert_eq!(fingerprint.len(), 64);
+        assert!(!fingerprint.contains("secret"));
+        assert!(!fingerprint.contains("user"));
+        assert!(!fingerprint.contains("example.test"));
+        assert_eq!(fingerprint, url_identity(&origin));
+    }
 
     #[test]
     fn concurrent_range_claims_cover_file_once_and_shrink_at_tail() {
