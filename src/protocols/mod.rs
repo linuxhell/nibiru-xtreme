@@ -9,7 +9,7 @@ pub(crate) mod sftp;
 mod streaming;
 use std::path::PathBuf;
 #[cfg(any(feature = "ftp", feature = "sftp", feature = "http3"))]
-pub(crate) use streaming::{StagedFile, operation};
+pub(crate) use streaming::{ResumeMismatch, StagedFile, Validator, operation};
 
 #[derive(Clone, Default)]
 pub struct TransportOptions {

@@ -1,4 +1,4 @@
-use super::{StagedFile, TransportOptions, decoded, operation};
+use super::{ResumeMismatch, StagedFile, TransportOptions, Validator, decoded, operation};
 use crate::{engine::Progress, logging::LogSink};
 use anyhow::{Context, Result, bail};
 use std::path::Path;
@@ -15,6 +15,27 @@ use suppaftp::{
 use url::Url;
 
 pub(crate) async fn download<F>(
+    url: &Url,
+    destination: &Path,
+    options: &TransportOptions,
+    cancel: &AtomicBool,
+    log: &LogSink,
+    on_progress: &mut F,
+) -> Result<()>
+where
+    F: FnMut(Progress) + Send,
+{
+    // A server that does not continue a saved partial invalidates it; try once from scratch.
+    match download_once(url, destination, options, cancel, log, on_progress).await {
+        Err(error) if error.downcast_ref::<ResumeMismatch>().is_some() => {
+            log.warn("transfer.resume_rejected", "restarting from the beginning");
+            download_once(url, destination, options, cancel, log, on_progress).await
+        }
+        other => other,
+    }
+}
+
+async fn download_once<F>(
     url: &Url,
     destination: &Path,
     options: &TransportOptions,
@@ -43,6 +64,13 @@ where
         decoded(url.username())?
     };
     let password = decoded(url.password().unwrap_or("anonymous@"))?;
+    let key = format!(
+        "{}://{}:{}{}",
+        url.scheme(),
+        host,
+        url.port_or_known_default().unwrap_or(0),
+        path
+    );
     let tls = url.scheme() != "ftp";
     let implicit = url.scheme() == "ftps";
     let port = url.port().unwrap_or(if implicit { 990 } else { 21 });
@@ -79,6 +107,7 @@ where
             &user,
             &password,
             &path,
+            &key,
             destination,
             cancel,
             log,
@@ -101,6 +130,7 @@ where
             &user,
             &password,
             &path,
+            &key,
             destination,
             cancel,
             log,
@@ -116,6 +146,7 @@ async fn transfer<T, F>(
     user: &str,
     password: &str,
     path: &str,
+    key: &str,
     destination: &Path,
     cancel: &AtomicBool,
     log: &LogSink,
@@ -141,10 +172,47 @@ where
         Ok(ftp.size(path).await.ok().map(|n| n as u64))
     })
     .await?;
-    let mut staged = StagedFile::new(destination, total).await?;
-    let mut stream = operation(cancel, async { Ok(ftp.retr_as_stream(path).await?) })
-        .await
-        .context("FTP RETR failed")?;
+    // A known size makes the partial resumable; the modification time (when MDTM exists)
+    // guards against the file having been replaced by one of the same length.
+    let (mut staged, offset) = match total {
+        Some(size) => {
+            let mtime = operation(cancel, async {
+                Ok(ftp.mdtm(path).await.ok().map(|t| t.to_string()))
+            })
+            .await?;
+            let validator = Validator {
+                key: key.to_owned(),
+                size,
+                mtime,
+            };
+            StagedFile::resumable(destination, &validator).await?
+        }
+        None => (StagedFile::new(destination, None).await?, 0),
+    };
+    if offset > 0 {
+        log.info(
+            "transfer.resuming",
+            &format!("protocol=ftp offset={offset}"),
+        );
+        // The REST is sent with RETR; a server that refuses it fails that RETR (and the pending
+        // offset is consumed), so a plain RETR from byte 0 follows.
+        ftp.resume_transfer(offset as usize).await?;
+    }
+    let first = operation(cancel, async { Ok(ftp.retr_as_stream(path).await) }).await?;
+    let mut stream = match first {
+        Ok(stream) => stream,
+        Err(suppaftp::FtpError::UnexpectedResponse(_)) if offset > 0 => {
+            log.warn(
+                "transfer.resume_unsupported",
+                "REST was refused; starting over",
+            );
+            staged.restart().await?;
+            operation(cancel, async { Ok(ftp.retr_as_stream(path).await?) })
+                .await
+                .context("FTP RETR failed")?
+        }
+        Err(error) => return Err(error).context("FTP RETR failed"),
+    };
     staged
         .copy(&mut stream, cancel, log, "ftp", on_progress)
         .await?;

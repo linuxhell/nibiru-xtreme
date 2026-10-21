@@ -37,9 +37,9 @@ Limites do ambiente que afetam a leitura:
 | Cabeçalhos, referer, UA, cookies por cabeçalho, proxy HTTP, limite por tarefa e global, `split`/limites por servidor | Existe | **T** `rpc_http_options` | `load-cookies` (arquivo) não suportado |
 | Autenticação HTTP (credenciais na URL / `Authorization`) | Aceita pelo cabeçalho `header` do RPC | **NT**: nenhum teste exercita autenticação HTTP (só FTP e SFTP têm testes de senha) | Escrever teste; Digest/NTLM não avaliados |
 | HTTP/3 (QUIC) explícito, sem queda silenciosa | Existe | **T** `http3_transfer` (2) com servidor QUIC local e certificado não confiável rejeitado | Sem teste contra servidor HTTP/3 público; escolha automática de protocolo não existe (só `--http3-only`) |
-| FTP (PASV/EPSV, proteção contra endereço de terceiros) | Existe | **T** `direct_protocols` (5): exatidão, falhas sem publicar, cancelamento com servidor parado, injeção de comando | **Sem retomada**; cada tentativa recomeça |
-| FTPS explícito e implícito, validação de certificado | Existe | **T** `direct_protocols` | Sem retomada; sem teste contra servidor público |
-| SFTP com fingerprint obrigatório | Existe | **T** `sftp_transfer` (1) | **Sem retomada**; autenticação só senha ou chave OpenSSH sem senha; sem agente/chave cifrada |
+| FTP (PASV/EPSV, proteção contra endereço de terceiros) | Existe, **com retomada** (REST) | **T** `direct_protocols` (9): exatidão, falhas sem publicar, cancelamento com servidor parado, injeção de comando, retomada, REST recusado, REST ignorado, arquivo remoto alterado | Só contra servidor de teste próprio; sem servidor FTP independente |
+| FTPS explícito e implícito, validação de certificado | Existe; explícito com retomada **T**; implícito usa o mesmo caminho | **T** `direct_protocols` | Retomada em FTPS implícito não tem teste próprio; sem teste contra servidor público |
+| SFTP com fingerprint obrigatório | Existe, **com retomada** (leitura a partir do deslocamento) | **T** `sftp_transfer` (3): senha/fingerprint/tamanho, retomada, arquivo remoto alterado | Autenticação só senha ou chave OpenSSH sem senha; sem agente/chave cifrada; sem OpenSSH independente como servidor |
 | WebDAV | **Só alias** de GET para `webdav(s)://` | código `engine.rs` | Coleções, locks, PROPFIND e escrita ausentes; documentar como "GET de arquivo único" |
 
 ## BitTorrent e peers
@@ -87,6 +87,6 @@ Limites do ambiente que afetam a leitura:
 
 1. ~~Persistência real das tarefas no RPC e contadores globais reais~~ (feito nesta revisão, ver `docs/protocols.md`).
 2. ~~Mover a sessão Kad para o motor e expor ED2K/Kad no RPC~~ (feito); várias fontes por arquivo (feito); resta validar contra aMule/rede real.
-3. Retomada em FTP/FTPS/SFTP.
+3. ~~Retomada em FTP/FTPS/SFTP~~ (feito; ver `docs/protocols.md`).
 4. Hole punching e LSD **somente** com teste de interoperabilidade.
 5. CI do Xtreme em Windows e macOS com IPv6; desempenho contra o aria2-ultra que o ADM usa.

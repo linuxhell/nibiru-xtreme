@@ -205,3 +205,25 @@ Incoming TCP tests exercise the advertised identity and no-file responses. A rea
 TCP server/callback fixture requests a Low-ID source through OP_CALLBACKREQUEST,
 rejects routing an unrelated incoming client ID, then completes and verifies the
 requested file over the matching incoming connection.
+
+
+## Retomada de FTP, FTPS e SFTP
+
+Uma transferência FTP/FTPS/SFTP interrompida (cancelamento, queda de conexão, resposta truncada,
+`pause`) deixa o parcial ao lado do destino e a próxima tentativa o continua:
+
+- Arquivos: `.<nome>.nibiru-part` (dados) e `.<nome>.nibiru-part.json` (validador). O destino só
+  aparece quando o arquivo está completo, validado e sincronizado, sem sobrescrever outro arquivo.
+- O validador guarda `protocolo://host:porta/caminho`, o tamanho e, quando existe, a data de
+  modificação (`MDTM` no FTP, `mtime` no SFTP). **Nunca** guarda usuário, senha, query nem fragmento.
+- Só há retomada quando o servidor informa o tamanho. Validador diferente descarta o parcial.
+- Para não confiar em bytes que a queda pode ter deixado incompletos, a retomada volta até 8 MiB
+  antes do fim do parcial, baixa de novo esse trecho e o **compara byte a byte**. Se diferir (arquivo
+  remoto trocado por outro do mesmo tamanho, ou servidor que ignorou o `REST`), o parcial é
+  descartado e o arquivo é baixado do início uma vez. O parcial é sincronizado a cada 4 MiB e
+  quando a cópia falha.
+- FTP: o deslocamento é enviado com `REST`; se o servidor o recusar, a mesma conexão repete o
+  `RETR` do byte 0. SFTP: `seek` no handle remoto.
+- Limite conhecido: o trecho anterior ao overlap não é recomparado; um servidor que troque o
+  conteúdo mantendo tamanho e data e preserve os últimos 8 MiB passaria despercebido. HTTP usa
+  ETag/Last-Modified e é tratado à parte.

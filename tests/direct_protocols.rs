@@ -38,8 +38,20 @@ enum Fault {
     Stall,
     BadPassword,
     NoSize,
+    /// Sends this many bytes of the requested range, then fails the transfer (426).
+    DropAfter(usize),
+    /// Answers REST with 502, so the client has to start over.
+    NoRest,
+    /// Accepts REST but still sends the file from byte 0.
+    IgnoreRest,
 }
+type FaultCell = Arc<std::sync::Mutex<Fault>>;
 struct FtpFixture {
+    fault: FaultCell,
+    /// Offsets received through REST, in order.
+    rests: Arc<std::sync::Mutex<Vec<usize>>>,
+    /// Changing it replaces the file served (same name), to simulate a changed remote file.
+    data: Arc<std::sync::Mutex<Arc<Vec<u8>>>>,
     address: std::net::SocketAddr,
     cert: PathBuf,
     task: tokio::task::JoinHandle<()>,
@@ -52,6 +64,18 @@ impl Drop for FtpFixture {
 }
 
 async fn ftp_fixture(secure: bool, implicit: bool, fault: Fault) -> FtpFixture {
+    ftp_fixture_with(secure, implicit, fault, payload()).await
+}
+async fn ftp_fixture_with(
+    secure: bool,
+    implicit: bool,
+    fault: Fault,
+    data: Arc<Vec<u8>>,
+) -> FtpFixture {
+    let fault: FaultCell = Arc::new(std::sync::Mutex::new(fault));
+    let rests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let data = Arc::new(std::sync::Mutex::new(data));
+    let (fault_cell, rests_cell, data_cell) = (fault.clone(), rests.clone(), data.clone());
     let root = tempfile::tempdir().unwrap();
     let certified =
         rcgen::generate_simple_self_signed(vec!["localhost".into(), "127.0.0.1".into()]).unwrap();
@@ -77,8 +101,10 @@ async fn ftp_fixture(secure: bool, implicit: bool, fault: Fault) -> FtpFixture {
                 break;
             };
             let acceptor = acceptor.clone();
+            let (fault, rests, data) = (fault_cell.clone(), rests_cell.clone(), data_cell.clone());
             tokio::spawn(async move {
                 let _: Result<()> = async {
+                    let mut rest = 0usize;
                     let mut conn: Connection = if implicit {
                         BufReader::new(Box::new(acceptor.accept(stream).await?))
                     } else {
@@ -94,6 +120,8 @@ async fn ftp_fixture(secure: bool, implicit: bool, fault: Fault) -> FtpFixture {
                         }
                         let cmd = line.trim_end_matches(['\r', '\n']);
                         let (verb, arg) = cmd.split_once(' ').unwrap_or((cmd, ""));
+                        let fault_now = *fault.lock().unwrap();
+                        let fault = fault_now;
                         let reply = match verb {
                             "AUTH" if secure && !tls => {
                                 conn.write_all(b"234 TLS ready\r\n").await?;
@@ -111,9 +139,17 @@ async fn ftp_fixture(secure: bool, implicit: bool, fault: Fault) -> FtpFixture {
                             "PBSZ" | "PROT" | "TYPE" => "200 OK\r\n",
                             "SIZE" if matches!(fault, Fault::NoSize) => "502 SIZE unsupported\r\n",
                             "SIZE" => {
-                                conn.write_all(format!("213 {}\r\n", payload().len()).as_bytes())
+                                let length = data.lock().unwrap().len();
+                                conn.write_all(format!("213 {length}\r\n").as_bytes())
                                     .await?;
                                 continue;
+                            }
+                            "MDTM" => "213 20260101120000\r\n",
+                            "REST" if matches!(fault, Fault::NoRest) => "502 REST unsupported\r\n",
+                            "REST" => {
+                                rest = arg.parse()?;
+                                rests.lock().unwrap().push(rest);
+                                "350 Restarting\r\n"
                             }
                             "PASV" => {
                                 let data = TcpListener::bind("127.0.0.1:0").await?;
@@ -145,24 +181,33 @@ async fn ftp_fixture(secure: bool, implicit: bool, fault: Fault) -> FtpFixture {
                             "RETR" => {
                                 assert_eq!(arg, "/folder/payload file.bin");
                                 conn.write_all(b"150 Opening data channel\r\n").await?;
-                                let (data, _) = passive.take().unwrap().accept().await?;
-                                let mut data: Box<dyn Io> = if secure {
-                                    Box::new(acceptor.accept(data).await?)
+                                let (channel, _) = passive.take().unwrap().accept().await?;
+                                let mut channel: Box<dyn Io> = if secure {
+                                    Box::new(acceptor.accept(channel).await?)
                                 } else {
-                                    Box::new(data)
+                                    Box::new(channel)
                                 };
                                 if matches!(fault, Fault::Stall) {
                                     tokio::time::sleep(Duration::from_secs(5)).await;
                                 }
-                                let payload = payload();
-                                let body = if matches!(fault, Fault::Truncated) {
-                                    &payload[..123]
+                                let payload = data.lock().unwrap().clone();
+                                let from = if matches!(fault, Fault::IgnoreRest) {
+                                    0
                                 } else {
-                                    &payload[..]
+                                    rest
                                 };
-                                let _ = data.write_all(body).await;
-                                let _ = data.shutdown().await;
-                                if matches!(fault, Fault::RejectedCompletion) {
+                                rest = 0;
+                                let body = match fault {
+                                    Fault::Truncated => &payload[..123],
+                                    Fault::DropAfter(n) => {
+                                        &payload[from..(from + n).min(payload.len())]
+                                    }
+                                    _ => &payload[from..],
+                                };
+                                let _ = channel.write_all(body).await;
+                                let _ = channel.shutdown().await;
+                                if matches!(fault, Fault::RejectedCompletion | Fault::DropAfter(_))
+                                {
                                     "426 Transfer failed\r\n"
                                 } else {
                                     "226 Transfer complete\r\n"
@@ -183,6 +228,9 @@ async fn ftp_fixture(secure: bool, implicit: bool, fault: Fault) -> FtpFixture {
         }
     });
     FtpFixture {
+        fault,
+        rests,
+        data,
         address,
         cert,
         task,
@@ -308,4 +356,136 @@ async fn ftp_rejects_command_injection_before_connecting() {
                 .contains("control characters")
         );
     }
+}
+
+const MIB: usize = 1024 * 1024;
+fn big_payload(salt: u8) -> Arc<Vec<u8>> {
+    Arc::new(
+        (0..20 * MIB)
+            .map(|i| ((i % 251) as u8).wrapping_add(salt))
+            .collect(),
+    )
+}
+fn partial_of(fixture: &FtpFixture) -> (PathBuf, PathBuf) {
+    (
+        fixture.root.path().join(".result.bin.nibiru-part"),
+        fixture.root.path().join(".result.bin.nibiru-part.json"),
+    )
+}
+async fn attempt(fixture: &FtpFixture, scheme: &str, trust: bool) -> Result<()> {
+    let options = TransportOptions {
+        ca_certificate: trust.then_some(fixture.cert.clone()),
+        ..Default::default()
+    };
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        engine(options).download(
+            DownloadRequest {
+                url: format!(
+                    "{scheme}://user:p%40ss@{}/folder/payload%20file.bin",
+                    fixture.address
+                ),
+                destination: fixture.root.path().join("result.bin"),
+            },
+            Arc::new(AtomicBool::new(false)),
+            |_| {},
+        ),
+    )
+    .await
+    .unwrap()
+}
+fn set_fault(fixture: &FtpFixture, fault: Fault) {
+    *fixture.fault.lock().unwrap() = fault;
+}
+
+#[tokio::test]
+async fn ftp_and_explicit_ftps_resume_from_the_kept_partial() {
+    for (scheme, secure) in [("ftp", false), ("ftpes", true)] {
+        let data = big_payload(0);
+        let fixture =
+            ftp_fixture_with(secure, false, Fault::DropAfter(12 * MIB), data.clone()).await;
+        assert!(attempt(&fixture, scheme, secure).await.is_err());
+        let (part, meta) = partial_of(&fixture);
+        assert_eq!(std::fs::metadata(&part).unwrap().len(), 12 * MIB as u64);
+        assert!(!fixture.root.path().join("result.bin").exists());
+        let saved = std::fs::read_to_string(&meta).unwrap();
+        assert!(
+            !saved.contains("p@ss") && !saved.contains("p%40ss") && !saved.contains("user:"),
+            "credentials leaked into the sidecar: {saved}"
+        );
+
+        set_fault(&fixture, Fault::None);
+        attempt(&fixture, scheme, secure).await.unwrap();
+        assert_eq!(
+            std::fs::read(fixture.root.path().join("result.bin")).unwrap(),
+            *data
+        );
+        // Continues 8 MiB before the end of the kept bytes and compares that overlap.
+        assert_eq!(*fixture.rests.lock().unwrap(), vec![4 * MIB]);
+        assert!(!part.exists() && !meta.exists());
+    }
+}
+
+#[tokio::test]
+async fn ftp_starts_over_when_the_server_refuses_rest() {
+    let data = big_payload(0);
+    let fixture = ftp_fixture_with(false, false, Fault::DropAfter(12 * MIB), data.clone()).await;
+    assert!(attempt(&fixture, "ftp", false).await.is_err());
+    set_fault(&fixture, Fault::NoRest);
+    attempt(&fixture, "ftp", false).await.unwrap();
+    assert_eq!(
+        std::fs::read(fixture.root.path().join("result.bin")).unwrap(),
+        *data
+    );
+    assert!(fixture.rests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn ftp_discards_the_partial_when_the_server_ignores_rest() {
+    let data = big_payload(0);
+    let fixture = ftp_fixture_with(false, false, Fault::DropAfter(12 * MIB), data.clone()).await;
+    assert!(attempt(&fixture, "ftp", false).await.is_err());
+    // Says 350 but sends byte 0 onwards: the overlap no longer matches, so the saved bytes are
+    // dropped and the file is fetched again completely.
+    set_fault(&fixture, Fault::IgnoreRest);
+    attempt(&fixture, "ftp", false).await.unwrap();
+    assert_eq!(
+        std::fs::read(fixture.root.path().join("result.bin")).unwrap(),
+        *data
+    );
+    assert_eq!(*fixture.rests.lock().unwrap(), vec![4 * MIB]);
+}
+
+#[tokio::test]
+async fn ftp_never_continues_a_partial_into_a_different_remote_file() {
+    // Same length (and same fixed MDTM): only the overlap comparison can tell.
+    let fixture = ftp_fixture_with(false, false, Fault::DropAfter(12 * MIB), big_payload(0)).await;
+    assert!(attempt(&fixture, "ftp", false).await.is_err());
+    let replacement = big_payload(1);
+    *fixture.data.lock().unwrap() = replacement.clone();
+    set_fault(&fixture, Fault::None);
+    attempt(&fixture, "ftp", false).await.unwrap();
+    assert_eq!(
+        std::fs::read(fixture.root.path().join("result.bin")).unwrap(),
+        *replacement
+    );
+
+    // A different length is rejected before anything is requested with REST.
+    let other = ftp_fixture_with(false, false, Fault::DropAfter(12 * MIB), big_payload(0)).await;
+    assert!(attempt(&other, "ftp", false).await.is_err());
+    let longer: Arc<Vec<u8>> = Arc::new(
+        big_payload(0)
+            .iter()
+            .chain([1u8, 2, 3].iter())
+            .copied()
+            .collect(),
+    );
+    *other.data.lock().unwrap() = longer.clone();
+    set_fault(&other, Fault::None);
+    attempt(&other, "ftp", false).await.unwrap();
+    assert_eq!(
+        std::fs::read(other.root.path().join("result.bin")).unwrap(),
+        *longer
+    );
+    assert!(other.rests.lock().unwrap().is_empty());
 }

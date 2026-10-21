@@ -1,4 +1,4 @@
-use super::{StagedFile, TransportOptions, decoded, operation};
+use super::{ResumeMismatch, StagedFile, TransportOptions, Validator, decoded, operation};
 use crate::{engine::Progress, logging::LogSink};
 use anyhow::{Context, Result, bail};
 use russh::{
@@ -11,6 +11,7 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
     time::Duration,
 };
+use tokio::io::AsyncSeekExt;
 use url::Url;
 
 struct VerifyHost {
@@ -31,6 +32,27 @@ impl client::Handler for VerifyHost {
 }
 
 pub(crate) async fn download<F>(
+    url: &Url,
+    destination: &Path,
+    options: &TransportOptions,
+    cancel: &AtomicBool,
+    log: &LogSink,
+    on_progress: &mut F,
+) -> Result<()>
+where
+    F: FnMut(Progress) + Send,
+{
+    // A server that does not continue a saved partial invalidates it; try once from scratch.
+    match download_once(url, destination, options, cancel, log, on_progress).await {
+        Err(error) if error.downcast_ref::<ResumeMismatch>().is_some() => {
+            log.warn("transfer.resume_rejected", "restarting from the beginning");
+            download_once(url, destination, options, cancel, log, on_progress).await
+        }
+        other => other,
+    }
+}
+
+async fn download_once<F>(
     url: &Url,
     destination: &Path,
     options: &TransportOptions,
@@ -111,12 +133,30 @@ where
         Ok(SftpSession::new(channel.into_stream()).await?)
     })
     .await?;
-    let mut remote = operation(cancel, async { Ok(sftp.open(path).await?) }).await?;
+    let mut remote = operation(cancel, async { Ok(sftp.open(path.clone()).await?) }).await?;
     let metadata = operation(cancel, async { Ok(remote.metadata().await?) }).await?;
     if metadata.is_dir() {
         bail!("SFTP directory downloads are not supported");
     }
-    let mut staged = StagedFile::new(destination, metadata.size).await?;
+    let validator = metadata.size.map(|size| Validator {
+        key: format!("sftp://{host}:{port}{path}"),
+        size,
+        mtime: metadata.mtime.map(|t| t.to_string()),
+    });
+    let (mut staged, offset) = match &validator {
+        Some(validator) => StagedFile::resumable(destination, validator).await?,
+        None => (StagedFile::new(destination, None).await?, 0),
+    };
+    if offset > 0 {
+        log.info(
+            "transfer.resuming",
+            &format!("protocol=sftp offset={offset}"),
+        );
+        operation(cancel, async {
+            Ok(remote.seek(std::io::SeekFrom::Start(offset)).await?)
+        })
+        .await?;
+    }
     staged
         .copy(&mut remote, cancel, log, "sftp", on_progress)
         .await?;
