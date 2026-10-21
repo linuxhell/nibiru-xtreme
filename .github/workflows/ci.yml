@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, "chatgpt/**", "claude/amazing-newton-0qce70"]
+    branches: [main, "chatgpt/**", "claude/**", "audit/**"]
   pull_request:
   workflow_dispatch:
 
