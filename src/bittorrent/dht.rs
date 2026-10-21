@@ -384,18 +384,29 @@ impl Dht {
         hasher.finalize()[..8].to_vec()
     }
 
-    fn make_token(&self, addr: &SocketAddr) -> Vec<u8> {
-        let mut state = self.state();
-        if state.rotated.elapsed() > SECRET_LIFETIME {
+    fn rotate_token_secrets(state: &mut State) {
+        let elapsed = state.rotated.elapsed();
+        if elapsed >= SECRET_LIFETIME + SECRET_LIFETIME {
+            // After two complete windows neither previously issued secret is valid.
+            state.previous_secret = random_bytes();
+            state.secret = random_bytes();
+            state.rotated = Instant::now();
+        } else if elapsed >= SECRET_LIFETIME {
             state.previous_secret = state.secret;
             state.secret = random_bytes();
             state.rotated = Instant::now();
         }
+    }
+
+    fn make_token(&self, addr: &SocketAddr) -> Vec<u8> {
+        let mut state = self.state();
+        Self::rotate_token_secrets(&mut state);
         Self::token_for(&state.secret, addr)
     }
 
     fn token_valid(&self, addr: &SocketAddr, token: &[u8]) -> bool {
-        let state = self.state();
+        let mut state = self.state();
+        Self::rotate_token_secrets(&mut state);
         Self::token_for(&state.secret, addr) == token
             || Self::token_for(&state.previous_secret, addr) == token
     }
@@ -825,6 +836,40 @@ mod tests {
         dht.observe_ip("208.67.222.222:4".parse().unwrap(), observed);
         assert!(super::super::dht_security::valid(observed.ip(), &dht.id()));
         assert_ne!(dht.id(), old);
+    }
+
+    #[tokio::test]
+    async fn announce_tokens_expire_even_without_new_get_peers_requests() {
+        let dht = Dht::start(DhtConfig {
+            bind: "127.0.0.1".parse().unwrap(),
+            bootstrap: vec![],
+            allow_loopback: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let addr: SocketAddr = "127.0.0.1:6881".parse().unwrap();
+
+        let token = dht.make_token(&addr);
+        {
+            let mut state = dht.state();
+            state.rotated = Instant::now() - SECRET_LIFETIME - Duration::from_secs(1);
+        }
+        assert!(
+            dht.token_valid(&addr, &token),
+            "a token remains valid during the previous-secret window"
+        );
+
+        let token = dht.make_token(&addr);
+        {
+            let mut state = dht.state();
+            state.rotated =
+                Instant::now() - SECRET_LIFETIME - SECRET_LIFETIME - Duration::from_secs(1);
+        }
+        assert!(
+            !dht.token_valid(&addr, &token),
+            "a token must expire after two complete secret windows"
+        );
     }
 
     #[test]
