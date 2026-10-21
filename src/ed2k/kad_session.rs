@@ -1,6 +1,6 @@
 //! Bounded Kad2 routing and direct-source lookup, independently implemented from the wire format.
 //! Uses plain Kad2 UDP with v5 HELLO and legacy endpoint challenges; no obfuscation or firewall callbacks.
-use super::{FileSource, metadata::Node};
+use super::{FileSource, kad_crypto, metadata::Node};
 use serde::Serialize;
 use std::{
     borrow::Cow,
@@ -29,8 +29,9 @@ const MAX_PAYLOAD_BYTES: usize = 32768;
 const MAX_SOURCE_PACKETS: usize = 6;
 const MAX_SOURCE_ROWS: usize = 300;
 const MAX_SOURCE_BYTES: usize = MAX_PAYLOAD_BYTES * MAX_SOURCE_PACKETS;
-// Advertising v6+ makes modern peers send obfuscated HELLO replies; v8 also adds keyed ACKs.
-const KAD_VERSION: u8 = 5;
+// v6 is the first version with UDP obfuscation (handled by `kad_crypto`); v8 adds keyed ACKs, which
+// this session does not implement.
+const KAD_VERSION: u8 = 6;
 type Id = [u8; 16];
 
 struct Contact {
@@ -94,6 +95,14 @@ struct Inner {
     lookup_lock: tokio::sync::Mutex<()>,
     /// Completed maintenance passes (the first one runs as soon as the session starts).
     passes: AtomicU64,
+    /// Obfuscate packets to v6+ peers and answer obfuscated requests obfuscated.
+    obfuscation: AtomicBool,
+    /// Secret behind the per-IP verify keys we hand out.
+    verify_secret: [u8; 4],
+    /// The verify key each peer IP told us to use for it.
+    peer_keys: Mutex<HashMap<Ipv4Addr, u32>>,
+    obfuscated_in: AtomicU64,
+    obfuscated_out: AtomicU64,
     ip_filter: std::sync::RwLock<Arc<super::ip_filter::IpFilter>>,
 }
 pub struct KadSession {
@@ -115,8 +124,26 @@ pub struct Status {
     pub keyword_search: bool,
     pub publishing: bool,
     pub obfuscation: bool,
+    /// Packets received / sent in obfuscated form since the session started.
+    pub obfuscated_in: u64,
+    pub obfuscated_out: u64,
     pub buddy_callbacks: bool,
     pub public_reachability_verified: bool,
+}
+
+/// How an outgoing packet may be obfuscated.
+#[derive(Clone, Copy)]
+enum Delivery<'a> {
+    Plain,
+    /// A request to a peer whose Kad ID and version we know.
+    Request {
+        id: &'a Id,
+        version: u8,
+    },
+    /// The answer to an obfuscated request: keyed with the verify key the sender gave us.
+    Reply {
+        key: u32,
+    },
 }
 
 fn address(node: &Node) -> SocketAddr {
@@ -417,6 +444,66 @@ impl Inner {
             serial,
         })
     }
+    /// The key we give a peer for packets it sends to us: derived from a session secret and its IP.
+    fn verify_key_for(&self, ip: Ipv4Addr) -> u32 {
+        let mut material = [0u8; 8];
+        material[..4].copy_from_slice(&self.verify_secret);
+        material[4..].copy_from_slice(&ip.octets());
+        let digest = md5::compute(material).0;
+        let word = |i: usize| u32::from_le_bytes(digest[i..i + 4].try_into().unwrap());
+        ((word(0) ^ word(4) ^ word(8) ^ word(12)) % 0xFFFF_FFFE) + 1
+    }
+    /// Sends one Kad packet, obfuscated when the peer supports it (requests) or used it (replies).
+    async fn send_packet(
+        &self,
+        to: SocketAddr,
+        payload: &[u8],
+        how: Delivery<'_>,
+    ) -> io::Result<usize> {
+        let SocketAddr::V4(v4) = to else {
+            return self.socket.send_to(payload, to).await;
+        };
+        if !self.obfuscation.load(Ordering::Acquire) {
+            return self.socket.send_to(payload, to).await;
+        }
+        let ours = self.verify_key_for(*v4.ip());
+        let mut random = [0u8; 3];
+        let _ = getrandom::fill(&mut random);
+        let sealed = match how {
+            Delivery::Request { id, version } if version >= 6 => {
+                let theirs = self
+                    .peer_keys
+                    .lock()
+                    .unwrap()
+                    .get(v4.ip())
+                    .copied()
+                    .unwrap_or(0);
+                Some(kad_crypto::seal(
+                    payload,
+                    kad_crypto::Key::NodeId(id),
+                    theirs,
+                    ours,
+                    [random[0], random[1]],
+                    random[2],
+                ))
+            }
+            Delivery::Reply { key } if key != 0 => Some(kad_crypto::seal(
+                payload,
+                kad_crypto::Key::Receiver(key),
+                key,
+                ours,
+                [random[0], random[1]],
+                random[2],
+            )),
+            _ => None,
+        };
+        if sealed.is_some() {
+            self.obfuscated_out.fetch_add(1, Ordering::Relaxed);
+        }
+        self.socket
+            .send_to(sealed.as_deref().unwrap_or(payload), to)
+            .await
+    }
     async fn query(
         self: &Arc<Self>,
         node: &Node,
@@ -426,10 +513,16 @@ impl Inner {
     ) -> Result<Vec<u8>, String> {
         let (tx, rx) = oneshot::channel();
         let _cleanup = self.register(node, target, opcode, ReplySender::Single(tx))?;
-        self.socket
-            .send_to(&payload, address(node))
-            .await
-            .map_err(|e| e.to_string())?;
+        self.send_packet(
+            address(node),
+            &payload,
+            Delivery::Request {
+                id: &node.id,
+                version: node.version,
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
         match tokio::time::timeout(QUERY_TIMEOUT, rx).await {
             // Ordinary lookups and HELLO replies have predictable targets. Only the separate
             // random challenge below can establish or renew endpoint verification.
@@ -458,10 +551,16 @@ impl Inner {
                 bytes: 0,
             },
         )?;
-        self.socket
-            .send_to(&payload, address(node))
-            .await
-            .map_err(|e| e.to_string())?;
+        self.send_packet(
+            address(node),
+            &payload,
+            Delivery::Request {
+                id: &node.id,
+                version: node.version,
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
         let deadline = tokio::time::Instant::now() + QUERY_TIMEOUT;
         let mut received = false;
         let mut sources = Vec::new();
@@ -583,6 +682,15 @@ impl KadSession {
             serial: AtomicU64::new(1),
             lookup_lock: tokio::sync::Mutex::new(()),
             passes: AtomicU64::new(0),
+            obfuscation: AtomicBool::new(true),
+            verify_secret: {
+                let mut secret = [0u8; 4];
+                getrandom::fill(&mut secret).map_err(|e| e.to_string())?;
+                secret
+            },
+            peer_keys: Mutex::new(HashMap::new()),
+            obfuscated_in: AtomicU64::new(0),
+            obfuscated_out: AtomicU64::new(0),
             ip_filter: std::sync::RwLock::new(Arc::new(super::ip_filter::IpFilter::default())),
         });
         // Stored contacts are candidates until a fresh HELLO and random challenge succeed.
@@ -613,7 +721,7 @@ impl KadSession {
             let mut reset = Instant::now();
             loop {
                 let result = tokio::select! {_=receiver.changed()=>break,result=receive.socket.recv_from(&mut buffer)=>result};
-                let (length, peer) = match result {
+                let (mut length, peer) = match result {
                     Ok(packet) => packet,
                     // In particular, Windows may report an offline UDP peer's ICMP error
                     // on this shared socket. That is not a failure of the Kad session.
@@ -625,6 +733,38 @@ impl KadSession {
                     }
                     Err(_) => break,
                 };
+                // An obfuscated datagram is opened first; answers to it are obfuscated too.
+                let mut reply_key = None;
+                let mut was_obfuscated = false;
+                if length > 8
+                    && !kad_crypto::is_plain(buffer[0])
+                    && let SocketAddr::V4(v4) = peer
+                {
+                    if !receive.obfuscation.load(Ordering::Acquire) {
+                        continue;
+                    }
+                    let Some(opened) = kad_crypto::open(
+                        &buffer[..length],
+                        &receive.identity,
+                        receive.verify_key_for(*v4.ip()),
+                    ) else {
+                        continue;
+                    };
+                    if opened.payload.is_empty() || opened.payload.len() > buffer.len() {
+                        continue;
+                    }
+                    length = opened.payload.len();
+                    buffer[..length].copy_from_slice(&opened.payload);
+                    was_obfuscated = true;
+                    receive.obfuscated_in.fetch_add(1, Ordering::Relaxed);
+                    if opened.sender_verify != 0 {
+                        reply_key = Some(opened.sender_verify);
+                        let mut keys = receive.peer_keys.lock().unwrap();
+                        if keys.len() < MAX_CONTACTS * 2 {
+                            keys.insert(*v4.ip(), opened.sender_verify);
+                        }
+                    }
+                }
                 if !(2..=MAX_PAYLOAD_BYTES + 2).contains(&length)
                     || !matches!(buffer[0], 0xe4 | 0xe5)
                     || !peer.is_ipv4()
@@ -789,7 +929,11 @@ impl KadSession {
                 } else {
                     continue;
                 }
-                let _ = receive.socket.send_to(&reply, peer).await;
+                let how = match (was_obfuscated, reply_key) {
+                    (true, Some(key)) => Delivery::Reply { key },
+                    _ => Delivery::Plain,
+                };
+                let _ = receive.send_packet(peer, &reply, how).await;
             }
             receive.running.store(false, Ordering::Release);
             receive.pending.lock().unwrap().clear();
@@ -836,6 +980,10 @@ impl KadSession {
             table.retain(|_, contact| !filter.blocks(contact.node.host));
         }
     }
+    /// Turns UDP obfuscation on or off (on by default): off sends and accepts plain packets only.
+    pub fn set_obfuscation(&self, enabled: bool) {
+        self.inner.obfuscation.store(enabled, Ordering::Release);
+    }
     pub fn status(&self) -> Status {
         let contacts = self.inner.contacts.lock().unwrap();
         Status {
@@ -855,7 +1003,9 @@ impl KadSession {
             direct_source_lookup: true,
             keyword_search: false,
             publishing: false,
-            obfuscation: false,
+            obfuscation: self.inner.obfuscation.load(Ordering::Acquire),
+            obfuscated_in: self.inner.obfuscated_in.load(Ordering::Relaxed),
+            obfuscated_out: self.inner.obfuscated_out.load(Ordering::Relaxed),
             buddy_callbacks: false,
             public_reachability_verified: false,
         }
@@ -1267,6 +1417,8 @@ mod tests {
         )
         .await
         .unwrap();
+        // Most tests speak plain Kad; the obfuscation tests turn it back on.
+        session.set_obfuscation(false);
         // The first maintenance pass runs at start-up. Let it finish over the empty table, so a
         // slow host cannot run it later and send its own HELLO into a test that has added contacts.
         for _ in 0..500 {
@@ -1373,6 +1525,7 @@ mod tests {
         )
         .await
         .unwrap();
+        session.set_obfuscation(false); // this test's fixture speaks plain Kad
         let inner = session.inner.clone();
         let work = tokio::spawn(async move { inner.ensure_verified(&peer).await });
 
@@ -1380,7 +1533,7 @@ mod tests {
         assert_eq!(&request[..2], &[0xe4, 0x11]);
         assert_eq!(&request[2..18], &[1; 16]);
         assert_eq!(&request[18..20], &tcp_port.to_le_bytes());
-        assert_eq!(&request[20..], &[5, 0]); // The actual bound TCP port and plain Kad v5.
+        assert_eq!(&request[20..], &[KAD_VERSION, 0]); // The actual bound TCP port and our advertised Kad version.
         fixture
             .send_to(&fixture_hello(0x19, [3; 16], 8), from)
             .await
@@ -1447,7 +1600,7 @@ mod tests {
         assert_eq!(session.status().verified_contacts, 1);
         assert_eq!(session.status().tcp_port, tcp_port);
         assert!(!session.status().public_reachability_verified);
-        assert!(!session.status().obfuscation);
+        assert!(!session.status().obfuscation, "this test turned it off");
         assert!(session.inner.pending.lock().unwrap().is_empty());
 
         let proved_at = session.inner.contacts.lock().unwrap()[&verified.id].verified;
@@ -1529,7 +1682,7 @@ mod tests {
             .unwrap();
         let (reply, _) = recv_packet(&fixture).await;
         assert_eq!(&reply[2..18], &[1; 16]);
-        assert_eq!(&reply[18..], &[0x69, 0x7a, 5, 0]);
+        assert_eq!(&reply[18..], &[0x69, 0x7a, KAD_VERSION, 0]);
         assert_eq!(session.status().contacts, 1);
         assert_eq!(session.status().verified_contacts, 0);
         let mut other = node(4663);
@@ -1644,7 +1797,7 @@ mod tests {
                 match data.get(1) {
                     Some(0x11) => {
                         assert_eq!(n, 22);
-                        assert_eq!(&data[18..], &[0x69, 0x7a, 5, 0]);
+                        assert_eq!(&data[18..], &[0x69, 0x7a, KAD_VERSION, 0]);
                         fixture
                             .send_to(&fixture_hello(0x19, peer_copy.id, 8), from)
                             .await
@@ -1752,6 +1905,108 @@ mod tests {
                 .unwrap()
                 .unwrap()
         );
+    }
+    async fn obfuscating_session(root: &std::path::Path) -> Arc<KadSession> {
+        let session = unseeded_session(root.join("routing.json")).await;
+        session.set_obfuscation(true);
+        session
+    }
+    #[tokio::test]
+    async fn obfuscated_requests_are_answered_obfuscated_with_the_senders_verify_key() {
+        let root = tempfile::tempdir().unwrap();
+        let session = obfuscating_session(root.path()).await;
+        let to = session.inner.socket.local_addr().unwrap();
+        let fixture = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let own: Id = [3; 16];
+        // A v8 peer sends its HELLO sealed with our Kad ID and announces its verify key.
+        let request = kad_crypto::seal(
+            &fixture_hello(0x11, own, 8),
+            kad_crypto::Key::NodeId(&[1; 16]),
+            0,
+            0x1234_5678,
+            [7, 8],
+            0x21,
+        );
+        fixture.send_to(&request, to).await.unwrap();
+        let (reply, _) = recv_packet(&fixture).await;
+        assert!(
+            !kad_crypto::is_plain(reply[0]),
+            "the answer must be obfuscated"
+        );
+        let opened =
+            kad_crypto::open(&reply, &own, 0x1234_5678).expect("answer opens with our key");
+        assert_eq!(&opened.payload[..2], &[0xe4, 0x19]);
+        assert_eq!(&opened.payload[2..18], &[1; 16]);
+        assert_eq!(opened.receiver_verify, 0x1234_5678);
+        assert_ne!(
+            opened.sender_verify, 0,
+            "the session hands out its verify key"
+        );
+        // A plain request still gets a plain answer.
+        fixture.send_to(&[0xe4, 0x60], to).await.unwrap();
+        let (pong, _) = recv_packet(&fixture).await;
+        assert_eq!(pong[0], 0xe4);
+        session.stop();
+    }
+    #[tokio::test]
+    async fn requests_to_v6_peers_are_obfuscated_and_obfuscated_answers_are_accepted() {
+        let root = tempfile::tempdir().unwrap();
+        let session = obfuscating_session(root.path()).await;
+        let fixture = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut peer = node(fixture.local_addr().unwrap().port());
+        peer.version = 8;
+        let inner = session.inner.clone();
+        let query_peer = peer.clone();
+        let query = tokio::spawn(async move {
+            let hello = hello_packet(0x11, inner.identity, inner.tcp_port);
+            inner.query(&query_peer, query_peer.id, 0x19, hello).await
+        });
+        let (sealed, from) = recv_packet(&fixture).await;
+        assert!(
+            !kad_crypto::is_plain(sealed[0]),
+            "a request to a v8 peer is obfuscated"
+        );
+        let opened = kad_crypto::open(&sealed, &peer.id, 0).expect("keyed with the peer's Kad ID");
+        assert_eq!(&opened.payload[..2], &[0xe4, 0x11]);
+        assert_ne!(opened.sender_verify, 0);
+        let answer = kad_crypto::seal(
+            &fixture_hello(0x19, peer.id, 8),
+            kad_crypto::Key::Receiver(opened.sender_verify),
+            opened.sender_verify,
+            0x0bad_cafe,
+            [1, 1],
+            0x80,
+        );
+        fixture.send_to(&answer, from).await.unwrap();
+        let reply = query
+            .await
+            .unwrap()
+            .expect("the obfuscated answer is accepted");
+        assert_eq!(&reply[..16], &peer.id);
+        session.stop();
+    }
+    #[tokio::test]
+    async fn a_session_with_obfuscation_off_ignores_obfuscated_packets_and_sends_plain() {
+        let root = tempfile::tempdir().unwrap();
+        let session = unseeded_session(root.path().join("routing.json")).await; // off
+        let to = session.inner.socket.local_addr().unwrap();
+        let fixture = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let sealed = kad_crypto::seal(
+            &fixture_hello(0x11, [3; 16], 8),
+            kad_crypto::Key::NodeId(&[1; 16]),
+            0,
+            9,
+            [1, 2],
+            0x31,
+        );
+        fixture.send_to(&sealed, to).await.unwrap();
+        packet_barrier(&fixture, to).await;
+        assert_eq!(
+            session.status().contacts,
+            0,
+            "the obfuscated HELLO was dropped"
+        );
+        session.stop();
     }
     #[tokio::test]
     async fn oversized_udp_does_not_stop_the_session() {

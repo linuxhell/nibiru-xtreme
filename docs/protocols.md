@@ -289,3 +289,20 @@ Modos: `off` (só simples; pares que exigem ofuscação são pulados), `prefer` 
 conhecido e ele suporta; tenta de novo sem ofuscação se o handshake falhar; aceita os dois), `require`
 (nunca usa nem aceita conexão simples). O login no servidor anuncia suporte (0x200) e desejo (0x400) de
 ofuscação, exceto em `off`.
+
+## Ofuscação UDP do Kad
+
+Cada datagrama Kad pode ir cifrado: `<marcador 1><parte aleatória 2>` em claro e, cifrado com RC4 **sem
+descartar** keystream, `<magic 0x395F2EC1 (LE)><tamanho do preenchimento 1><preenchimento><verify key do
+receptor 4 (LE)><verify key do remetente 4 (LE)><pacote Kad>`. Duas chaves: `MD5(<ID Kad do receptor 16><parte
+2>)` (bits baixos do marcador `00`) ou `MD5(<verify key do receptor 4 LE><parte 2>)` (bits `10`), para quem não
+conhece o ID. O ID Kad é o dos pacotes (16 bytes como trafegam). Um datagrama que começa por `0xE4`, `0xE5`,
+`0xC5`, `0xD4`, `0xA3` ou `0xB2` é simples.
+
+- A verify key que damos a cada IP é `MD5(<segredo da sessão><IP>)` reduzida a 32 bits (a derivação é só nossa:
+  quem a valida somos nós). O par a devolve no campo "receptor" quando nos responde.
+- Pedidos a nós Kad de versão ≥ 6 saem cifrados com o ID deles; respostas a pedidos cifrados saem cifradas com a
+  verify key que o remetente anunciou; pedidos simples recebem resposta simples.
+- Lição do teste contra o aMule: o magic e as verify keys são **little-endian** na rede (`ENDIAN_SWAP_*` é no-op
+  em máquinas little-endian); ler como big-endian dava um pacote que o aMule descartava em silêncio.
+- A versão anunciada passou de 5 para 6 (primeira com ofuscação). O ACK com chave da versão 8 não existe.

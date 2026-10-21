@@ -42,8 +42,9 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends amule-daemon
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends amule-daemon amule-utils
           python tests/interop_amule.py --binary target/debug/nibiru-xtreme
+          cargo test --locked --test kad_amule -- --nocapture
       - name: Release build
         run: cargo build --locked --release
       - name: Package Windows x64

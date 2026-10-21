@@ -1,13 +1,14 @@
 //! Native ED2K/Kad building blocks. This module never launches aMule.
 //! Implemented independently against the on-wire formats; see docs/protocols.md.
-mod file;
+pub(crate) mod file;
 pub mod ip_filter;
 mod kad;
+pub mod kad_crypto;
 pub mod kad_session;
 mod listener;
 pub mod metadata;
 pub mod obfuscation;
-mod peer;
+pub(crate) mod peer;
 mod server;
 mod share;
 pub(crate) mod transfer;

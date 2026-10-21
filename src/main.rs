@@ -449,14 +449,17 @@ async fn start_ed2k(
         }
         None => None,
     };
-    Ok(Ed2kService::new(Ed2kConfig {
+    let service = Ed2kService::new(Ed2kConfig {
         default_dir: args.dir.clone(),
         identity,
         tcp_port: args.ed2k_tcp_port,
         obfuscation: args.ed2k_obfuscation,
         servers,
         kad,
-    }))
+    });
+    let port = service.start_listener().await?;
+    log.info("ed2k.listening", &format!("tcp_port={port}"));
+    Ok(service)
 }
 
 /// Returns when the process is asked to stop (Ctrl-C everywhere, SIGTERM on Unix).

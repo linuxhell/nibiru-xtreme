@@ -609,6 +609,12 @@ impl RpcServer {
             "aria2.tellWaiting" | "nibiru.tellWaiting" => self.list_tasks("waiting", params).await,
             "aria2.tellStopped" | "nibiru.tellStopped" => self.list_tasks("stopped", params).await,
             // Not part of aria2: whether tasks survive a restart and what was restored.
+            // Not part of aria2: ED2K listener, server session, obfuscation mode and Kad in one reply.
+            "nibiru.getEd2kStatus" => self
+                .ed2k
+                .as_ref()
+                .map(|e| e.status())
+                .ok_or_else(|| anyhow!("ED2K is not enabled")),
             // Not part of aria2: state of the engine's own Kad session (absent when ED2K is off).
             "nibiru.getKadStatus" => self
                 .ed2k

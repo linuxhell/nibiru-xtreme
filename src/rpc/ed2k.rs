@@ -6,8 +6,9 @@
 
 use super::session::{self, Entry};
 use crate::ed2k::{
-    FileLink, FileSource, TransferOptions, TransferProgress, TransferStage, download_with_options,
-    kad_session::KadSession, metadata::Server, obfuscation::Obfuscation,
+    CallbackClient, FileLink, FileSource, IncomingListener, ServerConnection, TransferOptions,
+    TransferProgress, TransferStage, download_with_options, kad_session::KadSession,
+    metadata::Server, obfuscation::Obfuscation,
 };
 use anyhow::{Result, anyhow, bail, ensure};
 use serde_json::{Map, Value, json};
@@ -53,6 +54,10 @@ struct Task {
 
 pub struct Ed2kService {
     config: Ed2kConfig,
+    /// Accepts incoming peers: required for High-ID, server callbacks and (later) uploads.
+    listener: std::sync::OnceLock<Arc<IncomingListener>>,
+    /// The ED2K server session kept open for callbacks; one lookup at a time uses it.
+    server: tokio::sync::Mutex<Option<ServerConnection>>,
     tasks: Mutex<HashMap<String, Task>>,
     changed: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
@@ -101,9 +106,51 @@ impl Ed2kService {
     pub fn new(config: Ed2kConfig) -> Arc<Self> {
         Arc::new(Self {
             config,
+            listener: std::sync::OnceLock::new(),
+            server: tokio::sync::Mutex::new(None),
             tasks: Mutex::new(HashMap::new()),
             changed: Mutex::new(None),
         })
+    }
+
+    /// Opens the incoming ED2K port (falling back to a free one) and returns the port in use.
+    pub async fn start_listener(&self) -> Result<u16> {
+        if let Some(listener) = self.listener.get() {
+            return Ok(listener.status().tcp_port);
+        }
+        let listener = IncomingListener::bind(self.config.identity, self.config.tcp_port).await?;
+        listener.set_obfuscation(self.config.obfuscation);
+        let port = listener.status().tcp_port;
+        let _ = self.listener.set(Arc::new(listener));
+        Ok(port)
+    }
+
+    /// The port announced to servers: the real one once the listener is open.
+    fn announced_port(&self) -> u16 {
+        self.listener
+            .get()
+            .map_or(self.config.tcp_port, |l| l.status().tcp_port)
+    }
+
+    /// Everything an operator wants to know about the ED2K side in one object.
+    pub fn status(&self) -> Value {
+        let server = self.server.try_lock().ok().and_then(|g| {
+            g.as_ref().map(|c| {
+                json!({"connected": c.is_connected(), "clientId": c.client_id, "lowId": c.is_low_id()})
+            })
+        });
+        json!({
+            "obfuscation": self.config.obfuscation,
+            "incoming": self.incoming_status(),
+            "server": server,
+            "kad": self.kad_status(),
+        })
+    }
+
+    pub fn incoming_status(&self) -> Option<Value> {
+        self.listener
+            .get()
+            .and_then(|l| serde_json::to_value(l.status()).ok())
     }
 
     pub fn on_change(&self, notify: Arc<dyn Fn() + Send + Sync>) {
@@ -252,32 +299,58 @@ impl Ed2kService {
         });
     }
 
-    async fn discover(&self, file: &FileLink, mut sources: Vec<FileSource>) -> Vec<FileSource> {
+    /// Sources from the user, the ED2K servers and Kad, plus the server session (kept open) that
+    /// a Low-ID source's callback needs.
+    async fn discover(
+        &self,
+        file: &FileLink,
+        mut sources: Vec<FileSource>,
+    ) -> (Vec<FileSource>, Option<ServerConnection>) {
         let mut seen: HashSet<(Option<Ipv4Addr>, u16)> =
             sources.iter().map(|s| (s.host, s.port)).collect();
         let hash = file.hash_hex();
         let mut found = Vec::new();
+        let mut connection = None;
+        // Serialised: the server session answers one source lookup at a time.
+        let mut guard = self.server.lock().await;
+        if guard.as_ref().is_some_and(|c| !c.is_connected()) {
+            *guard = None;
+        }
         for server in self.config.servers.iter().take(3) {
             let attempt = async {
-                let connection = crate::ed2k::ServerConnection::connect_with(
-                    server.clone(),
-                    self.config.identity,
-                    "nibiru-xtreme",
-                    self.config.tcp_port,
-                    self.config.obfuscation,
-                )
-                .await?;
-                let list = connection.sources(&hash).await;
-                connection.disconnect();
-                list
+                let existing = guard.clone();
+                let connection = match existing {
+                    Some(connection) => connection,
+                    None => {
+                        ServerConnection::connect_with(
+                            server.clone(),
+                            self.config.identity,
+                            "nibiru-xtreme",
+                            self.announced_port(),
+                            self.config.obfuscation,
+                        )
+                        .await?
+                    }
+                };
+                let list = connection.sources(&hash).await?;
+                Ok::<_, anyhow::Error>((connection, list))
             };
-            if let Ok(Ok(list)) = tokio::time::timeout(SOURCE_DISCOVERY_TIMEOUT, attempt).await {
-                found.extend(list);
-                if !found.is_empty() {
-                    break;
+            match tokio::time::timeout(SOURCE_DISCOVERY_TIMEOUT, attempt).await {
+                Ok(Ok((open, list))) => {
+                    if let Some(listener) = self.listener.get() {
+                        listener.set_client_id(open.client_id);
+                    }
+                    *guard = Some(open.clone());
+                    connection = Some(open);
+                    found.extend(list);
+                    if !found.is_empty() {
+                        break;
+                    }
                 }
+                _ => *guard = None,
             }
         }
+        drop(guard);
         if let Some(kad) = &self.config.kad
             && let Ok(Ok(list)) =
                 tokio::time::timeout(SOURCE_DISCOVERY_TIMEOUT, kad.sources(file.hash, file.size))
@@ -290,7 +363,7 @@ impl Ed2kService {
                 sources.push(source);
             }
         }
-        sources
+        (sources, connection)
     }
 
     async fn run(
@@ -302,7 +375,16 @@ impl Ed2kService {
         obfuscation: Obfuscation,
         cancel: &Arc<AtomicBool>,
     ) -> Result<()> {
-        let sources = self.discover(file, extra).await;
+        let (sources, server) = self.discover(file, extra).await;
+        // A Low-ID source is reached by asking the server to make it call us back, which needs our
+        // listener and a High-ID server session.
+        let callbacks = match (self.listener.get(), server.as_ref()) {
+            (Some(listener), Some(server)) if !server.is_low_id() => {
+                Some(CallbackClient::new(server.clone(), listener.callbacks()))
+            }
+            _ => None,
+        };
+        let client_id = server.as_ref().map_or(0, |s| s.client_id);
         ensure!(
             cancel.load(Ordering::Acquire) || !sources.is_empty(),
             "no ED2K sources found"
@@ -315,8 +397,8 @@ impl Ed2kService {
             &sources,
             TransferOptions {
                 identity: self.config.identity,
-                client_id: 0,
-                callbacks: None,
+                client_id,
+                callbacks,
                 obfuscation,
             },
             cancel.clone(),
@@ -447,6 +529,11 @@ impl Ed2kService {
     }
 
     pub fn shutdown(&self) {
+        if let Ok(server) = self.server.try_lock()
+            && let Some(server) = server.as_ref()
+        {
+            server.disconnect();
+        }
         for task in self.tasks.lock().unwrap().values() {
             task.cancel.store(true, Ordering::Release);
         }
@@ -492,6 +579,87 @@ mod tests {
             "task never reached {status}: {}",
             service.tell_status(gid, None).unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn a_low_id_source_from_the_server_is_reached_through_a_callback() {
+        use crate::ed2k::{metadata::Server, peer};
+        use tokio::net::{TcpListener, TcpStream};
+        let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let control_port = control.local_addr().unwrap().port();
+        let file = FileLink {
+            name: "callback.txt".into(),
+            size: 3,
+            hash: crate::ed2k::file::digest(b"abc"),
+        };
+        let served = file.clone();
+        let dir = tempfile::tempdir().unwrap();
+        let service = Ed2kService::new(Ed2kConfig {
+            default_dir: dir.path().to_path_buf(),
+            identity: [3; 16],
+            tcp_port: 0,
+            servers: vec![Server {
+                host: "127.0.0.1".into(),
+                port: control_port,
+                name: "fixture".into(),
+                description: String::new(),
+            }],
+            kad: None,
+            obfuscation: Obfuscation::Disabled,
+        });
+        let port = service.start_listener().await.unwrap();
+        assert_ne!(port, 0);
+        let server = tokio::spawn(async move {
+            let (mut server, _) = control.accept().await.unwrap();
+            let (_, _, login) = peer::frame(&mut server).await.unwrap();
+            // The login announces the listener port actually in use, not the configured 0.
+            assert_eq!(&login[20..22], &port.to_le_bytes());
+            peer::send(&mut server, 0xe3, 0x40, &0x04030201u32.to_le_bytes())
+                .await
+                .unwrap();
+            let (_, op, asked) = peer::frame(&mut server).await.unwrap();
+            assert_eq!((op, asked), (0x19, served.hash.to_vec()));
+            // One Low-ID source: only a callback can reach it.
+            let mut sources = served.hash.to_vec();
+            sources.push(1);
+            sources.extend(123u32.to_le_bytes());
+            sources.extend(4662u16.to_le_bytes());
+            peer::send(&mut server, 0xe3, 0x42, &sources).await.unwrap();
+            let (_, op, id) = peer::frame(&mut server).await.unwrap();
+            assert_eq!((op, id), (0x1c, 123u32.to_le_bytes().to_vec()));
+            let mut client = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+                .await
+                .unwrap();
+            peer::send(&mut client, 0xe3, 1, &peer::hello([4; 16], 123))
+                .await
+                .unwrap();
+            peer::frame(&mut client).await.unwrap();
+            assert_eq!(peer::frame(&mut client).await.unwrap().1, 0x58);
+            let mut name = served.hash.to_vec();
+            name.extend(1u16.to_le_bytes());
+            name.push(b'x');
+            peer::send(&mut client, 0xe3, 0x59, &name).await.unwrap();
+            assert_eq!(peer::frame(&mut client).await.unwrap().1, 0x54);
+            peer::send(&mut client, 0xe3, 0x55, &[]).await.unwrap();
+            assert_eq!(peer::frame(&mut client).await.unwrap().1, 0x47);
+            let mut data = served.hash.to_vec();
+            data.extend(0u32.to_le_bytes());
+            data.extend(3u32.to_le_bytes());
+            data.extend(b"abc");
+            peer::send(&mut client, 0xe3, 0x46, &data).await.unwrap();
+            // Keep the server session open until the task is done.
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        });
+        let gid = service.add(&file.link(), None).unwrap();
+        wait_for(&service, &gid, "complete").await;
+        assert_eq!(
+            std::fs::read(dir.path().join("callback.txt")).unwrap(),
+            b"abc"
+        );
+        let status = service.status();
+        assert_eq!(status["server"]["clientId"], 0x04030201);
+        assert_eq!(status["server"]["lowId"], false);
+        server.await.unwrap();
     }
 
     #[tokio::test]
