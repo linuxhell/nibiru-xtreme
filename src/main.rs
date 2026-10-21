@@ -202,6 +202,7 @@ async fn main() -> Result<()> {
                         "session_persistence": true,
                         "bittorrent": true, "ed2k_library": true,
                         "ed2k_rpc": true, "ed2k_multi_source": true, "bt_lsd": true,
+                        "bt_holepunch": true,
                         "ftp_resume": cfg!(feature = "ftp"),
                         "sftp_resume": cfg!(feature = "sftp"),
                         "ftp": cfg!(feature = "ftp"), "sftp": cfg!(feature = "sftp"),

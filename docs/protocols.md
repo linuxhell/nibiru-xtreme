@@ -243,3 +243,26 @@ vizinhos para torrents que já tem e que não são privados.
   link-local, `Port` 1–65535, cabeçalhos desconhecidos ignorados, torrents privados nunca anunciados
   nem aceitos, magnet sem metadados não é anunciado (ainda não se sabe se é privado).
 - Limite: uma interface por vez (a da rota padrão, ou a indicada); sem IPv6 (`ff15::efc0:988f`).
+
+
+## Hole punching (BEP 55)
+
+Extensão `ut_holepunch`, anunciada quando uTP está ativo. Mensagem binária dentro do envelope BEP 10:
+`msg_type` (0 rendezvous, 1 connect, 2 erro), `addr_type` (0 IPv4, 1 IPv6), endereço, porta (big
+endian) e, **só nos erros**, um código de 4 bytes (1 sem peer, 2 não conectado, 3 sem suporte, 4 era
+ele mesmo). O libtorrent 2.1.1 escreve `connect` com 8 bytes, sem o código; o decodificador aceita
+os dois formatos, o codificador segue o do libtorrent.
+
+- **Relay:** só apresenta pares que já estão conectados a ele por uTP e que anunciaram
+  `ut_holepunch` (o endereço de um par TCP é uma porta efêmera, inútil para uTP). Manda `connect` aos
+  dois lados. Nunca entrega um endereço que não seja de um par conectado, então não serve de refletor.
+  No máximo um pedido por par a cada 2 s.
+- **Alvo e iniciador:** ao receber `connect`, discam o endereço por uTP no mesmo instante (até 4
+  discagens simultâneas por torrent). O iniciador só pede um rendezvous depois que a conexão direta
+  falhou e quando um par lhe disse, por PEX (flag 0x08), que o alvo suporta hole punching.
+- Conexões simultâneas entre o mesmo par: cada lado mantém a aberta pelo par de **menor peer ID**,
+  que os dois calculam igual, em vez de cada um derrubar a do outro.
+- Os pares recebem agora a lista de PEX logo depois do handshake de extensão, com as flags de uTP
+  (0x04) e hole punching (0x08) dos pares que o relay conhece.
+- `SessionConfig::emulate_restricted_nat` (apenas para testes, nunca pela CLI) faz uma sessão só aceitar
+  de quem ela discou há menos de 60 s, para exercitar o fluxo numa máquina só.

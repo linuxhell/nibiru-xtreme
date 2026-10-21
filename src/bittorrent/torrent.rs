@@ -100,6 +100,8 @@ pub enum PeerCmd {
         length: u32,
     },
     Pex(Arc<Vec<SocketAddr>>),
+    /// Send this BEP 55 message to the peer (it must support `ut_holepunch`).
+    Holepunch(super::message::Holepunch),
     Shutdown,
 }
 
@@ -115,6 +117,10 @@ pub struct PeerEntry {
     pub down: RateMeter,
     pub up: RateMeter,
     pub since: Instant,
+    /// Connected over uTP, so `addr` is its uTP endpoint (the only kind BEP 55 can use).
+    pub utp: bool,
+    /// Advertised `ut_holepunch` in its extension handshake.
+    pub holepunch: bool,
 }
 
 pub struct WebSeedState {
@@ -174,6 +180,15 @@ pub struct Core {
     pub candidates: VecDeque<SocketAddr>,
     pub known: HashSet<SocketAddr>,
     pub connecting: HashSet<SocketAddr>,
+    /// Peers PEX said support hole punching, mapped to the peer that told us (our relay).
+    pub holepunch_hints: HashMap<SocketAddr, PeerKey>,
+    /// Hole-punch connects in flight; bounded so a relay cannot make us dial endlessly.
+    pub holepunching: HashSet<SocketAddr>,
+    /// Addresses a relay asked us to dial; the main loop starts them (keeps peer tasks from
+    /// spawning peer tasks, which the compiler cannot prove `Send`).
+    pub holepunch_queue: VecDeque<SocketAddr>,
+    /// When we last opened an outbound connection to each address (restricted-NAT emulation).
+    pub dialed: HashMap<SocketAddr, Instant>,
     pub strikes: HashMap<IpAddr, u8>,
     pub banned: HashSet<IpAddr>,
     pub contributors: HashMap<usize, Vec<PeerKey>>,
@@ -270,6 +285,21 @@ impl Core {
         for peer in self.peers.values() {
             let _ = peer.tx.try_send(make());
         }
+    }
+
+    pub fn record_dial(&mut self, addr: SocketAddr) {
+        let now = Instant::now();
+        self.dialed
+            .retain(|_, at| now.duration_since(*at) < Duration::from_secs(60));
+        if self.dialed.len() < 1024 {
+            self.dialed.insert(addr, now);
+        }
+    }
+
+    pub fn recently_dialed(&self, addr: &SocketAddr) -> bool {
+        self.dialed
+            .get(addr)
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(60))
     }
 
     pub fn add_candidate(&mut self, addr: SocketAddr) {
@@ -501,6 +531,10 @@ impl TorrentHandle {
             candidates: VecDeque::new(),
             known: HashSet::new(),
             connecting: HashSet::new(),
+            holepunch_hints: HashMap::new(),
+            holepunching: HashSet::new(),
+            holepunch_queue: VecDeque::new(),
+            dialed: HashMap::new(),
             strikes: HashMap::new(),
             banned: HashSet::new(),
             contributors: HashMap::new(),
@@ -1204,6 +1238,10 @@ async fn main_loop(shared: Arc<Shared>, initial: Option<Torrent>) {
         for addr in connect {
             tokio::spawn(super::peer::connect(shared.clone(), addr));
         }
+        let punches = std::mem::take(&mut shared.lock().holepunch_queue);
+        for addr in punches {
+            tokio::spawn(super::peer::holepunch_connect(shared.clone(), addr));
+        }
     }
 }
 
@@ -1586,6 +1624,8 @@ mod resume_tests {
                 down: RateMeter::default(),
                 up: RateMeter::default(),
                 since: Instant::now(),
+                utp: false,
+                holepunch: false,
             },
         );
         handle.pause();

@@ -4,8 +4,9 @@ use super::{
     bitfield::Bitfield,
     limiter::RateMeter,
     message::{
-        ExtHandshake, Handshake, HashRequest, LOCAL_UT_METADATA, LOCAL_UT_PEX, MAX_BLOCK,
-        METADATA_PIECE, Message, MetadataMessage, Pex, read_handshake, read_message, write_message,
+        ExtHandshake, Handshake, HashRequest, Holepunch, HolepunchError, LOCAL_UT_HOLEPUNCH,
+        LOCAL_UT_METADATA, LOCAL_UT_PEX, MAX_BLOCK, METADATA_PIECE, Message, MetadataMessage, Pex,
+        read_handshake, read_message, write_message,
     },
     metainfo::{Extras, Torrent},
     mse::{self, Stream},
@@ -37,23 +38,47 @@ const KEEPALIVE: Duration = Duration::from_secs(90);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
 pub(crate) const MAX_UPLOAD_QUEUE: usize = 128;
 const MAX_PEX_ADDED: usize = 50;
+const MAX_HOLEPUNCH_HINTS: usize = 256;
+/// Simultaneous hole-punch dials a relay may ask of us.
+const MAX_HOLEPUNCH_DIALS: usize = 4;
+const HOLEPUNCH_MIN_GAP: Duration = Duration::from_secs(2);
 
 pub async fn connect(shared: Arc<Shared>, addr: SocketAddr) {
-    let result = connect_inner(&shared, addr).await;
+    let result = connect_inner(&shared, addr, false).await;
     let mut core = shared.lock();
     core.connecting.remove(&addr);
     if result.is_err() {
         // Let a later tracker/PEX answer offer this address again.
         core.known.remove(&addr);
+        // Behind a NAT or firewall? A relay that told us this peer can hole punch may introduce us.
+        if let Some(relay) = core.holepunch_hints.remove(&addr)
+            && let Some(entry) = core.peers.get(&relay)
+            && entry.holepunch
+        {
+            let _ = entry
+                .tx
+                .try_send(PeerCmd::Holepunch(Holepunch::Rendezvous(addr)));
+        }
     }
 }
 
-async fn connect_inner(shared: &Arc<Shared>, addr: SocketAddr) -> Result<()> {
+/// Dials `addr` over uTP right now because a relay told both ends to connect at the same moment.
+pub(crate) async fn holepunch_connect(shared: Arc<Shared>, addr: SocketAddr) {
+    let result = connect_inner(&shared, addr, true).await;
+    let mut core = shared.lock();
+    core.holepunching.remove(&addr);
+    core.connecting.remove(&addr);
+    if result.is_err() {
+        core.known.remove(&addr);
+    }
+}
+
+async fn connect_inner(shared: &Arc<Shared>, addr: SocketAddr, only_utp: bool) -> Result<()> {
     let settings = shared.lock().settings.clone();
     let mut last_error = anyhow::anyhow!("no peer transport enabled");
     for use_utp in [false, true] {
         if (use_utp && (!settings.enable_utp || shared.utp.is_none()))
-            || (!use_utp && !settings.enable_tcp)
+            || (!use_utp && (!settings.enable_tcp || only_utp))
         {
             continue;
         }
@@ -80,7 +105,7 @@ async fn connect_inner(shared: &Arc<Shared>, addr: SocketAddr) -> Result<()> {
                 match result {
                     Ok(Ok((stream, theirs))) => {
                         shared.lock().connecting.remove(&addr);
-                        return run(shared.clone(), stream, addr, false, theirs).await;
+                        return run(shared.clone(), stream, addr, false, use_utp, theirs).await;
                     }
                     Ok(Err(e)) => last_error = e,
                     Err(e) => last_error = e.into(),
@@ -99,6 +124,7 @@ async fn open_peer(
     require_rc4: bool,
     wire_hash: [u8; 20],
 ) -> Result<(Stream, Handshake)> {
+    shared.lock().record_dial(addr);
     let mut stream: Stream = if use_utp {
         Box::new(
             timeout(
@@ -131,6 +157,7 @@ pub async fn accept(
     addr: SocketAddr,
     theirs: Handshake,
     encrypted: bool,
+    utp: bool,
 ) {
     let allowed = {
         let core = shared.lock();
@@ -151,7 +178,7 @@ pub async fn accept(
     if stream.write_all(&ours.encode()).await.is_err() {
         return;
     }
-    let _ = run(shared, stream, addr, true, theirs).await;
+    let _ = run(shared, stream, addr, true, utp, theirs).await;
 }
 
 struct Peer {
@@ -176,6 +203,8 @@ struct Peer {
     meter: RateMeter,
     last_sent: Instant,
     ext_hello_sent: bool,
+    /// When this peer last asked us to relay or connect (BEP 55 requests are rate limited).
+    last_holepunch: Option<Instant>,
     /// We told this peer what we have (needs the metadata first).
     announced: bool,
     dht_capable: bool,
@@ -194,8 +223,34 @@ async fn run(
     stream: Stream,
     addr: SocketAddr,
     incoming: bool,
+    utp: bool,
     theirs: Handshake,
 ) -> Result<()> {
+    // Both ends of a hole punch dial each other at once, so one pair of peers can end up with two
+    // connections. Each side keeps the one opened by the peer with the lower peer ID, which both
+    // can compute, instead of each dropping the other's.
+    let initiator_has_lower_id = if incoming {
+        theirs.peer_id < shared.peer_id
+    } else {
+        shared.peer_id < theirs.peer_id
+    };
+    let supersedes = {
+        let core = shared.lock();
+        core.peers
+            .values()
+            .find(|p| p.addr == addr && p.incoming != incoming)
+            .filter(|_| initiator_has_lower_id)
+            .map(|p| p.tx.clone())
+    };
+    if let Some(old) = supersedes {
+        let _ = old.try_send(PeerCmd::Shutdown);
+        for _ in 0..40 {
+            if !shared.lock().peers.values().any(|p| p.addr == addr) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
     let (read_half, writer) = tokio::io::split(stream);
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<PeerCmd>(64);
     let key = shared.next_key();
@@ -223,6 +278,8 @@ async fn run(
                 down: RateMeter::default(),
                 up: RateMeter::default(),
                 since: Instant::now(),
+                utp,
+                holepunch: false,
             },
         );
     }
@@ -262,6 +319,7 @@ async fn run(
         meter: RateMeter::default(),
         last_sent: Instant::now(),
         ext_hello_sent: false,
+        last_holepunch: None,
         announced: false,
         dht_capable: theirs.supports_dht(),
     };
@@ -289,6 +347,12 @@ async fn run(
 }
 
 impl Peer {
+    fn our_hello(&self, metadata_size: Option<u32>) -> ExtHandshake {
+        let hello = ExtHandshake::ours(metadata_size, self.shared.listen_port);
+        let utp = self.shared.utp.is_some() && self.shared.lock().settings.enable_utp;
+        if utp { hello.with_holepunch() } else { hello }
+    }
+
     async fn request_hashes(&mut self) -> Result<()> {
         self.hash_requests
             .retain(|_, at| at.elapsed() < Duration::from_secs(20));
@@ -422,7 +486,7 @@ impl Peer {
                 .lock()
                 .ready()
                 .map(|r| r.torrent.info_bytes.len() as u32);
-            let hello = ExtHandshake::ours(size, self.shared.listen_port);
+            let hello = self.our_hello(size);
             self.send(&Message::Extended {
                 id: 0,
                 payload: hello.encode(),
@@ -666,7 +730,7 @@ impl Peer {
                             .lock()
                             .ready()
                             .map(|r| r.torrent.info_bytes.len() as u32);
-                        let hello = ExtHandshake::ours(size, self.shared.listen_port);
+                        let hello = self.our_hello(size);
                         self.send(&Message::Extended {
                             id: 0,
                             payload: hello.encode(),
@@ -698,6 +762,20 @@ impl Peer {
                 }
             }
             PeerCmd::Pex(all) => self.send_pex(&all).await?,
+            PeerCmd::Holepunch(message) => {
+                if let Some(id) = self
+                    .their_ext
+                    .as_ref()
+                    .and_then(|e| e.extensions.get("ut_holepunch"))
+                    .copied()
+                {
+                    self.send(&Message::Extended {
+                        id,
+                        payload: message.encode(),
+                    })
+                    .await?;
+                }
+            }
         }
         Ok(true)
     }
@@ -733,7 +811,25 @@ impl Peer {
         for a in &dropped {
             self.pex_sent.remove(a);
         }
-        let payload = Pex { added, dropped }.encode();
+        // Flag the peers that can take part in hole punching, so a receiver knows whom to ask us for.
+        let holepunch = {
+            let core = self.shared.lock();
+            added
+                .iter()
+                .filter(|a| {
+                    core.peers
+                        .values()
+                        .any(|p| p.addr == **a && p.holepunch && p.utp)
+                })
+                .copied()
+                .collect()
+        };
+        let payload = Pex {
+            added,
+            dropped,
+            holepunch,
+        }
+        .encode();
         self.send(&Message::Extended { id, payload }).await
     }
 
@@ -1071,6 +1167,7 @@ impl Peer {
                 let hello = ExtHandshake::decode(&payload)?;
                 if let Some(entry) = self.shared.lock().peers.get_mut(&self.key) {
                     entry.client = hello.client.clone();
+                    entry.holepunch = hello.extensions.contains_key("ut_holepunch");
                 }
                 // BEP 10: a peer that can listen tells us its port; remember it for PEX/reconnects.
                 self.their_ext = Some(hello.clone());
@@ -1078,8 +1175,18 @@ impl Peer {
                     self.learn_metadata_size(size as usize);
                 }
                 self.request_metadata().await?;
+                // Tell a new peer who else is here right away (BEP 11), not a minute later.
+                let share = {
+                    let core = self.shared.lock();
+                    (core.settings.enable_pex && !core.private)
+                        .then(|| core.peers.values().map(|p| p.addr).collect::<Vec<_>>())
+                };
+                if let Some(all) = share {
+                    self.send_pex(&all).await?;
+                }
             }
             LOCAL_UT_METADATA => self.on_metadata(&payload).await?,
+            LOCAL_UT_HOLEPUNCH => self.on_holepunch(&payload).await?,
             LOCAL_UT_PEX => {
                 let (enabled, private) = {
                     let core = self.shared.lock();
@@ -1091,6 +1198,14 @@ impl Peer {
                     for addr in pex.added {
                         core.add_candidate(addr);
                     }
+                    if core.settings.enable_utp {
+                        for addr in pex.holepunch {
+                            if core.holepunch_hints.len() >= MAX_HOLEPUNCH_HINTS {
+                                break;
+                            }
+                            core.holepunch_hints.entry(addr).or_insert(self.key);
+                        }
+                    }
                     drop(core);
                     self.shared.wake.notify_one();
                 }
@@ -1098,6 +1213,98 @@ impl Peer {
             _ => {}
         }
         Ok(())
+    }
+
+    /// BEP 55. As a relay we introduce two of our peers; as an endpoint we dial the address a relay
+    /// gives us at the same moment the other side does, so both NATs open a mapping.
+    async fn on_holepunch(&mut self, payload: &[u8]) -> Result<()> {
+        let message = Holepunch::decode(payload)?;
+        if self
+            .last_holepunch
+            .is_some_and(|at| at.elapsed() < HOLEPUNCH_MIN_GAP)
+        {
+            return Ok(()); // a peer cannot make us relay or dial in a tight loop
+        }
+        match message {
+            Holepunch::Rendezvous(target) => {
+                self.last_holepunch = Some(Instant::now());
+                let verdict = {
+                    let core = self.shared.lock();
+                    if target == self.addr {
+                        Err(HolepunchError::NoSelf)
+                    } else {
+                        match core.peers.values().find(|p| p.addr == target) {
+                            None => Err(HolepunchError::NoSuchPeer),
+                            Some(p) if !p.holepunch || !p.utp => Err(HolepunchError::NoSupport),
+                            Some(p) => Ok(p.tx.clone()),
+                        }
+                    }
+                };
+                match verdict {
+                    Ok(target_tx) => {
+                        // Both ends get the other's address; only addresses of peers that are
+                        // connected to us are ever handed out, so this cannot aim traffic elsewhere.
+                        let introduced = target_tx
+                            .try_send(PeerCmd::Holepunch(Holepunch::Connect(self.addr)))
+                            .is_ok();
+                        let reply = if introduced {
+                            Holepunch::Connect(target)
+                        } else {
+                            Holepunch::Error(target, HolepunchError::NotConnected)
+                        };
+                        self.send_holepunch(&reply).await?;
+                    }
+                    Err(error) => {
+                        self.send_holepunch(&Holepunch::Error(target, error))
+                            .await?;
+                    }
+                }
+            }
+            Holepunch::Connect(target) => {
+                self.last_holepunch = Some(Instant::now());
+                let allowed = {
+                    let mut core = self.shared.lock();
+                    let usable = core.settings.enable_utp
+                        && self.shared.utp.is_some()
+                        && !core.paused
+                        && target.port() != 0
+                        && !target.ip().is_unspecified()
+                        && !target.ip().is_multicast()
+                        && core.peer_address_ok(&target)
+                        && !core.peers.values().any(|p| p.addr == target)
+                        && !core.connecting.contains(&target)
+                        && core.holepunching.len() < MAX_HOLEPUNCH_DIALS;
+                    if usable {
+                        core.holepunching.insert(target);
+                        core.connecting.insert(target);
+                    }
+                    usable
+                };
+                if allowed {
+                    self.shared.lock().holepunch_queue.push_back(target);
+                    self.shared.wake.notify_one();
+                }
+            }
+            // The relay could not help; the normal connect path already failed, nothing else to do.
+            Holepunch::Error(..) => {}
+        }
+        Ok(())
+    }
+
+    async fn send_holepunch(&mut self, message: &Holepunch) -> Result<()> {
+        let Some(id) = self
+            .their_ext
+            .as_ref()
+            .and_then(|e| e.extensions.get("ut_holepunch"))
+            .copied()
+        else {
+            return Ok(());
+        };
+        self.send(&Message::Extended {
+            id,
+            payload: message.encode(),
+        })
+        .await
     }
 
     fn learn_metadata_size(&mut self, size: usize) {

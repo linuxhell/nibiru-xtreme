@@ -386,6 +386,13 @@ impl RpcServer {
                     {
                         features.push("LSD");
                     }
+                    if self
+                        .bt
+                        .as_ref()
+                        .is_some_and(|bt| bt.session().utp_enabled())
+                    {
+                        features.push("HolePunch");
+                    }
                 }
                 if self.ed2k.is_some() {
                     features.extend(["ED2K", "Kad2-sources"]);

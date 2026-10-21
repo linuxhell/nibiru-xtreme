@@ -404,6 +404,7 @@ pub async fn write_message<W: AsyncWrite + Unpin>(writer: &mut W, message: &Mess
 /// Extension message IDs we ask peers to use when sending to us.
 pub const LOCAL_UT_METADATA: u8 = 1;
 pub const LOCAL_UT_PEX: u8 = 2;
+pub const LOCAL_UT_HOLEPUNCH: u8 = 3;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ExtHandshake {
@@ -427,6 +428,13 @@ impl ExtHandshake {
             client: Some(format!("Nibiru Xtreme {}", env!("CARGO_PKG_VERSION"))),
             request_queue: Some(super::peer::MAX_UPLOAD_QUEUE as u32),
         }
+    }
+
+    /// Also offers `ut_holepunch` (BEP 55); only meaningful when uTP is available.
+    pub fn with_holepunch(mut self) -> Self {
+        self.extensions
+            .insert("ut_holepunch".to_owned(), LOCAL_UT_HOLEPUNCH);
+        self
     }
 
     pub fn encode(&self) -> Vec<u8> {
@@ -566,6 +574,107 @@ impl MetadataMessage {
 pub struct Pex {
     pub added: Vec<SocketAddr>,
     pub dropped: Vec<SocketAddr>,
+    /// Added peers whose flags say they support `ut_holepunch` (BEP 11 flag 0x08).
+    pub holepunch: Vec<SocketAddr>,
+}
+
+/// PEX flag bits (BEP 11 / BEP 55).
+const PEX_FLAG_HOLEPUNCH: u8 = 0x08;
+const PEX_FLAG_UTP: u8 = 0x04;
+
+/// BEP 55 `ut_holepunch` message: binary, not bencoded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Holepunch {
+    /// Initiator → relay: please introduce me to this peer.
+    Rendezvous(SocketAddr),
+    /// Relay → both ends: connect to this peer now (simultaneously).
+    Connect(SocketAddr),
+    Error(SocketAddr, HolepunchError),
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HolepunchError {
+    NoSuchPeer,
+    NotConnected,
+    NoSupport,
+    NoSelf,
+    Unknown(u32),
+}
+impl HolepunchError {
+    fn code(self) -> u32 {
+        match self {
+            Self::NoSuchPeer => 1,
+            Self::NotConnected => 2,
+            Self::NoSupport => 3,
+            Self::NoSelf => 4,
+            Self::Unknown(code) => code,
+        }
+    }
+    fn from_code(code: u32) -> Self {
+        match code {
+            1 => Self::NoSuchPeer,
+            2 => Self::NotConnected,
+            3 => Self::NoSupport,
+            4 => Self::NoSelf,
+            other => Self::Unknown(other),
+        }
+    }
+}
+impl Holepunch {
+    pub fn encode(&self) -> Vec<u8> {
+        let (kind, addr, error) = match self {
+            Self::Rendezvous(addr) => (0u8, addr, 0),
+            Self::Connect(addr) => (1, addr, 0),
+            Self::Error(addr, error) => (2, addr, error.code()),
+        };
+        let mut out = vec![kind];
+        match addr.ip() {
+            std::net::IpAddr::V4(ip) => {
+                out.push(0);
+                out.extend(ip.octets());
+            }
+            std::net::IpAddr::V6(ip) => {
+                out.push(1);
+                out.extend(ip.octets());
+            }
+        }
+        out.extend(addr.port().to_be_bytes());
+        // Only error messages carry a code; libtorrent's rendezvous/connect end after the port.
+        if matches!(self, Self::Error(..)) {
+            out.extend(error.to_be_bytes());
+        }
+        out
+    }
+
+    pub fn decode(payload: &[u8]) -> Result<Self> {
+        let [kind, family, rest @ ..] = payload else {
+            bail!("short ut_holepunch message");
+        };
+        let (ip, rest): (std::net::IpAddr, &[u8]) = match (*family, rest.len()) {
+            (0, 6 | 10) => {
+                let octets: [u8; 4] = rest[..4].try_into()?;
+                (octets.into(), &rest[4..])
+            }
+            (1, 18 | 22) => {
+                let octets: [u8; 16] = rest[..16].try_into()?;
+                (octets.into(), &rest[16..])
+            }
+            _ => bail!("malformed ut_holepunch address"),
+        };
+        let port = u16::from_be_bytes(rest[..2].try_into()?);
+        // The error code is mandatory for errors and tolerated (ignored) elsewhere.
+        let error = match rest.len() {
+            6 => u32::from_be_bytes(rest[2..6].try_into()?),
+            _ if *kind == 2 => bail!("ut_holepunch error without a code"),
+            _ => 0,
+        };
+        let addr = SocketAddr::new(ip, port);
+        match kind {
+            0 => Ok(Self::Rendezvous(addr)),
+            1 => Ok(Self::Connect(addr)),
+            2 => Ok(Self::Error(addr, HolepunchError::from_code(error))),
+            other => bail!("unknown ut_holepunch message type {other}"),
+        }
+    }
 }
 
 fn compact(addresses: &[SocketAddr]) -> (Vec<u8>, Vec<u8>) {
@@ -608,23 +717,32 @@ fn uncompact(v4: Option<&[u8]>, v6: Option<&[u8]>, limit: usize) -> Vec<SocketAd
 }
 
 impl Pex {
+    /// One flag byte per added peer of the family, in the order `compact` writes them.
+    fn flags(&self, v4: bool) -> Vec<u8> {
+        self.added
+            .iter()
+            .filter(|a| a.is_ipv4() == v4)
+            .map(|a| {
+                if self.holepunch.contains(a) {
+                    PEX_FLAG_HOLEPUNCH | PEX_FLAG_UTP
+                } else {
+                    0
+                }
+            })
+            .collect()
+    }
+
     pub fn encode(&self) -> Vec<u8> {
         let (added, added6) = compact(&self.added);
         let (dropped, dropped6) = compact(&self.dropped);
         let mut pairs = vec![
             ("added", Value::Bytes(added)),
-            (
-                "added.f",
-                Value::Bytes(vec![0; self.added.iter().filter(|a| a.is_ipv4()).count()]),
-            ),
+            ("added.f", Value::Bytes(self.flags(true))),
             ("dropped", Value::Bytes(dropped)),
         ];
         if !added6.is_empty() {
             pairs.push(("added6", Value::Bytes(added6)));
-            pairs.push((
-                "added6.f",
-                Value::Bytes(vec![0; self.added.iter().filter(|a| a.is_ipv6()).count()]),
-            ));
+            pairs.push(("added6.f", Value::Bytes(self.flags(false))));
         }
         if !dropped6.is_empty() {
             pairs.push(("dropped6", Value::Bytes(dropped6)));
@@ -642,9 +760,27 @@ impl Pex {
             .context("invalid pex message")?
             .value;
         let bytes = |key: &str| doc.get(key).and_then(Value::bytes);
+        let mut holepunch = Vec::new();
+        // The flag bytes line up with the compact list, entry for entry.
+        for (list, flags, size) in [("added", "added.f", 6usize), ("added6", "added6.f", 18)] {
+            let (Some(peers), Some(flags)) = (bytes(list), bytes(flags)) else {
+                continue;
+            };
+            for (chunk, flag) in peers.chunks_exact(size).zip(flags) {
+                if flag & PEX_FLAG_HOLEPUNCH != 0 {
+                    holepunch.extend(uncompact(
+                        (size == 6).then_some(chunk),
+                        (size == 18).then_some(chunk),
+                        1,
+                    ));
+                }
+            }
+        }
+        holepunch.truncate(200);
         Ok(Self {
             added: uncompact(bytes("added"), bytes("added6"), 200),
             dropped: uncompact(bytes("dropped"), bytes("dropped6"), 200),
+            holepunch,
         })
     }
 }
@@ -754,6 +890,66 @@ mod tests {
     }
 
     #[test]
+    fn holepunch_messages_follow_the_bep_55_binary_layout() {
+        let v4: SocketAddr = "203.0.113.7:6881".parse().unwrap();
+        let v6: SocketAddr = "[2001:db8::9]:51413".parse().unwrap();
+        // msg_type, addr_type, address, port (big endian); errors add a big-endian code.
+        // The 8-byte connect is exactly what libtorrent 2.1.1 sends.
+        assert_eq!(
+            Holepunch::Rendezvous(v4).encode(),
+            [0, 0, 203, 0, 113, 7, 0x1a, 0xe1]
+        );
+        assert_eq!(
+            Holepunch::decode(&[1, 0, 127, 0, 0, 1, 0x82, 0x57]).unwrap(),
+            Holepunch::Connect("127.0.0.1:33367".parse().unwrap())
+        );
+        // A trailing zero code on rendezvous/connect (other implementations) is accepted.
+        assert!(Holepunch::decode(&[0, 0, 1, 2, 3, 4, 0, 80, 0, 0, 0, 0]).is_ok());
+        assert_eq!(
+            Holepunch::Error(v4, HolepunchError::NoSelf).encode(),
+            [2, 0, 203, 0, 113, 7, 0x1a, 0xe1, 0, 0, 0, 4]
+        );
+        for message in [
+            Holepunch::Rendezvous(v4),
+            Holepunch::Connect(v6),
+            Holepunch::Error(v6, HolepunchError::NoSuchPeer),
+            Holepunch::Error(v4, HolepunchError::Unknown(77)),
+        ] {
+            assert_eq!(Holepunch::decode(&message.encode()).unwrap(), message);
+        }
+        assert_eq!(Holepunch::Connect(v6).encode().len(), 20);
+        assert_eq!(
+            Holepunch::Error(v6, HolepunchError::NoSelf).encode().len(),
+            24
+        );
+        for bad in [
+            &[][..],
+            &[0],
+            &[0, 0, 1, 2, 3],
+            &[9, 0, 1, 2, 3, 4, 0, 80, 0, 0, 0, 0],
+            &[0, 7, 1, 2, 3, 4, 0, 80, 0, 0, 0, 0],
+            &[0, 0, 1, 2, 3, 4, 0, 80, 0, 0, 0, 0, 0],
+            // An error without its code.
+            &[2, 0, 1, 2, 3, 4, 0, 80],
+        ] {
+            assert!(Holepunch::decode(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn pex_flags_mark_which_added_peers_can_holepunch() {
+        let mut pairs = std::collections::BTreeMap::new();
+        pairs.insert(
+            b"added".to_vec(),
+            Value::Bytes(vec![1, 1, 1, 1, 0x1a, 0xe1, 2, 2, 2, 2, 0x1a, 0xe2]),
+        );
+        pairs.insert(b"added.f".to_vec(), Value::Bytes(vec![0x10, 0x18]));
+        let pex = Pex::decode(&bencode::encode(&Value::Dict(pairs))).unwrap();
+        assert_eq!(pex.added.len(), 2);
+        assert_eq!(pex.holepunch, vec!["2.2.2.2:6882".parse().unwrap()]);
+    }
+
+    #[test]
     fn extension_handshake_round_trips_and_ignores_junk() {
         let ours = ExtHandshake::ours(Some(12345), 6881);
         let back = ExtHandshake::decode(&ours.encode()).unwrap();
@@ -811,6 +1007,7 @@ mod tests {
                 "[2001:db8::1]:51413".parse().unwrap(),
             ],
             dropped: vec!["5.6.7.8:6882".parse().unwrap()],
+            ..Default::default()
         };
         let back = Pex::decode(&pex.encode()).unwrap();
         assert_eq!(back, pex);

@@ -37,6 +37,9 @@ pub struct SessionConfig {
     pub enable_utp: bool,
     /// Local Service Discovery (BEP 14) on the multicast group.
     pub lsd: Option<super::lsd::LsdConfig>,
+    /// Test aid: behave like a restricted NAT and drop inbound peers we did not dial recently.
+    /// Never enabled by the CLI; it exists to exercise BEP 55 hole punching on one machine.
+    pub emulate_restricted_nat: bool,
 }
 
 impl Default for SessionConfig {
@@ -52,6 +55,7 @@ impl Default for SessionConfig {
             dht6: None,
             enable_utp: true,
             lsd: None,
+            emulate_restricted_nat: false,
         }
     }
 }
@@ -67,6 +71,7 @@ pub struct Session {
     dht6: Option<Arc<Dht>>,
     utp: Option<Arc<librqbit_utp::UtpSocketUdp>>,
     lsd: std::sync::OnceLock<super::lsd::Lsd>,
+    restricted_nat: bool,
 }
 
 fn new_peer_id() -> [u8; 20] {
@@ -151,6 +156,7 @@ impl Session {
             dht6,
             utp: utp.clone(),
             lsd: std::sync::OnceLock::new(),
+            restricted_nat: config.emulate_restricted_nat,
         });
         if let Some(lsd) = config.lsd.clone() {
             // Best effort: a host without multicast simply runs without LSD.
@@ -181,8 +187,11 @@ impl Session {
                         return;
                     };
                     let handle = session.existing(&hello.info_hash);
-                    if let Some(handle) = handle {
-                        peer::accept(handle.shared.clone(), stream, addr, hello, encrypted).await;
+                    if let Some(handle) = handle
+                        && session.admits(&handle, addr)
+                    {
+                        peer::accept(handle.shared.clone(), stream, addr, hello, encrypted, false)
+                            .await;
                     }
                 });
             }
@@ -211,15 +220,29 @@ impl Session {
                             return;
                         };
                         let handle = session.existing(&hello.info_hash);
-                        if let Some(handle) = handle {
-                            peer::accept(handle.shared.clone(), stream, addr, hello, encrypted)
-                                .await;
+                        if let Some(handle) = handle
+                            && session.admits(&handle, addr)
+                        {
+                            peer::accept(
+                                handle.shared.clone(),
+                                stream,
+                                addr,
+                                hello,
+                                encrypted,
+                                true,
+                            )
+                            .await;
                         }
                     });
                 }
             });
         }
         Ok(session)
+    }
+
+    /// Whether peers can be reached over uTP (the only transport hole punching works on).
+    pub fn utp_enabled(&self) -> bool {
+        self.utp.is_some()
     }
 
     /// Whether Local Service Discovery is running on this session.
@@ -287,6 +310,11 @@ impl Session {
         }
         due.truncate(10);
         due
+    }
+
+    /// Restricted-NAT emulation: an inbound peer is admitted only if we dialed its address lately.
+    fn admits(&self, handle: &TorrentHandle, addr: SocketAddr) -> bool {
+        !self.restricted_nat || handle.shared.lock().recently_dialed(&addr)
     }
 
     fn accepted_hashes(&self) -> Vec<[u8; 20]> {
