@@ -1,10 +1,13 @@
-use crate::{engine::Progress, logging::LogSink};
+use crate::{bittorrent::limiter::RateLimiter, engine::Progress, logging::LogSink};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{
     future::Future,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tokio::{
@@ -76,9 +79,14 @@ pub(crate) struct StagedFile {
     verify: Vec<u8>,
     verified: usize,
     unsynced: u64,
+    limiters: Vec<Arc<RateLimiter>>,
 }
 
 impl StagedFile {
+    pub(crate) fn set_limiters(&mut self, limiters: &[Arc<RateLimiter>]) {
+        self.limiters = limiters.to_vec();
+    }
+
     pub(crate) async fn new(destination: &Path, total: Option<u64>) -> Result<Self> {
         if fs::try_exists(destination).await? {
             bail!("destination already exists; choose another output file");
@@ -107,6 +115,7 @@ impl StagedFile {
             verify: Vec::new(),
             verified: 0,
             unsynced: 0,
+            limiters: Vec::new(),
         })
     }
 
@@ -190,6 +199,7 @@ impl StagedFile {
                 verify,
                 verified: 0,
                 unsynced: 0,
+                limiters: Vec::new(),
             },
             start,
         ))
@@ -275,6 +285,19 @@ impl StagedFile {
                     return Err(ResumeMismatch.into());
                 }
                 self.verified += compared;
+            }
+            for limiter in &self.limiters {
+                let acquire = limiter.acquire(count as u64);
+                tokio::pin!(acquire);
+                loop {
+                    if cancel.load(Ordering::Acquire) {
+                        bail!("cancelled");
+                    }
+                    tokio::select! {
+                        _ = &mut acquire => break,
+                        _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+                    }
+                }
             }
             self.file
                 .as_mut()

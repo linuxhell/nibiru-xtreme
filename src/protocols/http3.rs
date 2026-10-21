@@ -1,5 +1,5 @@
 use super::{StagedFile, TransportOptions, operation};
-use crate::{engine::Progress, logging::LogSink};
+use crate::engine::Progress;
 use anyhow::{Result, bail};
 use futures_util::TryStreamExt;
 use std::{path::Path, sync::atomic::AtomicBool, time::Duration};
@@ -10,7 +10,7 @@ pub(crate) async fn download<F>(
     destination: &Path,
     options: &TransportOptions,
     cancel: &AtomicBool,
-    log: &LogSink,
+    context: &super::TransferContext<'_>,
     on_progress: &mut F,
 ) -> Result<()>
 where
@@ -50,15 +50,20 @@ where
     if response.version() != reqwest::Version::HTTP_3 {
         bail!("server did not negotiate HTTP/3");
     }
-    log.info("transfer.started", "protocol=http3 version=HTTP/3");
+    context
+        .log
+        .info("transfer.started", "protocol=http3 version=HTTP/3");
     let mut staged = StagedFile::new(destination, response.content_length()).await?;
     let mut reader = tokio_util::io::StreamReader::new(
         response
             .bytes_stream()
             .map_err(|e| std::io::Error::other(e.without_url())),
     );
+    staged.set_limiters(context.limiters);
     staged
-        .copy(&mut reader, cancel, log, "http3", on_progress)
+        .copy(&mut reader, cancel, context.log, "http3", on_progress)
         .await?;
-    staged.commit(cancel, log, "http3", on_progress).await
+    staged
+        .commit(cancel, context.log, "http3", on_progress)
+        .await
 }

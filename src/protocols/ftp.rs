@@ -1,5 +1,5 @@
 use super::{ResumeMismatch, StagedFile, TransportOptions, Validator, decoded, operation};
-use crate::{engine::Progress, logging::LogSink};
+use crate::engine::Progress;
 use anyhow::{Context, Result, bail};
 use std::path::Path;
 use std::sync::Arc;
@@ -19,17 +19,19 @@ pub(crate) async fn download<F>(
     destination: &Path,
     options: &TransportOptions,
     cancel: &AtomicBool,
-    log: &LogSink,
+    context: &super::TransferContext<'_>,
     on_progress: &mut F,
 ) -> Result<()>
 where
     F: FnMut(Progress) + Send,
 {
     // A server that does not continue a saved partial invalidates it; try once from scratch.
-    match download_once(url, destination, options, cancel, log, on_progress).await {
+    match download_once(url, destination, options, cancel, context, on_progress).await {
         Err(error) if error.downcast_ref::<ResumeMismatch>().is_some() => {
-            log.warn("transfer.resume_rejected", "restarting from the beginning");
-            download_once(url, destination, options, cancel, log, on_progress).await
+            context
+                .log
+                .warn("transfer.resume_rejected", "restarting from the beginning");
+            download_once(url, destination, options, cancel, context, on_progress).await
         }
         other => other,
     }
@@ -40,7 +42,7 @@ async fn download_once<F>(
     destination: &Path,
     options: &TransportOptions,
     cancel: &AtomicBool,
-    log: &LogSink,
+    context: &super::TransferContext<'_>,
     on_progress: &mut F,
 ) -> Result<()>
 where
@@ -74,7 +76,7 @@ where
     let tls = url.scheme() != "ftp";
     let implicit = url.scheme() == "ftps";
     let port = url.port().unwrap_or(if implicit { 990 } else { 21 });
-    log.info(
+    context.log.info(
         "transfer.started",
         &format!("protocol={} host={host} port={port}", url.scheme()),
     );
@@ -110,7 +112,7 @@ where
             &key,
             destination,
             cancel,
-            log,
+            context,
             on_progress,
         )
         .await
@@ -133,7 +135,7 @@ where
             &key,
             destination,
             cancel,
-            log,
+            context,
             on_progress,
         )
         .await
@@ -149,7 +151,7 @@ async fn transfer<T, F>(
     key: &str,
     destination: &Path,
     cancel: &AtomicBool,
-    log: &LogSink,
+    context: &super::TransferContext<'_>,
     on_progress: &mut F,
 ) -> Result<()>
 where
@@ -190,7 +192,7 @@ where
         None => (StagedFile::new(destination, None).await?, 0),
     };
     if offset > 0 {
-        log.info(
+        context.log.info(
             "transfer.resuming",
             &format!("protocol=ftp offset={offset}"),
         );
@@ -202,7 +204,7 @@ where
     let mut stream = match first {
         Ok(stream) => stream,
         Err(suppaftp::FtpError::UnexpectedResponse(_)) if offset > 0 => {
-            log.warn(
+            context.log.warn(
                 "transfer.resume_unsupported",
                 "REST was refused; starting over",
             );
@@ -213,14 +215,17 @@ where
         }
         Err(error) => return Err(error).context("FTP RETR failed"),
     };
+    staged.set_limiters(context.limiters);
     staged
-        .copy(&mut stream, cancel, log, "ftp", on_progress)
+        .copy(&mut stream, cancel, context.log, "ftp", on_progress)
         .await?;
     // EOF on the data socket alone is not proof of successful FTP completion.
     operation(cancel, async { Ok(stream.finish().await?) })
         .await
         .context("FTP transfer completion rejected")?;
-    staged.commit(cancel, log, "ftp", on_progress).await?;
+    staged
+        .commit(cancel, context.log, "ftp", on_progress)
+        .await?;
     // QUIT is best-effort after data has been acknowledged and committed.
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), ftp.quit()).await;
     Ok(())

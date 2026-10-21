@@ -489,3 +489,58 @@ async fn ftp_never_continues_a_partial_into_a_different_remote_file() {
     );
     assert!(other.rests.lock().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn ftp_obeys_shared_bandwidth_limits_and_cancels_while_waiting_for_tokens() {
+    use nibiru_xtreme::bittorrent::limiter::RateLimiter;
+    for cancel_while_throttled in [false, true] {
+        let data = Arc::new(vec![23; 300_000]);
+        let fixture = ftp_fixture_with(false, false, Fault::None, data.clone()).await;
+        let destination = fixture.root.path().join("limited.bin");
+        let cancel = Arc::new(AtomicBool::new(false));
+        if cancel_while_throttled {
+            let signal = cancel.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                signal.store(true, Ordering::Release);
+            });
+        }
+        let limiter = Arc::new(RateLimiter::new(if cancel_while_throttled {
+            1
+        } else {
+            100_000
+        }));
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            engine(Default::default())
+                .with_limiters(vec![limiter])
+                .download(
+                    DownloadRequest {
+                        url: format!(
+                            "ftp://user:p%40ss@{}/folder/payload%20file.bin",
+                            fixture.address
+                        ),
+                        destination: destination.clone(),
+                    },
+                    cancel,
+                    |_| {},
+                ),
+        )
+        .await
+        .expect("throttled transfer did not respond");
+        if cancel_while_throttled {
+            assert!(result.unwrap_err().to_string().contains("cancelled"));
+            assert!(started.elapsed() < Duration::from_secs(2));
+            assert!(!destination.exists());
+        } else {
+            result.unwrap();
+            assert!(
+                started.elapsed() >= Duration::from_millis(1800),
+                "FTP ignored the engine limiter: {:?}",
+                started.elapsed()
+            );
+            assert_eq!(std::fs::read(destination).unwrap(), *data);
+        }
+    }
+}

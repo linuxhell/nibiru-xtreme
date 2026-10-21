@@ -1,5 +1,5 @@
 use super::{ResumeMismatch, StagedFile, TransportOptions, Validator, decoded, operation};
-use crate::{engine::Progress, logging::LogSink};
+use crate::engine::Progress;
 use anyhow::{Context, Result, bail};
 use russh::{
     client,
@@ -36,17 +36,19 @@ pub(crate) async fn download<F>(
     destination: &Path,
     options: &TransportOptions,
     cancel: &AtomicBool,
-    log: &LogSink,
+    context: &super::TransferContext<'_>,
     on_progress: &mut F,
 ) -> Result<()>
 where
     F: FnMut(Progress) + Send,
 {
     // A server that does not continue a saved partial invalidates it; try once from scratch.
-    match download_once(url, destination, options, cancel, log, on_progress).await {
+    match download_once(url, destination, options, cancel, context, on_progress).await {
         Err(error) if error.downcast_ref::<ResumeMismatch>().is_some() => {
-            log.warn("transfer.resume_rejected", "restarting from the beginning");
-            download_once(url, destination, options, cancel, log, on_progress).await
+            context
+                .log
+                .warn("transfer.resume_rejected", "restarting from the beginning");
+            download_once(url, destination, options, cancel, context, on_progress).await
         }
         other => other,
     }
@@ -57,7 +59,7 @@ async fn download_once<F>(
     destination: &Path,
     options: &TransportOptions,
     cancel: &AtomicBool,
-    log: &LogSink,
+    context: &super::TransferContext<'_>,
     on_progress: &mut F,
 ) -> Result<()>
 where
@@ -123,7 +125,7 @@ where
     if !authenticated {
         bail!("SSH authentication rejected");
     }
-    log.info(
+    context.log.info(
         "transfer.started",
         &format!("protocol=sftp host={host} port={port} host_key_verified=true"),
     );
@@ -148,7 +150,7 @@ where
         None => (StagedFile::new(destination, None).await?, 0),
     };
     if offset > 0 {
-        log.info(
+        context.log.info(
             "transfer.resuming",
             &format!("protocol=sftp offset={offset}"),
         );
@@ -157,11 +159,14 @@ where
         })
         .await?;
     }
+    staged.set_limiters(context.limiters);
     staged
-        .copy(&mut remote, cancel, log, "sftp", on_progress)
+        .copy(&mut remote, cancel, context.log, "sftp", on_progress)
         .await?;
     operation(cancel, async { Ok(remote.close().await?) }).await?;
-    staged.commit(cancel, log, "sftp", on_progress).await?;
+    staged
+        .commit(cancel, context.log, "sftp", on_progress)
+        .await?;
     let _ = tokio::time::timeout(Duration::from_secs(2), sftp.close()).await;
     let _ = tokio::time::timeout(
         Duration::from_secs(2),

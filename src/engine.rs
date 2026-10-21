@@ -394,6 +394,11 @@ impl Engine {
             .try_lock()
             .context("download destination is already in use")?;
 
+        #[cfg(any(feature = "ftp", feature = "sftp", feature = "http3"))]
+        let context = crate::protocols::TransferContext {
+            log: &self.log,
+            limiters: &self.limiters,
+        };
         if self.http3_only {
             #[cfg(not(feature = "http3"))]
             bail!("HTTP/3 is disabled in this build");
@@ -403,7 +408,7 @@ impl Engine {
                 &request.destination,
                 &self.transport_options,
                 &cancelled,
-                &self.log,
+                &context,
                 &mut on_progress,
             )
             .await;
@@ -417,7 +422,7 @@ impl Engine {
                     &request.destination,
                     &self.transport_options,
                     &cancelled,
-                    &self.log,
+                    &context,
                     &mut on_progress,
                 )
                 .await;
@@ -429,7 +434,7 @@ impl Engine {
                     &request.destination,
                     &self.transport_options,
                     &cancelled,
-                    &self.log,
+                    &context,
                     &mut on_progress,
                 )
                 .await;
