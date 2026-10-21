@@ -220,7 +220,7 @@ impl SharedFile {
             bail!("invalid shared-file range");
         }
         let metadata = validate_regular_file(&self.path)?;
-        if metadata.len() != self.link.size {
+        if metadata.len() != self.link.size || mtime_ns(&metadata) != self.mtime_ns {
             bail!("shared file changed on disk; rescan required");
         }
         let mut file = std::fs::File::open(&self.path)?;
@@ -470,6 +470,26 @@ mod tests {
         );
         std::fs::write(path, b"changed").unwrap();
         assert!(registry.get(&hash).unwrap().read_range(0, 3).is_err());
+    }
+
+    #[tokio::test]
+    async fn same_size_edits_are_not_served_under_a_stale_ed2k_hash() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("same-size.bin");
+        std::fs::write(&path, b"abc").unwrap();
+
+        let registry = ShareRegistry::default();
+        let info = registry.add_file(path.clone()).await.unwrap();
+        let hash = super::super::server::file_hash(&info.hash).unwrap();
+        let shared = registry.get(&hash).unwrap();
+        assert_eq!(shared.read_range(0, 3).unwrap(), b"abc");
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&path, b"xyz").unwrap();
+        assert!(
+            shared.read_range(0, 3).is_err(),
+            "same-size content changes must require a rescan before upload"
+        );
     }
 
     #[tokio::test]
