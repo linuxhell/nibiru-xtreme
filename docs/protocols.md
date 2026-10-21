@@ -74,16 +74,19 @@ loopback evidence and remaining limits are described below.
 nothing is written and `nibiru.getSessionInfo` reports `"persistent": false`.
 
 - **What is stored.** A task is written when it is not complete or removed: its GID,
-  source (URL, `.torrent` bytes, or magnet link) and configuration options (`dir`, `out`,
-  limits, `select-file`, seeding limits, `referer`, `user-agent`, CA/host-key settings).
+  source (URL, `.torrent` bytes, or magnet link) and non-sensitive configuration options (`dir`,
+  `out`, limits, `select-file`, seeding limits, `user-agent`, CA/host-key settings).
   The file is rewritten atomically (temporary file, fsync, rename) shortly after every
   task change and at least every 5 seconds, and on SIGTERM/Ctrl-C and when the parent
   process disappears. Unchanged content is not rewritten. On Unix it is mode `0600`.
 - **What is never stored.** Any task whose request carries credentials stays out of the
-  file: URL user info, cookies or any header other than `Accept*`/`Origin`, proxy
-  user names or passwords, proxy URLs with user info. Downloaded bytes are not trusted
+  file: URL user info, direct-download URLs with a query string, cookies or any header other than
+  `Accept*`/`Origin`, proxy user names or passwords, proxy URLs with user info. `Referer` is
+  deliberately dropped because it can contain signed URLs or tokens. Downloaded bytes are not trusted
   because of this file either. After a restart the manager sees an unknown GID for such a
-  task and recreates it with fresh credentials, exactly as without persistence.
+  task and recreates it with fresh credentials, exactly as without persistence. HTTP resume sidecars
+  store SHA-256 URL fingerprints rather than cleartext request/final URLs; legacy cleartext sidecars are
+  accepted only on an exact URL match and are immediately migrated.
 - **Restore.** On start the engine recreates the stored tasks under their old GIDs, all
   `paused`; none starts by itself. Resuming a direct task re-checks the saved HTTP
   validator (a changed origin restarts it), and resuming a torrent re-hashes the payload
