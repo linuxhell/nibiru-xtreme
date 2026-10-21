@@ -92,6 +92,8 @@ struct Inner {
     running: AtomicBool,
     serial: AtomicU64,
     lookup_lock: tokio::sync::Mutex<()>,
+    /// Completed maintenance passes (the first one runs as soon as the session starts).
+    passes: AtomicU64,
     ip_filter: std::sync::RwLock<Arc<super::ip_filter::IpFilter>>,
 }
 pub struct KadSession {
@@ -580,6 +582,7 @@ impl KadSession {
             running: AtomicBool::new(true),
             serial: AtomicU64::new(1),
             lookup_lock: tokio::sync::Mutex::new(()),
+            passes: AtomicU64::new(0),
             ip_filter: std::sync::RwLock::new(Arc::new(super::ip_filter::IpFilter::default())),
         });
         // Stored contacts are candidates until a fresh HELLO and random challenge succeed.
@@ -816,6 +819,7 @@ impl KadSession {
                     tokio::select! {_=rx.changed()=>return,_=inner.refresh_one(&node)=>{}}
                 }
                 let _ = inner.save();
+                inner.passes.fetch_add(1, Ordering::Release);
             }
         });
         Ok(session)
@@ -1252,7 +1256,7 @@ mod tests {
         session.stop();
     }
     async fn unseeded_session(path: PathBuf) -> Arc<KadSession> {
-        KadSession::start_on_socket(
+        let session = KadSession::start_on_socket(
             [1; 16],
             31337,
             path,
@@ -1261,7 +1265,17 @@ mod tests {
             Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap()),
         )
         .await
-        .unwrap()
+        .unwrap();
+        // The first maintenance pass runs at start-up. Let it finish over the empty table, so a
+        // slow host cannot run it later and send its own HELLO into a test that has added contacts.
+        for _ in 0..500 {
+            if session.inner.passes.load(Ordering::Acquire) > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(session.inner.passes.load(Ordering::Acquire) > 0);
+        session
     }
     #[test]
     fn hello_parser_bounds_tags_and_rejects_endpoint_redirection() {
@@ -1500,7 +1514,6 @@ mod tests {
         let peer = node(fixture.local_addr().unwrap().port());
         let session = unseeded_session(root.path().join("routing.json")).await;
         let to = session.inner.socket.local_addr().unwrap();
-        // Let the initial maintenance tick see an empty table before arranging test contacts.
         packet_barrier(&fixture, to).await;
         let mut firewalled = fixture_hello(0x11, peer.id, 8);
         firewalled[21] = 1;
