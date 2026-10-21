@@ -113,6 +113,15 @@ pub fn parse_size(value: &str) -> Option<u64> {
     base.checked_mul(factor)
 }
 
+pub fn parse_seed_time(value: &str) -> Result<Duration> {
+    let minutes = value.parse::<f64>()?;
+    anyhow::ensure!(
+        minutes.is_finite() && (0.0..=525600.0).contains(&minutes),
+        "invalid seed time"
+    );
+    Ok(Duration::from_secs_f64(minutes * 60.0))
+}
+
 /// aria2's 1-based `select-file=1,3-5` into zero-based indexes.
 pub fn parse_select_file(value: &str, file_count: usize) -> Result<Vec<usize>> {
     let mut out = Vec::new();
@@ -202,7 +211,7 @@ impl BtService {
                             continue;
                         }
                         let text: String = nodes.iter().map(|n| format!("{n}\n")).collect();
-                        let temp = file.with_extension("tmp");
+                        let temp = dht_checkpoint_path(&file);
                         if tokio::fs::write(&temp, text).await.is_ok() {
                             let _ = tokio::fs::rename(&temp, &file).await;
                         }
@@ -233,7 +242,7 @@ impl BtService {
             .unwrap_or(false)
     }
 
-    fn settings(&self, options: Option<&Map<String, Value>>) -> Settings {
+    fn settings(&self, options: Option<&Map<String, Value>>) -> Result<Settings> {
         let dir = text(options, "dir")
             .map(PathBuf::from)
             .unwrap_or_else(|| self.config.default_dir.clone());
@@ -247,10 +256,12 @@ impl BtService {
             || flag(options, "bt-require-crypto").unwrap_or(false);
         settings.enable_tcp = self.config.enable_tcp;
         settings.enable_utp = self.config.session.enable_utp;
-        if let Some(time) = text(options, "seed-time").and_then(|v| v.parse::<f64>().ok()) {
-            settings.seed_time = Some(Duration::from_secs_f64((time * 60.0).max(0.0)));
+        if let Some(time) = text(options, "seed-time") {
+            settings.seed_time = Some(parse_seed_time(time)?);
         }
-        if let Some(ratio) = text(options, "seed-ratio").and_then(|v| v.parse::<f64>().ok()) {
+        if let Some(ratio) = text(options, "seed-ratio") {
+            let ratio = ratio.parse::<f64>()?;
+            anyhow::ensure!(ratio.is_finite() && ratio >= 0.0, "invalid seed ratio");
             settings.seed_ratio = (ratio > 0.0).then_some(ratio);
         }
         if let Some(n) = text(options, "bt-max-peers").and_then(|v| v.parse::<usize>().ok()) {
@@ -258,7 +269,7 @@ impl BtService {
         }
         // Prefer the beginning and the end first (what bt-prioritize-piece=head,tail asks for).
         settings.sequential = flag(options, "x-nibiru-sequential").unwrap_or(false);
-        settings
+        Ok(settings)
     }
 
     fn apply_limits(&self, handle: &TorrentHandle, options: Option<&Map<String, Value>>) {
@@ -312,7 +323,7 @@ impl BtService {
         options: Option<&Map<String, Value>>,
     ) -> Result<String> {
         let magnet = Magnet::parse(uri)?;
-        let mut settings = self.settings(options);
+        let mut settings = self.settings(options)?;
         let metadata_only = flag(options, "bt-metadata-only").unwrap_or(false);
         if metadata_only {
             // Fetch the description only; never create or touch payload files.
@@ -381,7 +392,7 @@ impl BtService {
             .decode(base64_torrent.trim())
             .context("the torrent is not valid base64")?;
         let torrent = Torrent::from_torrent_file(&bytes)?;
-        let mut settings = self.settings(options);
+        let mut settings = self.settings(options)?;
         if let Some(select) = text(options, "select-file") {
             settings.selected = Some(parse_select_file(select, torrent.files.len())?);
         }
@@ -674,11 +685,60 @@ impl BtService {
 async fn write_metadata(dir: &Path, torrent: &Torrent) -> Result<PathBuf> {
     tokio::fs::create_dir_all(dir).await?;
     let target = dir.join(format!("{}.torrent", hex(&torrent.info_hash)));
-    let temp = dir.join(format!(".{}.torrent.part", hex(&torrent.info_hash)));
-    tokio::fs::write(&temp, torrent.to_torrent_file()).await?;
-    // The info-hash names the file, so replacing an identical earlier copy is harmless.
-    tokio::fs::rename(&temp, &target).await?;
-    Ok(target)
+    let bytes = torrent.to_torrent_file();
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        let mut temporary =
+            tempfile::NamedTempFile::new_in(target.parent().context("metadata has no parent")?)?;
+        temporary.write_all(&bytes)?;
+        temporary.as_file().sync_all()?;
+        temporary
+            .persist(&target)
+            .map_err(|error| anyhow!(error.error))?;
+        Ok(target)
+    })
+    .await?
+}
+
+fn dht_checkpoint_path(file: &Path) -> PathBuf {
+    let mut path = file.as_os_str().to_owned();
+    path.push(".tmp");
+    PathBuf::from(path)
+}
+
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+
+    #[test]
+    fn ipv4_and_ipv6_dht_checkpoints_never_share_a_temporary_path() {
+        let ipv4 = Path::new("state/dht.dat");
+        let ipv6 = ipv4.with_extension("ipv6");
+        assert_ne!(dht_checkpoint_path(ipv4), dht_checkpoint_path(&ipv6));
+        assert_ne!(dht_checkpoint_path(ipv4), ipv4);
+    }
+
+    #[tokio::test]
+    async fn invalid_rpc_seeding_options_return_an_error_instead_of_panicking() {
+        let service = BtService::start(BtConfig {
+            dht: false,
+            dht6: false,
+            ..BtConfig::default()
+        })
+        .await
+        .unwrap();
+        let uri = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567";
+        for options in [
+            json!({"seed-time":"inf"}),
+            json!({"seed-time":"NaN"}),
+            json!({"seed-time":"1e300"}),
+            json!({"seed-ratio":"NaN"}),
+        ] {
+            assert!(service.add_magnet(uri, options.as_object()).await.is_err());
+        }
+        assert!(service.list_ids().is_empty());
+        service.shutdown();
+    }
 }
 
 fn aria_status(status: &TorrentStatus, task: &BtTask, saved: Option<&Path>) -> &'static str {

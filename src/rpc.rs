@@ -50,6 +50,7 @@ pub struct RpcServer {
     engine: Engine,
     log: Arc<LogSink>,
     secret: String,
+    default_dir: PathBuf,
     tasks: Arc<RwLock<HashMap<String, Task>>>,
     bt: Option<Arc<bt::BtService>>,
     ed2k: Option<Arc<ed2k::Ed2kService>>,
@@ -69,6 +70,7 @@ impl RpcServer {
             engine,
             log,
             secret,
+            default_dir: PathBuf::from("."),
             tasks: Arc::new(RwLock::new(HashMap::new())),
             bt: None,
             ed2k: None,
@@ -78,6 +80,11 @@ impl RpcServer {
             restored: Arc::new(AtomicUsize::new(0)),
             skipped: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    pub fn with_default_dir(mut self, directory: PathBuf) -> Self {
+        self.default_dir = directory;
+        self
     }
 
     /// Keeps unfinished tasks in `path`: restores them (paused, same GIDs) now and
@@ -174,7 +181,7 @@ impl RpcServer {
         match entry {
             Entry::Direct { gid, url, options } => {
                 session::validate_gid(gid)?;
-                let spec = direct_spec(url, Some(options))?;
+                let spec = direct_spec(url, Some(options), &self.default_dir)?;
                 let mut tasks = self.tasks.write().await;
                 anyhow::ensure!(!tasks.contains_key(gid), "duplicate saved gid");
                 tasks.insert(
@@ -727,8 +734,19 @@ impl RpcServer {
             .ok_or_else(|| anyhow!("missing URI"))?
             .to_owned();
         let options = params.get(1).and_then(Value::as_object);
-        let spec = direct_spec(&uri, options)?;
-        let persist = session::persistable_options(Some(&uri), options);
+        let spec = direct_spec(&uri, options, &self.default_dir)?;
+        let mut persist = session::persistable_options(Some(&uri), options);
+        if let Some(saved) = &mut persist {
+            saved.insert(
+                "dir".into(),
+                json!(
+                    spec.request
+                        .destination
+                        .parent()
+                        .unwrap_or(std::path::Path::new("."))
+                ),
+            );
+        }
         let limit = Arc::new(RateLimiter::new(spec.limit));
         let io = Arc::new(tokio::sync::Mutex::new(()));
         let gid = uuid::Uuid::new_v4().simple().to_string();
@@ -961,11 +979,15 @@ struct DirectSpec {
     limit: u64,
 }
 
-fn direct_spec(uri: &str, options: Option<&serde_json::Map<String, Value>>) -> Result<DirectSpec> {
+fn direct_spec(
+    uri: &str,
+    options: Option<&serde_json::Map<String, Value>>,
+    default_dir: &std::path::Path,
+) -> Result<DirectSpec> {
     let value = |key: &str| options.and_then(|m| m.get(key)).and_then(Value::as_str);
     let dir = value("dir")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
+        .unwrap_or_else(|| default_dir.to_owned());
     let out = value("out").unwrap_or("download");
     if !safe_output_name(out) {
         return Err(anyhow!("invalid output filename"));

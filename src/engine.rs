@@ -378,6 +378,22 @@ impl Engine {
             request.url = format!("https://{rest}");
         }
         let parsed = Url::parse(&request.url).context("invalid URL")?;
+        if let Some(parent) = request.destination.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+
+        let mut lock_path = request.destination.as_os_str().to_owned();
+        lock_path.push(".nibiru-http.lock");
+        let _destination_lock = StdOpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(PathBuf::from(lock_path))?;
+        _destination_lock
+            .try_lock()
+            .context("download destination is already in use")?;
+
         if self.http3_only {
             #[cfg(not(feature = "http3"))]
             bail!("HTTP/3 is disabled in this build");
@@ -420,22 +436,6 @@ impl Engine {
             }
             scheme => bail!("unsupported protocol: {scheme}"),
         }
-
-        if let Some(parent) = request.destination.parent() {
-            fs::create_dir_all(parent).await?;
-        }
-
-        let mut lock_path = request.destination.as_os_str().to_owned();
-        lock_path.push(".nibiru-http.lock");
-        let _destination_lock = StdOpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(PathBuf::from(lock_path))?;
-        _destination_lock
-            .try_lock()
-            .context("download destination is already in use")?;
 
         let existing = fs::metadata(&request.destination)
             .await
@@ -529,7 +529,11 @@ impl Engine {
         );
 
         let started = Instant::now();
-        let response = builder.send().await.context("HTTP request failed")?;
+        let response = builder
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url)
+            .context("HTTP request failed")?;
         self.log.info(
             "http.response",
             &format!(
@@ -544,7 +548,12 @@ impl Engine {
         if status == StatusCode::RANGE_NOT_SATISFIABLE
             && let Some(saved) = &saved
         {
-            let head = self.client.head(parsed.clone()).send().await?;
+            let head = self
+                .client
+                .head(parsed.clone())
+                .send()
+                .await
+                .map_err(reqwest::Error::without_url)?;
             if head.status().is_success()
                 && saved.matches(&head)
                 && head
@@ -614,16 +623,11 @@ impl Engine {
         let total = response_len.map(|len| if resumed { existing + len } else { len });
 
         let mut file = if resumed {
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&destination)
-                .await?
+            OpenOptions::new().append(true).open(&destination).await?
         } else {
             OpenOptions::new()
-                .create(true)
+                .create_new(true)
                 .write(true)
-                .truncate(true)
                 .open(&destination)
                 .await?
         };
@@ -659,7 +663,9 @@ impl Engine {
                 );
                 return Err(anyhow!("cancelled"));
             }
-            let chunk = chunk.context("HTTP body read failed")?;
+            let chunk = chunk
+                .map_err(reqwest::Error::without_url)
+                .context("HTTP body read failed")?;
             Self::throttle(&self.limiters, chunk.len()).await;
             file.write_all(&chunk).await?;
             downloaded = downloaded.saturating_add(chunk.len() as u64);
@@ -725,15 +731,16 @@ impl Engine {
     {
         let started = Instant::now();
         let workers = self.connection_count(total);
-        let part_path = temporary_part_path(destination);
-        let _ = fs::remove_file(&part_path).await;
-
-        let file = StdOpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(true)
-            .open(&part_path)?;
+        let parent = destination
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        // A unique owned partial cannot truncate a previous interrupted transfer.
+        let temporary = tempfile::Builder::new()
+            .prefix(".nibiru-http-")
+            .suffix(".part")
+            .tempfile_in(parent)?;
+        let (file, part_path) = temporary.into_parts();
         file.set_len(total)?;
         let file = Arc::new(file);
         let mut checkpoints = if self.sync_interval_bytes > 0 {
@@ -838,6 +845,7 @@ impl Engine {
                     let response = request
                         .send()
                         .await
+                        .map_err(reqwest::Error::without_url)
                         .with_context(|| format!("range worker {worker_id} request failed"))?;
                     let value = |key| {
                         response
@@ -917,6 +925,7 @@ impl Engine {
                             bail!("cancelled");
                         }
                         let chunk = chunk
+                            .map_err(reqwest::Error::without_url)
                             .with_context(|| format!("range worker {worker_id} body failed"))?;
                         if chunk.len() as u64 > expected.saturating_sub(received) {
                             bail!(
@@ -1076,13 +1085,13 @@ impl Engine {
         drop(file);
         let close_ms = closing.elapsed().as_millis();
 
-        let cleaning = Instant::now();
-        if fs::try_exists(destination).await? {
-            fs::remove_file(destination).await?;
-        }
-        let destination_cleanup_ms = cleaning.elapsed().as_millis();
         let renaming = Instant::now();
-        fs::rename(&part_path, destination).await?;
+        if let Err(error) = part_path.persist_noclobber(destination) {
+            // A foreign destination must survive. Retain our completed payload too.
+            let _ = error.path.keep();
+            return Err(error.error)
+                .context("cannot publish completed file without overwriting another file");
+        }
         let rename_ms = renaming.elapsed().as_millis();
         let finalize_ms = finalizing.elapsed().as_millis();
 
@@ -1095,7 +1104,7 @@ impl Engine {
         self.log.info(
             "http.download_completed",
             &format!(
-                "destination={} bytes={} elapsed_ms={} mode=segmented workers={workers} transfer_ms={transfer_ms} finalize_ms={finalize_ms} sync_ms={sync_ms} close_ms={close_ms} destination_cleanup_ms={destination_cleanup_ms} rename_ms={rename_ms} checkpoint_wait_ms={checkpoint_wait_ms} checkpoint_count={} checkpoint_sync_ms_sum={} adaptive={} adaptive_target_at_end={}",
+                "destination={} bytes={} elapsed_ms={} mode=segmented workers={workers} transfer_ms={transfer_ms} finalize_ms={finalize_ms} sync_ms={sync_ms} close_ms={close_ms} destination_cleanup_ms=0 rename_ms={rename_ms} checkpoint_wait_ms={checkpoint_wait_ms} checkpoint_count={} checkpoint_sync_ms_sum={} adaptive={} adaptive_target_at_end={}",
                 destination.display(),
                 total,
                 started.elapsed().as_millis(),
@@ -1114,7 +1123,12 @@ impl Engine {
             bail!("unsupported protocol");
         }
 
-        let head = self.client.head(parsed.clone()).send().await?;
+        let head = self
+            .client
+            .head(parsed.clone())
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url)?;
         let total = head
             .headers()
             .get(CONTENT_LENGTH)
@@ -1136,7 +1150,8 @@ impl Engine {
                 .get(parsed)
                 .header(RANGE, "bytes=0-0")
                 .send()
-                .await?;
+                .await
+                .map_err(reqwest::Error::without_url)?;
             if probe.status() == StatusCode::PARTIAL_CONTENT
                 && validate_content_range(
                     probe.headers().get(CONTENT_RANGE),
@@ -1149,7 +1164,11 @@ impl Engine {
                 // Finish the one-byte probe before opening payload connections.
                 // A server can send headers before the probe body.
                 if probe.content_length() == Some(1)
-                    && probe.chunk().await?.is_some_and(|chunk| chunk.len() == 1)
+                    && probe
+                        .chunk()
+                        .await
+                        .map_err(reqwest::Error::without_url)?
+                        .is_some_and(|chunk| chunk.len() == 1)
                 {
                     return Ok((total, true));
                 }
@@ -1197,14 +1216,6 @@ fn suggested_worker_count(total: u64) -> usize {
         _ => 16,
     };
     workers.min(MAX_HTTP_WORKERS)
-}
-
-fn temporary_part_path(destination: &Path) -> PathBuf {
-    let name = destination
-        .file_name()
-        .and_then(|v| v.to_str())
-        .unwrap_or("download");
-    destination.with_file_name(format!(".{name}.nibiru.part"))
 }
 
 fn redact_url(url: &Url) -> String {

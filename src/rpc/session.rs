@@ -196,13 +196,13 @@ impl SessionStore {
                     .ok()
                     .map(|value| (bytes, value))
             })
-            .filter(|(_, value)| value["version"] == FORMAT_VERSION);
+            .filter(|(_, value)| value["version"] == FORMAT_VERSION && value["tasks"].is_array());
         let Some((bytes, value)) = parsed else {
             self.set_aside()?;
             return Ok((Vec::new(), 0));
         };
         let rows = value["tasks"].as_array().cloned().unwrap_or_default();
-        let total = rows.len().min(MAX_ENTRIES);
+        let total = rows.len();
         let mut entries = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for row in rows.into_iter().take(MAX_ENTRIES) {
@@ -226,7 +226,10 @@ impl SessionStore {
             .file_name()
             .context("session file has no name")?
             .to_os_string();
-        name.push(format!(".corrupt-{stamp}"));
+        name.push(format!(
+            ".corrupt-{stamp}-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
         std::fs::rename(&self.path, self.path.with_file_name(name))?;
         Ok(())
     }
@@ -243,6 +246,10 @@ impl SessionStore {
             version: FORMAT_VERSION,
             tasks,
         })?;
+        ensure!(
+            bytes.len() as u64 <= MAX_FILE_BYTES,
+            "session exceeds supported size limit"
+        );
         {
             let last = self.last.lock().unwrap_or_else(|e| e.into_inner());
             if last.as_deref() == Some(bytes.as_slice()) {
@@ -383,7 +390,12 @@ mod tests {
 
     #[test]
     fn corrupt_or_foreign_files_are_moved_aside_not_overwritten() {
-        for content in ["not json", r#"{"version":99,"tasks":[]}"#] {
+        for content in [
+            "not json",
+            r#"{"version":99,"tasks":[]}"#,
+            r#"{"version":1,"tasks":{}}"#,
+            r#"{"version":1}"#,
+        ] {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("session.json");
             std::fs::write(&path, content).unwrap();
@@ -420,5 +432,43 @@ mod tests {
         for bad in ["", "../x", "zz", &"a".repeat(33)] {
             assert!(validate_gid(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn an_oversized_snapshot_never_replaces_the_last_readable_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        let store = SessionStore::new(path.clone());
+        store.save(&[direct("a")]).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let oversized = Entry::Direct {
+            gid: "b".into(),
+            url: "x".repeat(MAX_FILE_BYTES as usize),
+            options: Map::new(),
+        };
+        assert!(store.save(&[oversized]).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(SessionStore::new(path).load().unwrap().0[0].gid(), "a");
+    }
+
+    #[test]
+    fn entries_beyond_the_restore_limit_are_counted_as_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        let tasks: Vec<_> = (0..MAX_ENTRIES + 3)
+            .map(|i| direct(&format!("{i:x}")))
+            .collect();
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&SessionFile {
+                version: FORMAT_VERSION,
+                tasks,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let (entries, skipped) = SessionStore::new(path).load().unwrap();
+        assert_eq!(entries.len(), MAX_ENTRIES);
+        assert_eq!(skipped, 3);
     }
 }

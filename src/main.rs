@@ -9,7 +9,7 @@ use nibiru_xtreme::{
     protocols::TransportOptions,
     rpc::{
         RpcServer,
-        bt::{BtConfig, BtService, parse_size},
+        bt::{BtConfig, BtService, parse_seed_time, parse_size},
     },
 };
 use std::{
@@ -264,8 +264,9 @@ async fn main() -> Result<()> {
             let log = Arc::new(LogSink::new(args.log.as_deref())?);
             let engine = Engine::new(log.clone())?;
             let service = BtService::start(config).await?;
-            let mut server =
-                RpcServer::new(engine, log.clone(), args.secret.clone()).with_bittorrent(service);
+            let mut server = RpcServer::new(engine, log.clone(), args.secret.clone())
+                .with_default_dir(args.dir.clone())
+                .with_bittorrent(service);
             if args.ed2k {
                 server = server.with_ed2k(start_ed2k(&args, &log).await?);
             }
@@ -326,12 +327,13 @@ async fn run_aria2_compatible_rpc(args: &[String]) -> Result<()> {
             }
             // aria2 counts seed-time in minutes; zero disables seeding after completion.
             "seed-time" => {
-                bt.seed_time = value
-                    .parse::<f64>()
-                    .ok()
-                    .map(|m| Duration::from_secs_f64(m.max(0.0) * 60.0))
+                bt.seed_time = Some(parse_seed_time(value)?);
             }
-            "seed-ratio" => bt.seed_ratio = value.parse::<f64>().ok(),
+            "seed-ratio" => {
+                let ratio = value.parse::<f64>()?;
+                anyhow::ensure!(ratio.is_finite() && ratio >= 0.0, "invalid seed ratio");
+                bt.seed_ratio = Some(ratio);
+            }
             "bt-max-peers" => {
                 if let Ok(n) = value.parse::<usize>() {
                     bt.max_peers = if n == 0 { 200 } else { n.min(200) };
@@ -379,12 +381,14 @@ async fn run_aria2_compatible_rpc(args: &[String]) -> Result<()> {
     }
     let log = Arc::new(LogSink::new(log_path.as_deref())?);
     let engine = Engine::new(log.clone())?;
+    let default_dir = bt.default_dir.clone();
     let service = BtService::start(bt).await?;
     log.info(
         "bittorrent.started",
         &format!("listen_port={}", service.listen_port()),
     );
     RpcServer::new(engine, log, secret)
+        .with_default_dir(default_dir)
         .with_bittorrent(service)
         .serve(port)
         .await
@@ -492,7 +496,53 @@ async fn process_alive(pid: u32) -> bool {
         .output()
         .await;
     match output {
-        Ok(out) => String::from_utf8_lossy(&out.stdout).contains(&format!("\",{pid},\"")),
+        Ok(out) if out.status.success() => {
+            tasklist_contains_pid(&String::from_utf8_lossy(&out.stdout), pid)
+        }
+        // A failed inspection must not be mistaken for a dead parent.
+        Ok(_) => true,
         Err(_) => true,
+    }
+}
+
+#[cfg(any(windows, test))]
+fn tasklist_contains_pid(output: &str, pid: u32) -> bool {
+    output.lines().any(|line| {
+        // /FO CSV quotes each field: "image.exe","1234","Console",...
+        // Ignore quoted delimiters inside the image name, then parse only the PID.
+        line.trim()
+            .strip_prefix('"')
+            .and_then(|line| line.split_once("\",\""))
+            .and_then(|(_, rest)| rest.split_once('"'))
+            .and_then(|(field, _)| field.parse::<u32>().ok())
+            == Some(pid)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tasklist_reads_the_quoted_pid_field() {
+        let csv = "\"ADM.exe\",\"1234\",\"Console\",\"1\",\"12,345 K\"\r\n";
+        assert!(tasklist_contains_pid(csv, 1234));
+        assert!(!tasklist_contains_pid(csv, 123));
+        assert!(!tasklist_contains_pid(csv, 345));
+        assert!(!tasklist_contains_pid("INFO: No tasks are running.", 1234));
+        assert!(!tasklist_contains_pid("", 1234));
+    }
+
+    #[test]
+    fn seed_time_rejects_values_that_cannot_be_scheduled() {
+        for value in ["NaN", "inf", "-inf", "-1", "1e300", "invalid"] {
+            assert!(parse_seed_time(value).is_err(), "accepted {value}");
+        }
+        assert_eq!(parse_seed_time("0").unwrap(), Duration::ZERO);
+        assert_eq!(parse_seed_time("0.5").unwrap(), Duration::from_secs(30));
+        assert_eq!(
+            parse_seed_time("525600").unwrap(),
+            Duration::from_secs(31536000)
+        );
     }
 }
