@@ -69,7 +69,7 @@ Os testes independentes usam libtorrent 2.1.1 e aMule como outros clientes; não
 
 O código Rust próprio proíbe `unsafe`. TLS valida certificados; SFTP exige chave conhecida. JSON-RPC tem token opcional e limites de conexão, leitura e tamanho. Configure um segredo para o gerenciador. Logs usam JSON Lines; URLs HTTP de diagnóstico removem credenciais, query e fragmento, incluindo erros de requisição.
 
-`ci.yml` valida Windows, Linux e macOS e testa interoperabilidade no Linux. `release.yml` prepara pacotes e só deve publicar mediante autorização explícita. O contrato de distribuição/manifesto assinado do ADM ainda precisa ser concluído.
+`ci.yml` testa os três sistemas, verifica interoperabilidade no Linux e gera um artefato contendo somente o executável de cada plataforma. No Windows, o artefato de teste contém apenas o EXE. `release.yml` reutiliza esses binários e publica Windows x64, Linux x64 (musl estático) e macOS x64 com SHA-256 e licenças. Após esta versão, a manutenção acompanha os bugs encontrados no uso diário. Os listeners TCP, uTP, DHT e de prévia são encerrados com seus proprietários.
 
 MIT. Dependências mantêm suas licenças; veja [LICENSE](LICENSE), [avisos de terceiros](THIRD_PARTY_NOTICES.md) e [Apache 2.0](LICENSE-APACHE-2.0.txt).
 

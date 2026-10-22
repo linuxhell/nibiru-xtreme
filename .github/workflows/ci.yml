@@ -1,8 +1,6 @@
 name: CI
 
 on:
-  push:
-    branches: ["chatgpt/**", "claude/**", "audit/**"]
   pull_request:
   workflow_dispatch:
   workflow_call:
@@ -19,13 +17,26 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-15-intel]
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            suffix: linux-x64
+            binary: nibiru-xtreme
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            suffix: windows-x64
+            binary: nibiru-xtreme.exe
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            suffix: macos-x64
+            binary: nibiru-xtreme
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # action revision
         with:
           toolchain: 1.97.0
+          targets: ${{ matrix.target }}
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Format
@@ -52,18 +63,17 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends amule-daemon amule-utils
           python tests/interop_amule.py --binary target/debug/nibiru-xtreme
           cargo test --locked --test kad_amule -- --nocapture
+      - name: Install musl tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: Release build
-        run: cargo build --locked --release
-      - name: Smoke test Windows x64
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          ./target/release/nibiru-xtreme.exe --version
-          if ($LASTEXITCODE -ne 0) { throw "Binary smoke test failed" }
-      - name: Upload Windows x64
-        if: runner.os == 'Windows'
+        run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Smoke test
+        shell: bash
+        run: target/${{ matrix.target }}/release/${{ matrix.binary }} --version
+      - name: Upload executable
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: nibiru-windows-x64
-          path: target/release/nibiru-xtreme.exe
+          name: nibiru-${{ matrix.suffix }}
+          path: target/${{ matrix.target }}/release/${{ matrix.binary }}
           if-no-files-found: error

@@ -69,7 +69,7 @@ Independent tests use libtorrent 2.1.1 and aMule as other clients, not embedded 
 
 Project-owned Rust forbids `unsafe`. TLS validates certificates; SFTP requires a known host key. JSON-RPC has an optional token and connection/read/size limits. Configure a manager secret. JSON Lines logs remove credentials, query and fragment from diagnostic HTTP URLs, including request errors.
 
-`ci.yml` validates Windows, Linux and macOS and tests interoperability on Linux. `release.yml` prepares packages; publication requires explicit authorization. ADM's distribution/signed-manifest contract still needs completion.
+`ci.yml` tests all three systems, verifies interoperability on Linux and uploads only the executable for each platform. The Windows test artifact contains just the EXE. `release.yml` reuses these binaries and publishes Windows x64, Linux x64 (static musl) and macOS x64 with SHA-256 checksums and licenses. After this release, maintenance follows bugs found during everyday use. TCP, uTP, DHT and preview listeners now stop with their owners.
 
 MIT. Dependencies retain their licenses; see [LICENSE](LICENSE), [third-party notices](THIRD_PARTY_NOTICES.md) and [Apache 2.0](LICENSE-APACHE-2.0.txt).
 

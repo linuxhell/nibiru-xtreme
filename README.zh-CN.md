@@ -69,7 +69,7 @@ cargo test --locked --all-targets --all-features
 
 项目自身 Rust 禁止 `unsafe`。TLS 校验证书，SFTP 要求已知主机密钥。JSON-RPC 提供可选令牌及连接、读取和大小限制；应为管理器设置密钥。JSON Lines 日志中的 HTTP 诊断 URL 移除凭据、查询及片段，包括请求错误。
 
-`ci.yml` 检查 Windows、Linux、macOS，并在 Linux 上运行互操作测试。`release.yml` 构建安装包，发布需明确授权。ADM 的分发及签名清单契约仍待完成。
+`ci.yml` 测试三个系统，在 Linux 上验证互操作性，每个平台的测试产物仅包含可执行文件；Windows 测试产物只有 EXE。`release.yml` 复用这些二进制文件，发布 Windows x64、Linux x64（静态 musl）和 macOS x64 版本，并提供 SHA-256 校验文件与许可证。此版本后将根据日常使用中发现的问题进行维护。TCP、uTP、DHT 和预览监听器现在会随其所有者关闭。
 
 MIT；依赖保留各自许可。参见 [LICENSE](LICENSE)、[第三方声明](THIRD_PARTY_NOTICES.md)及 [Apache 2.0](LICENSE-APACHE-2.0.txt)。
 

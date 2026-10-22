@@ -89,6 +89,7 @@ pub struct Dht {
     next_tid: AtomicU16,
     window_start: Mutex<Instant>,
     window_count: AtomicU64,
+    stop: crate::lifetime::Stop,
 }
 
 /// Outcome of a `get_peers` lookup.
@@ -208,13 +209,19 @@ impl Dht {
             next_tid: AtomicU16::new(1),
             window_start: Mutex::new(Instant::now()),
             window_count: AtomicU64::new(0),
+            stop: crate::lifetime::Stop::default(),
         });
         let weak = Arc::downgrade(&dht);
         let socket = dht.socket.clone();
+        let mut stopped = dht.stop.subscribe();
         tokio::spawn(async move {
             let mut buffer = vec![0u8; MAX_PACKET];
             loop {
-                let Ok((n, from)) = socket.recv_from(&mut buffer).await else {
+                let received = tokio::select! {
+                    _ = stopped.changed() => return,
+                    value = socket.recv_from(&mut buffer) => value,
+                };
+                let Ok((n, from)) = received else {
                     tokio::time::sleep(Duration::from_millis(50)).await;
                     continue;
                 };
@@ -224,9 +231,13 @@ impl Dht {
             }
         });
         let weak = Arc::downgrade(&dht);
+        let mut stopped = dht.stop.subscribe();
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(Duration::from_secs(60)).await;
+                tokio::select! {
+                    _ = stopped.changed() => return,
+                    _ = tokio::time::sleep(Duration::from_secs(60)) => {},
+                }
                 let Some(dht) = weak.upgrade() else { return };
                 dht.maintain().await;
             }
@@ -910,5 +921,34 @@ mod tests {
             encode_peer(&"[::1]:80".parse().unwrap()).unwrap().len() == 18,
             "IPv6 compact peers have 18 bytes"
         );
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dropping_an_idle_dht_releases_its_udp_socket() {
+        let dht = Dht::start(DhtConfig {
+            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            bootstrap: vec![],
+            allow_loopback: true,
+            ..DhtConfig::default()
+        })
+        .await
+        .unwrap();
+        let address = SocketAddr::from(([127, 0, 0, 1], dht.port()));
+        drop(dht);
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if std::net::UdpSocket::bind(address).is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("an idle DHT retained its UDP port after drop");
     }
 }

@@ -72,6 +72,7 @@ pub struct Session {
     utp: Option<Arc<librqbit_utp::UtpSocketUdp>>,
     lsd: std::sync::OnceLock<super::lsd::Lsd>,
     restricted_nat: bool,
+    stop: crate::lifetime::Stop,
 }
 
 fn new_peer_id() -> [u8; 20] {
@@ -99,12 +100,14 @@ impl Session {
         })
         .with_context(|| format!("cannot listen on port {}", config.listen_port))?;
         let port = listener.bind_addr().port();
+        let mut utp_cancel = None;
         let utp = if config.enable_utp {
             let options = librqbit_utp::SocketOpts {
                 max_live_vsocks: std::num::NonZeroUsize::new(256),
                 remote_inactivity_timeout: Some(Duration::from_secs(180)),
                 ..Default::default()
             };
+            utp_cancel = Some(options.cancellation_token.clone());
             Some(
                 librqbit_utp::UtpSocketUdp::new_udp_with_opts(
                     SocketAddr::new(listener.bind_addr().ip(), port),
@@ -157,6 +160,7 @@ impl Session {
             utp: utp.clone(),
             lsd: std::sync::OnceLock::new(),
             restricted_nat: config.emulate_restricted_nat,
+            stop: crate::lifetime::Stop::default(),
         });
         if let Some(lsd) = config.lsd.clone() {
             // Best effort: a host without multicast simply runs without LSD.
@@ -166,9 +170,14 @@ impl Session {
         }
         let gate = Arc::new(Semaphore::new(config.max_pending_handshakes.max(1)));
         let weak = Arc::downgrade(&session);
+        let mut stopped = session.stop.subscribe();
         tokio::spawn(async move {
             loop {
-                let Ok((stream, addr)) = listener.accept().await else {
+                let accepted = tokio::select! {
+                    _ = stopped.changed() => return,
+                    value = listener.accept() => value,
+                };
+                let Ok((stream, addr)) = accepted else {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
                 };
@@ -196,12 +205,24 @@ impl Session {
                 });
             }
         });
+        if let Some(token) = utp_cancel {
+            let mut stopped = session.stop.subscribe();
+            tokio::spawn(async move {
+                let _ = stopped.changed().await;
+                token.cancel();
+            });
+        }
         if let Some(utp) = utp {
             let weak = Arc::downgrade(&session);
+            let mut stopped = session.stop.subscribe();
             let gate = Arc::new(Semaphore::new(config.max_pending_handshakes.max(1)));
             tokio::spawn(async move {
                 loop {
-                    let Ok(stream) = utp.accept().await else {
+                    let accepted = tokio::select! {
+                        _ = stopped.changed() => return,
+                        value = utp.accept() => value,
+                    };
+                    let Ok(stream) = accepted else {
                         return;
                     };
                     let Some(session) = weak.upgrade() else {
@@ -449,7 +470,12 @@ impl Session {
         }
     }
 
+    pub(crate) fn stopped(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.stop.subscribe()
+    }
+
     pub fn shutdown(&self) {
+        self.stop.stop();
         let handles: Vec<TorrentHandle> = self.list();
         for handle in handles {
             handle.shutdown(false);
@@ -461,6 +487,56 @@ impl Session {
 mod audit_tests {
     use super::*;
     use crate::bittorrent::metainfo::build_info;
+
+    #[tokio::test]
+    async fn dropping_an_idle_session_releases_its_tcp_listener() {
+        let session = Session::start(SessionConfig {
+            bind: "127.0.0.1".parse().unwrap(),
+            enable_utp: false,
+            ..SessionConfig::default()
+        })
+        .await
+        .unwrap();
+        let address = SocketAddr::from(([127, 0, 0, 1], session.port()));
+        drop(session);
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if std::net::TcpListener::bind(address).is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("an idle session retained its TCP port after drop");
+    }
+
+    #[tokio::test]
+    async fn dropping_an_idle_session_releases_its_utp_socket() {
+        // Choose an actual UDP port first; Windows may reserve TCP-only ephemeral ports.
+        let probe = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let address = probe.local_addr().unwrap();
+        drop(probe);
+        let session = Session::start(SessionConfig {
+            bind: address.ip(),
+            listen_port: address.port(),
+            enable_utp: true,
+            ..SessionConfig::default()
+        })
+        .await
+        .unwrap();
+        drop(session);
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if std::net::UdpSocket::bind(address).is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("an idle session retained its uTP socket after drop");
+    }
 
     #[tokio::test]
     async fn duplicate_registration_stops_the_losing_spawned_instance() {

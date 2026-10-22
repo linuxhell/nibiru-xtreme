@@ -27,6 +27,7 @@ const CHUNK_PATIENCE: Duration = Duration::from_secs(90);
 pub struct StreamServer {
     port: u16,
     token: String,
+    stop: crate::lifetime::Stop,
 }
 
 impl StreamServer {
@@ -39,12 +40,23 @@ impl StreamServer {
             uuid::Uuid::new_v4().simple(),
             uuid::Uuid::new_v4().simple()
         );
-        let server = Arc::new(Self { port, token });
+        let server = Arc::new(Self {
+            port,
+            token,
+            stop: crate::lifetime::Stop::default(),
+        });
         let weak: Weak<Session> = Arc::downgrade(session);
-        let guard = server.clone();
+        let server_weak = Arc::downgrade(&server);
+        let mut stopped = server.stop.subscribe();
+        let mut session_stopped = session.stopped();
         tokio::spawn(async move {
             loop {
-                let Ok((stream, peer)) = listener.accept().await else {
+                let accepted = tokio::select! {
+                    _ = stopped.changed() => return,
+                    _ = session_stopped.changed() => return,
+                    value = listener.accept() => value,
+                };
+                let Ok((stream, peer)) = accepted else {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
                 };
@@ -54,7 +66,9 @@ impl StreamServer {
                 let Some(session) = weak.upgrade() else {
                     return;
                 };
-                let guard = guard.clone();
+                let Some(guard) = server_weak.upgrade() else {
+                    return;
+                };
                 tokio::spawn(async move {
                     let _ = guard.connection(stream, &session).await;
                 });
@@ -363,5 +377,35 @@ mod tests {
         assert_eq!(content_type("Movie.MKV"), "video/x-matroska");
         assert_eq!(content_type("a.mp4"), "video/mp4");
         assert_eq!(content_type("unknown"), "application/octet-stream");
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use crate::bittorrent::session::SessionConfig;
+
+    #[tokio::test]
+    async fn dropping_an_idle_preview_releases_its_tcp_listener() {
+        let session = Session::start(SessionConfig {
+            bind: "127.0.0.1".parse().unwrap(),
+            enable_utp: false,
+            ..SessionConfig::default()
+        })
+        .await
+        .unwrap();
+        let preview = StreamServer::start(&session).await.unwrap();
+        let address = SocketAddr::from(([127, 0, 0, 1], preview.port));
+        drop(preview);
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if std::net::TcpListener::bind(address).is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("preview retained its listener after the owner was dropped");
     }
 }
