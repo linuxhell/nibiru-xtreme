@@ -438,6 +438,7 @@ impl Ed2kService {
                 callbacks,
                 obfuscation,
                 events: None,
+                late_sources: None,
             },
             cancel.clone(),
             |p: TransferProgress| {

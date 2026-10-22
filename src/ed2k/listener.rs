@@ -548,6 +548,7 @@ mod tests {
             client_id: connection.client_id,
             callbacks: Some(CallbackClient::new(connection, listener.callbacks())),
             events: None,
+            late_sources: None,
         };
         let directory = tempfile::tempdir().unwrap();
         let source = FileSource {
@@ -644,6 +645,7 @@ mod tests {
                 port,
             )),
             events: None,
+            late_sources: None,
         };
         let source = FileSource {
             client_id: 1,

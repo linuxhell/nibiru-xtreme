@@ -102,6 +102,9 @@ pub enum TransferEvent {
 pub type EventSink = Arc<dyn Fn(TransferEvent) + Send + Sync>;
 
 pub struct TransferOptions {
+    /// Sources found while the transfer runs (for example by Kad, which takes seconds): they join
+    /// the ones already being tried, and the transfer waits for them when it has none left.
+    pub late_sources: Option<tokio::sync::mpsc::UnboundedReceiver<FileSource>>,
     pub identity: [u8; 16],
     pub client_id: u32,
     pub callbacks: Option<super::CallbackClient>,
@@ -211,6 +214,7 @@ pub async fn download_from_sources(
             callbacks: None,
             obfuscation: super::obfuscation::Obfuscation::Prefer,
             events: None,
+            late_sources: None,
         },
         cancel,
         progress,
@@ -245,11 +249,12 @@ pub async fn download_with_tuning(
     file: &FileLink,
     directory: &Path,
     sources: &[FileSource],
-    options: TransferOptions,
+    mut options: TransferOptions,
     tuning: Tuning,
     cancel: Arc<AtomicBool>,
     mut progress: impl FnMut(TransferProgress) + Send,
 ) -> Result<PathBuf> {
+    let mut late = options.late_sources.take();
     // Revalidate deserialized inputs before using a filename as a path.
     let validated = FileLink::parse(&file.link())?;
     if &validated != file {
@@ -342,37 +347,77 @@ pub async fn download_with_tuning(
         context.emit(TransferStage::Connecting, &None, None);
     }
     // Bounded attempt count avoids unbounded connections to a server-supplied list.
-    let mut queue: Vec<&FileSource> = sources
+    let usable =
+        |s: &FileSource| (s.host.is_some() && !s.requires_callback) || options.callbacks.is_some();
+    let key = |s: &FileSource| format!("{:?}:{}:{}", s.host, s.port, s.client_id);
+    let mut tried: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut queue: Vec<FileSource> = sources
         .iter()
-        .filter(|s| (s.host.is_some() && !s.requires_callback) || options.callbacks.is_some())
+        .filter(|s| usable(s))
         .take(16)
+        .cloned()
         .collect();
+    tried.extend(queue.iter().map(key));
     let shared_context = &context;
     for _ in 0..MAX_ROUNDS {
-        if queue.is_empty() || context.all_complete() {
+        if context.all_complete() || (queue.is_empty() && late.is_none()) {
             break;
         }
-        let mut pending = std::mem::take(&mut queue).into_iter();
+        let mut pending: std::collections::VecDeque<FileSource> = std::mem::take(&mut queue).into();
         let mut running = FuturesUnordered::new();
         // Sources that delivered parts get another connection next round (they may have dropped
         // mid-part); sources that delivered nothing are not retried.
         loop {
             while running.len() < MAX_PARALLEL_PEERS && !context.all_complete() {
-                match pending.next() {
+                match pending.pop_front() {
                     Some(source) => running.push(shared_context.work_tagged(source)),
                     None => break,
                 }
             }
-            let Some((source, result)) = running.next().await else {
-                break;
-            };
-            let (fetched, retry) = result?;
-            if context.all_complete() {
-                // Everything is verified: stop connecting to the sources still waiting or being tried.
-                break;
+            if running.is_empty() {
+                // Nothing is being tried: wait for sources that are still being found.
+                let Some(receiver) = late.as_mut() else {
+                    break;
+                };
+                tokio::select! {
+                    found = receiver.recv() => match found {
+                        Some(source) => {
+                            if usable(&source) && tried.len() < 32 && tried.insert(key(&source)) {
+                                pending.push_back(source);
+                            }
+                            continue;
+                        }
+                        None => {
+                            late = None;
+                            break;
+                        }
+                    },
+                    _ = wait_cancelled(&cancel) => break,
+                }
             }
-            if fetched > 0 || retry {
-                queue.push(source);
+            tokio::select! {
+                finished = running.next() => {
+                    let Some((source, result)) = finished else {
+                        continue;
+                    };
+                    let (fetched, retry) = result?;
+                    if context.all_complete() {
+                        // Everything is verified: stop connecting to the sources still waiting or
+                        // being tried.
+                        break;
+                    }
+                    if fetched > 0 || retry {
+                        queue.push(source);
+                    }
+                }
+                found = recv_late(&mut late), if late.is_some() => match found {
+                    Some(source) => {
+                        if usable(&source) && tried.len() < 32 && tried.insert(key(&source)) {
+                            pending.push_back(source);
+                        }
+                    }
+                    None => late = None,
+                },
             }
         }
     }
@@ -415,7 +460,9 @@ pub async fn download_with_tuning(
     Ok(target)
 }
 
-const MAX_PARALLEL_PEERS: usize = 4;
+const MAX_PARALLEL_PEERS: usize = 8;
+/// Blocks asked for in one request (the legacy request carries exactly three).
+const BLOCKS_PER_REQUEST: usize = 3;
 const MAX_ROUNDS: usize = 6;
 
 /// How each source ended in this attempt.
@@ -623,17 +670,7 @@ impl Context_<'_> {
     /// been outstanding for a long time (the first answer wins).
     fn next_work(&self, peer: &Peer, label: &str) -> Option<Work> {
         let mut shared = self.shared.lock().unwrap();
-        let geometry = |index: usize, block: usize, len: usize, helping: bool| {
-            let start = index as u64 * PART_SIZE + block as u64 * BLOCK_SIZE;
-            let end = (start + BLOCK_SIZE).min(index as u64 * PART_SIZE + len as u64);
-            Work {
-                index,
-                block,
-                from: start,
-                end,
-                helping,
-            }
-        };
+        let geometry = block_work;
         let own = shared
             .open
             .iter()
@@ -652,7 +689,29 @@ impl Context_<'_> {
             let len = part.data.len();
             return Some(geometry(index, block, len, false));
         }
-        let fresh = preview_order(shared.complete.len())
+        // A part whose peer dropped out is picked up before any new part is opened, so the first
+        // parts (which a preview needs) are never left behind.
+        let orphan = shared
+            .open
+            .iter()
+            .filter(|(i, part)| part.opener.is_empty() && peer.has_part(**i))
+            .filter_map(|(i, part)| {
+                part.have
+                    .iter()
+                    .zip(&part.asked_at)
+                    .position(|(got, asked)| !*got && asked.is_none())
+                    .map(|block| (*i, block))
+            })
+            .min();
+        if let Some((index, block)) = orphan {
+            let part = shared.open.get_mut(&index).unwrap();
+            part.opener = label.to_owned();
+            part.asked_at[block] = Some(std::time::Instant::now());
+            let len = part.data.len();
+            return Some(geometry(index, block, len, false));
+        }
+        let last_len = self.file.part_len(shared.complete.len().saturating_sub(1));
+        let fresh = preview_order(shared.complete.len(), last_len)
             .find(|i| !shared.complete[*i] && !shared.open.contains_key(i) && peer.has_part(*i));
         if let Some(index) = fresh {
             let len = self.file.part_len(index);
@@ -712,6 +771,48 @@ impl Context_<'_> {
         }
         None
     }
+    /// The next blocks for this peer: the one `next_work` picks and, like eMule and aMule, up to two
+    /// more of the same part in the same request (from the front for the part's owner, from the
+    /// back for a helper).
+    fn next_works(&self, peer: &Peer, label: &str) -> Vec<Work> {
+        let Some(first) = self.next_work(peer, label) else {
+            return Vec::new();
+        };
+        let mut works = vec![first];
+        let mut shared = self.shared.lock().unwrap();
+        if let Some(part) = shared.open.get_mut(&works[0].index) {
+            let blocks = part.have.len();
+            let order: Vec<usize> = if works[0].helping {
+                (0..blocks).rev().collect()
+            } else {
+                (0..blocks).collect()
+            };
+            for block in order {
+                if works.len() == BLOCKS_PER_REQUEST {
+                    break;
+                }
+                if !part.have[block] && part.asked_at[block].is_none() {
+                    part.asked_at[block] = Some(std::time::Instant::now());
+                    works.push(block_work(
+                        works[0].index,
+                        block,
+                        part.data.len(),
+                        works[0].helping,
+                    ));
+                }
+            }
+        }
+        works
+    }
+    /// This peer is done (or gone): the parts it opened lose their owner and any peer may take over.
+    fn abandon(&self, label: &str) {
+        let mut shared = self.shared.lock().unwrap();
+        for part in shared.open.values_mut().filter(|p| p.opener == label) {
+            part.opener.clear();
+        }
+        drop(shared);
+        self.changed.notify_waiters();
+    }
     /// A block could not be fetched: let someone else ask for it.
     fn release_block(&self, work: &Work) {
         let mut shared = self.shared.lock().unwrap();
@@ -760,11 +861,9 @@ impl Context_<'_> {
             sink(event);
         }
     }
-    async fn work_tagged<'s>(
-        &self,
-        source: &'s FileSource,
-    ) -> (&'s FileSource, Result<(usize, bool)>) {
-        (source, self.work(source).await)
+    async fn work_tagged(&self, source: FileSource) -> (FileSource, Result<(usize, bool)>) {
+        let result = self.work(&source).await;
+        (source, result)
     }
 
     /// Talks to one source until it has nothing more to give. Source failures are remembered and
@@ -944,7 +1043,8 @@ impl Context_<'_> {
             let wake = self.changed.notified();
             tokio::pin!(wake);
             wake.as_mut().enable();
-            let Some(work) = self.next_work(&peer, &label) else {
+            let works = self.next_works(&peer, &label);
+            let Some(work) = works.first() else {
                 if !self.waiting_for_others(&peer) {
                     break;
                 }
@@ -954,8 +1054,9 @@ impl Context_<'_> {
                 check_cancel(self.cancel)?;
                 continue;
             };
+            let release = |this: &Self| works.iter().for_each(|w| this.release_block(w));
             if let Err(error) = check_cancel(self.cancel) {
-                self.release_block(&work);
+                release(self);
                 return Err(error);
             }
             if run.is_none_or(|(index, ..)| index != work.index) {
@@ -968,10 +1069,11 @@ impl Context_<'_> {
                 });
             }
             let asked = std::time::Instant::now();
-            let block = match peer.block(work.from, work.end).await {
-                Ok(block) => block,
+            let ranges: Vec<(u64, u64)> = works.iter().map(|w| (w.from, w.end)).collect();
+            let received = match peer.blocks(&ranges).await {
+                Ok(received) => received,
                 Err(error) => {
-                    self.release_block(&work);
+                    release(self);
                     self.event(TransferEvent::PartFailed {
                         peer: label.clone(),
                         index: work.index,
@@ -984,7 +1086,7 @@ impl Context_<'_> {
                 }
             };
             if let Some((index, since, bytes, flagged)) = run.as_mut() {
-                *bytes += block.len();
+                *bytes += received.iter().map(Vec::len).sum::<usize>();
                 let elapsed = since.elapsed();
                 if !*flagged
                     && elapsed >= Duration::from_secs(20)
@@ -999,7 +1101,10 @@ impl Context_<'_> {
                     });
                 }
             }
-            let finished = self.put_block(&work, &block, &label);
+            let finished = works
+                .iter()
+                .zip(&received)
+                .find_map(|(w, block)| self.put_block(w, block, &label));
             self.changed.notify_waiters();
             let Some((part, peers, elapsed_ms)) = finished else {
                 self.emit(TransferStage::Downloading, host, None);
@@ -1061,7 +1166,38 @@ impl Context_<'_> {
             }
             self.emit(TransferStage::Downloading, host, None);
         }
+        self.abandon(&label);
         Ok((fetched, false))
+    }
+}
+
+/// The next late source, or never when the channel is gone.
+async fn recv_late(
+    late: &mut Option<tokio::sync::mpsc::UnboundedReceiver<FileSource>>,
+) -> Option<FileSource> {
+    match late {
+        Some(receiver) => receiver.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Resolves when the transfer is cancelled.
+async fn wait_cancelled(cancel: &AtomicBool) {
+    while !cancel.load(std::sync::atomic::Ordering::Acquire) {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// The byte range of block `block` in part `index` of `len` bytes.
+fn block_work(index: usize, block: usize, len: usize, helping: bool) -> Work {
+    let start = index as u64 * PART_SIZE + block as u64 * BLOCK_SIZE;
+    let end = (start + BLOCK_SIZE).min(index as u64 * PART_SIZE + len as u64);
+    Work {
+        index,
+        block,
+        from: start,
+        end,
+        helping,
     }
 }
 
@@ -1072,12 +1208,17 @@ fn block_len(part_len: usize, block: usize) -> usize {
 
 /// The first part, then the last, then the rest in order. Players open a file by reading both ends
 /// (an AVI keeps its index at the end, an MP4 often its `moov`), so a preview of a partial download
-/// only works once the last part is there too.
-fn preview_order(parts: usize) -> impl Iterator<Item = usize> {
+/// only works once the last part is there too. Like aMule, the part before the last one also comes
+/// early when the last one is small (under a third of a part), since the index may span both.
+fn preview_order(parts: usize, last_len: usize) -> impl Iterator<Item = usize> {
     let last = parts.checked_sub(1).filter(|last| *last > 0);
+    let before_last = parts
+        .checked_sub(2)
+        .filter(|before| *before > 0 && last_len < PART_SIZE as usize / 3);
     (0..parts.min(1))
         .chain(last)
-        .chain(1..parts.saturating_sub(1))
+        .chain(before_last)
+        .chain((1..parts.saturating_sub(1)).filter(move |i| Some(*i) != before_last))
 }
 
 #[cfg(test)]
@@ -1091,13 +1232,17 @@ pub(crate) mod tests {
 
     #[test]
     fn parts_are_fetched_first_then_last_then_in_order() {
-        let order = |parts| preview_order(parts).collect::<Vec<_>>();
-        assert_eq!(order(0), Vec::<usize>::new());
-        assert_eq!(order(1), vec![0]);
-        assert_eq!(order(2), vec![0, 1]);
-        assert_eq!(order(5), vec![0, 4, 1, 2, 3]);
+        let big = PART_SIZE as usize;
+        let order = |parts, last| preview_order(parts, last).collect::<Vec<_>>();
+        assert_eq!(order(0, 0), Vec::<usize>::new());
+        assert_eq!(order(1, big), vec![0]);
+        assert_eq!(order(2, big), vec![0, 1]);
+        assert_eq!(order(5, big), vec![0, 4, 1, 2, 3]);
+        // A small last part brings the one before it forward too (aMule's rule).
+        assert_eq!(order(5, 1000), vec![0, 4, 3, 1, 2]);
+        assert_eq!(order(2, 1000), vec![0, 1]);
         let each_once = |parts: usize| {
-            let mut all = order(parts);
+            let mut all = order(parts, 1000);
             all.sort_unstable();
             all == (0..parts).collect::<Vec<_>>()
         };
@@ -1262,46 +1407,56 @@ pub(crate) mod tests {
                     }
                     0x47 => {
                         assert_eq!(request.len(), 40);
-                        let from = u32::from_le_bytes(request[16..20].try_into().unwrap()) as usize;
-                        let end = u32::from_le_bytes(request[28..32].try_into().unwrap()) as usize;
-                        assert!(
-                            end > from && end - from <= super::super::file::BLOCK_SIZE as usize
-                        );
-                        requests.lock().unwrap().push(from as u64);
-                        let mut bytes = data[from..end].to_vec();
-                        if corrupt {
-                            bytes[0] ^= 1;
-                        }
-                        if (from / super::super::file::BLOCK_SIZE as usize).is_multiple_of(2) {
-                            // Real split zlib stream across two OP_COMPRESSEDPART frames.
-                            let mut z = flate2::write::ZlibEncoder::new(
-                                Vec::new(),
-                                flate2::Compression::fast(),
-                            );
-                            z.write_all(&bytes).unwrap();
-                            let packed = z.finish().unwrap();
-                            for chunk in packed.chunks(packed.len().div_ceil(2)) {
-                                let mut answer = file.hash.to_vec();
-                                answer.extend((from as u32).to_le_bytes());
-                                answer.extend((packed.len() as u32).to_le_bytes());
-                                answer.extend(chunk);
-                                if peer::send(&mut stream, 0xc5, 0x40, &answer).await.is_err() {
-                                    return;
-                                }
+                        // Up to three <start,end> pairs; unused pairs are zero.
+                        for slot in 0..3 {
+                            let from = u32::from_le_bytes(
+                                request[16 + 4 * slot..20 + 4 * slot].try_into().unwrap(),
+                            ) as usize;
+                            let end = u32::from_le_bytes(
+                                request[28 + 4 * slot..32 + 4 * slot].try_into().unwrap(),
+                            ) as usize;
+                            if from == 0 && end == 0 {
+                                continue;
                             }
-                        } else {
-                            // Non-overlapping fragments intentionally arrive out of order.
-                            let mid = from + (end - from) / 2;
-                            for (a, b) in [(mid, end), (from, mid)] {
-                                if a == b {
-                                    continue;
+                            assert!(
+                                end > from && end - from <= super::super::file::BLOCK_SIZE as usize
+                            );
+                            requests.lock().unwrap().push(from as u64);
+                            let mut bytes = data[from..end].to_vec();
+                            if corrupt {
+                                bytes[0] ^= 1;
+                            }
+                            if (from / super::super::file::BLOCK_SIZE as usize).is_multiple_of(2) {
+                                // Real split zlib stream across two OP_COMPRESSEDPART frames.
+                                let mut z = flate2::write::ZlibEncoder::new(
+                                    Vec::new(),
+                                    flate2::Compression::fast(),
+                                );
+                                z.write_all(&bytes).unwrap();
+                                let packed = z.finish().unwrap();
+                                for chunk in packed.chunks(packed.len().div_ceil(2)) {
+                                    let mut answer = file.hash.to_vec();
+                                    answer.extend((from as u32).to_le_bytes());
+                                    answer.extend((packed.len() as u32).to_le_bytes());
+                                    answer.extend(chunk);
+                                    if peer::send(&mut stream, 0xc5, 0x40, &answer).await.is_err() {
+                                        return;
+                                    }
                                 }
-                                let mut answer = file.hash.to_vec();
-                                answer.extend((a as u32).to_le_bytes());
-                                answer.extend((b as u32).to_le_bytes());
-                                answer.extend(&bytes[a - from..b - from]);
-                                if peer::send(&mut stream, 0xe3, 0x46, &answer).await.is_err() {
-                                    return;
+                            } else {
+                                // Non-overlapping fragments intentionally arrive out of order.
+                                let mid = from + (end - from) / 2;
+                                for (a, b) in [(mid, end), (from, mid)] {
+                                    if a == b {
+                                        continue;
+                                    }
+                                    let mut answer = file.hash.to_vec();
+                                    answer.extend((a as u32).to_le_bytes());
+                                    answer.extend((b as u32).to_le_bytes());
+                                    answer.extend(&bytes[a - from..b - from]);
+                                    if peer::send(&mut stream, 0xe3, 0x46, &answer).await.is_err() {
+                                        return;
+                                    }
                                 }
                             }
                         }
@@ -1564,6 +1719,8 @@ pub(crate) mod tests {
         parts: Option<Vec<usize>>,
         /// Pause before each block it sends (a slow peer).
         block_delay: Duration,
+        /// Closes the connection after serving this many blocks.
+        drop_after_blocks: Option<usize>,
     }
 
     /// A peer that accepts any number of connections; the n-th one follows plan n (the last repeats).
@@ -1589,6 +1746,7 @@ pub(crate) mod tests {
                 let plan = plans[number.min(plans.len() - 1)].clone();
                 let (file, hashes, data) = (file.clone(), hashes.clone(), data.clone());
                 tokio::spawn(async move {
+                    let mut served_blocks = 0usize;
                     let Ok((op, _)) = server::frame(&mut stream).await else {
                         return;
                     };
@@ -1636,16 +1794,32 @@ pub(crate) mod tests {
                                 Ok(())
                             }
                             0x47 => {
-                                let from = u32::from_le_bytes(request[16..20].try_into().unwrap())
-                                    as usize;
-                                let end = u32::from_le_bytes(request[28..32].try_into().unwrap())
-                                    as usize;
-                                let mut a = file.hash.to_vec();
-                                a.extend((from as u32).to_le_bytes());
-                                a.extend((end as u32).to_le_bytes());
-                                a.extend(&data[from..end]);
-                                tokio::time::sleep(plan.block_delay).await;
-                                peer::send(&mut stream, 0xe3, 0x46, &a).await
+                                let mut sent = Ok(());
+                                for slot in 0..3 {
+                                    let from = u32::from_le_bytes(
+                                        request[16 + 4 * slot..20 + 4 * slot].try_into().unwrap(),
+                                    ) as usize;
+                                    let end = u32::from_le_bytes(
+                                        request[28 + 4 * slot..32 + 4 * slot].try_into().unwrap(),
+                                    ) as usize;
+                                    if from == 0 && end == 0 {
+                                        continue;
+                                    }
+                                    let mut a = file.hash.to_vec();
+                                    a.extend((from as u32).to_le_bytes());
+                                    a.extend((end as u32).to_le_bytes());
+                                    a.extend(&data[from..end]);
+                                    if plan.drop_after_blocks.is_some_and(|k| served_blocks >= k) {
+                                        return;
+                                    }
+                                    served_blocks += 1;
+                                    tokio::time::sleep(plan.block_delay).await;
+                                    sent = peer::send(&mut stream, 0xe3, 0x46, &a).await;
+                                    if sent.is_err() {
+                                        break;
+                                    }
+                                }
+                                sent
                             }
                             _ => Ok(()),
                         };
@@ -1824,6 +1998,132 @@ pub(crate) mod tests {
         silent_server.abort();
     }
 
+    #[tokio::test]
+    async fn a_part_left_by_a_peer_that_dropped_is_taken_before_new_parts() {
+        // Three parts. One peer dies after one block of the part it opened; the other, slow, must take
+        // that part over before it opens a new one.
+        let data: Vec<u8> = (0..2 * PART_SIZE as usize + 400_000)
+            .map(|i| (i % 239) as u8)
+            .collect();
+        let (dying, _, dying_server) = scripted_peer(
+            data.clone(),
+            vec![Plan {
+                drop_after_blocks: Some(1),
+                ..Plan::default()
+            }],
+        )
+        .await;
+        let (steady, _, steady_server) = scripted_peer(
+            data.clone(),
+            vec![Plan {
+                block_delay: Duration::from_millis(40),
+                ..Plan::default()
+            }],
+        )
+        .await;
+        let (file, _) = fixture_file(&data);
+        let dir = tempfile::tempdir().unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let seen = events.clone();
+        let mut opts = options();
+        opts.events = Some(Arc::new(move |event| seen.lock().unwrap().push(event)));
+        let path = download_with_tuning(
+            &file,
+            dir.path(),
+            &[dying, steady],
+            opts,
+            quick(),
+            Arc::new(AtomicBool::new(false)),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), data);
+        let events = events.lock().unwrap();
+        let started = |event: &TransferEvent| match event {
+            TransferEvent::PartStarted { peer, index, .. } => Some((peer.clone(), *index)),
+            _ => None,
+        };
+        // Whichever part the dying peer had opened, it is the next one a peer starts.
+        let (failed_at, failed_part) = events
+            .iter()
+            .enumerate()
+            .find_map(|(at, e)| match e {
+                TransferEvent::PartFailed { index, .. } => Some((at, *index)),
+                _ => None,
+            })
+            .expect("a part failed");
+        let next = events[failed_at..]
+            .iter()
+            .find_map(started)
+            .expect("someone started a part after the failure");
+        assert_eq!(
+            next.1,
+            failed_part,
+            "after the failure: {:?}",
+            &events[failed_at..]
+        );
+        dying_server.abort();
+        steady_server.abort();
+    }
+
+    #[tokio::test]
+    async fn sources_found_later_join_a_transfer_that_started_without_them() {
+        let data = two_part_data();
+        let (good, _, server) = scripted_peer(data.clone(), vec![Plan::default()]).await;
+        let (file, _) = fixture_file(&data);
+        let dir = tempfile::tempdir().unwrap();
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut opts = options();
+        opts.late_sources = Some(receiver);
+        // The only source shows up half a second after the transfer began (a Kad lookup).
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let _ = sender.send(good);
+        });
+        let started = std::time::Instant::now();
+        let path = download_with_tuning(
+            &file,
+            dir.path(),
+            &[],
+            opts,
+            quick(),
+            Arc::new(AtomicBool::new(false)),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), data);
+        assert!(started.elapsed() >= Duration::from_millis(500));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_transfer_with_no_sources_ends_when_the_late_ones_stop_coming() {
+        let data = two_part_data();
+        let (file, _) = fixture_file(&data);
+        let dir = tempfile::tempdir().unwrap();
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel::<FileSource>();
+        let mut opts = options();
+        opts.late_sources = Some(receiver);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            drop(sender);
+        });
+        let error = download_with_tuning(
+            &file,
+            dir.path(),
+            &[],
+            opts,
+            quick(),
+            Arc::new(AtomicBool::new(false)),
+            |_| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(error.downcast_ref::<Stalled>().is_some(), "{error:#}");
+    }
+
     fn quick() -> Tuning {
         Tuning {
             metadata_timeout: Duration::from_millis(700),
@@ -1838,6 +2138,7 @@ pub(crate) mod tests {
             callbacks: None,
             obfuscation: super::super::obfuscation::Obfuscation::Disabled,
             events: None,
+            late_sources: None,
         }
     }
     fn two_part_data() -> Vec<u8> {

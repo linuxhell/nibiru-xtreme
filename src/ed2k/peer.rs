@@ -487,20 +487,33 @@ impl Peer {
             }
         }
     }
-    /// One block of the file, `[from, end)` in absolute offsets and inside one part.
+    /// One block of the file, `[from, end)` in absolute offsets.
+    #[cfg(test)]
     pub async fn block(&mut self, from: u64, end: u64) -> Result<Vec<u8>> {
+        let mut blocks = self.blocks(&[(from, end)]).await?;
+        Ok(blocks.remove(0))
+    }
+
+    /// Up to three blocks asked for in one request, like eMule and aMule do (the legacy request
+    /// carries exactly three start/end pairs; unused pairs are zero). Each range is
+    /// `[from, end)` in absolute offsets and at most one block long. The answers may interleave,
+    /// compressed or not; they come back in the order of `ranges`.
+    pub async fn blocks(&mut self, ranges: &[(u64, u64)]) -> Result<Vec<Vec<u8>>> {
         check_cancel(&self.cancel)?;
-        let wide = end > u32::MAX as u64;
+        if ranges.is_empty() || ranges.len() > 3 {
+            bail!("a request carries one to three blocks");
+        }
+        let wide = ranges.iter().any(|(_, end)| *end > u32::MAX as u64);
         if wide && !self.large {
             bail!("peer does not support 64-bit file offsets");
         }
         let mut request = self.file.hash.to_vec();
-        if wide {
-            for offset in [from, 0, 0, end, 0, 0] {
+        let starts = (0..3).map(|i| ranges.get(i).map_or(0, |r| r.0));
+        let ends = (0..3).map(|i| ranges.get(i).map_or(0, |r| r.1));
+        for offset in starts.chain(ends) {
+            if wide {
                 request.extend(offset.to_le_bytes());
-            }
-        } else {
-            for offset in [from, 0, 0, end, 0, 0] {
+            } else {
                 request.extend((offset as u32).to_le_bytes());
             }
         }
@@ -511,13 +524,29 @@ impl Peer {
             &request,
         )
         .await?;
-        let mut block = vec![0; (end - from) as usize];
-        let mut covered = vec![false; block.len()];
-        let mut remaining = block.len();
-        let mut compressed = Vec::new();
-        let mut compressed_size = None;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
-        while remaining > 0 {
+        struct Slot {
+            from: u64,
+            end: u64,
+            data: Vec<u8>,
+            covered: Vec<bool>,
+            remaining: usize,
+            compressed: Vec<u8>,
+            compressed_size: Option<usize>,
+        }
+        let mut slots: Vec<Slot> = ranges
+            .iter()
+            .map(|&(from, end)| Slot {
+                from,
+                end,
+                data: vec![0; (end - from) as usize],
+                covered: vec![false; (end - from) as usize],
+                remaining: (end - from) as usize,
+                compressed: Vec::new(),
+                compressed_size: None,
+            })
+            .collect();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(45 * ranges.len() as u64);
+        while slots.iter().any(|slot| slot.remaining > 0) {
             let (protocol, op, data) = tokio::time::timeout_at(deadline, self.receive())
                 .await
                 .context("peer block timed out")??;
@@ -533,21 +562,23 @@ impl Peer {
                     } else {
                         (r.u32()? as u64, r.u32()? as u64)
                     };
-                    if a < from
-                        || b > end
-                        || b <= a
-                        || data.len() - r.pos != (b - a) as usize
-                        || !compressed.is_empty()
-                    {
+                    let slot = slots
+                        .iter_mut()
+                        .find(|slot| a >= slot.from && b <= slot.end)
+                        .filter(|slot| b > a && slot.compressed.is_empty());
+                    let Some(slot) = slot else {
+                        bail!("peer block exceeds requested range");
+                    };
+                    if data.len() - r.pos != (b - a) as usize {
                         bail!("peer block exceeds requested range");
                     }
-                    let range = (a - from) as usize..(b - from) as usize;
-                    if covered[range.clone()].iter().any(|b| *b) {
+                    let range = (a - slot.from) as usize..(b - slot.from) as usize;
+                    if slot.covered[range.clone()].iter().any(|b| *b) {
                         bail!("peer sent overlapping data");
                     }
-                    remaining -= range.len();
-                    block[range.clone()].copy_from_slice(&data[r.pos..]);
-                    covered[range].fill(true);
+                    slot.remaining -= range.len();
+                    slot.data[range.clone()].copy_from_slice(&data[r.pos..]);
+                    slot.covered[range].fill(true);
                 }
                 (0xc5, 0x40 | 0xa1) => {
                     let mut r = Reader::new(&data);
@@ -560,35 +591,37 @@ impl Peer {
                         r.u32()? as u64
                     };
                     let total = r.u32()? as usize;
-                    if offset != from
-                        || total == 0
-                        || total > block.len() + 65536
-                        || compressed_size.is_some_and(|n| n != total)
-                        || remaining != block.len()
+                    let Some(slot) = slots.iter_mut().find(|slot| slot.from == offset) else {
+                        bail!("invalid compressed peer block");
+                    };
+                    if total == 0
+                        || total > slot.data.len() + 65536
+                        || slot.compressed_size.is_some_and(|n| n != total)
+                        || slot.remaining != slot.data.len()
                     {
                         bail!("invalid compressed peer block");
                     }
-                    compressed_size = Some(total);
-                    if compressed.len() + data.len() - r.pos > total {
+                    slot.compressed_size = Some(total);
+                    if slot.compressed.len() + data.len() - r.pos > total {
                         bail!("compressed peer block exceeds declared length");
                     }
-                    compressed.extend(&data[r.pos..]);
-                    if compressed.len() == total {
+                    slot.compressed.extend(&data[r.pos..]);
+                    if slot.compressed.len() == total {
                         let mut decoded = Vec::new();
-                        flate2::read::ZlibDecoder::new(&compressed[..])
-                            .take(block.len() as u64 + 1)
+                        flate2::read::ZlibDecoder::new(&slot.compressed[..])
+                            .take(slot.data.len() as u64 + 1)
                             .read_to_end(&mut decoded)?;
-                        if decoded.len() != block.len() {
+                        if decoded.len() != slot.data.len() {
                             bail!("compressed peer block size mismatch");
                         }
-                        block = decoded;
-                        remaining = 0;
+                        slot.data = decoded;
+                        slot.remaining = 0;
                     }
                 }
                 _ => {}
             }
         }
-        Ok(block)
+        Ok(slots.into_iter().map(|slot| slot.data).collect())
     }
 
     /// The whole part, verified (the transfer itself assembles parts from blocks of several peers).

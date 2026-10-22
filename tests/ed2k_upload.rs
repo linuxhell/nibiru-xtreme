@@ -353,6 +353,7 @@ async fn fetch(
             callbacks: None,
             obfuscation: mode,
             events: None,
+            late_sources: None,
         },
         Arc::new(AtomicBool::new(false)),
         |_| {},
