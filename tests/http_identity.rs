@@ -562,3 +562,38 @@ async fn native_rpc_rapid_pause_resume_keeps_one_writer_and_exact_final_counters
     server.abort();
     origin_server.abort();
 }
+
+#[tokio::test]
+async fn no_lock_file_is_left_after_a_download_finishes_or_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let (url, server) = origin(150_000, Arc::new(AtomicBool::new(false)), false).await;
+    let destination = dir.path().join("done.bin");
+    engine()
+        .download(
+            DownloadRequest {
+                url,
+                destination: destination.clone(),
+            },
+            Arc::new(AtomicBool::new(false)),
+            |_| {},
+        )
+        .await
+        .unwrap();
+    server.abort();
+    assert!(destination.exists());
+    assert!(!dir.path().join("done.bin.nibiru-http.lock").exists());
+
+    let failed = dir.path().join("failed.bin");
+    engine()
+        .download(
+            DownloadRequest {
+                url: "http://127.0.0.1:9/file".into(),
+                destination: failed.clone(),
+            },
+            Arc::new(AtomicBool::new(false)),
+            |_| {},
+        )
+        .await
+        .unwrap_err();
+    assert!(!dir.path().join("failed.bin.nibiru-http.lock").exists());
+}

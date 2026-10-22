@@ -75,6 +75,42 @@ impl HttpIdentity {
             )
     }
 }
+/// The lock that keeps two downloads from writing the same destination. It lives only while the
+/// download runs: the file is removed afterwards, so a finished or failed download leaves no
+/// `.nibiru-http.lock` next to it. A lock held by another download is never removed.
+struct DestinationLock {
+    file: Option<std::fs::File>,
+    path: PathBuf,
+}
+
+impl DestinationLock {
+    fn acquire(destination: &Path) -> Result<Self> {
+        let mut path = destination.as_os_str().to_owned();
+        path.push(".nibiru-http.lock");
+        let path = PathBuf::from(path);
+        let file = StdOpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)?;
+        file.try_lock()
+            .context("download destination is already in use")?;
+        Ok(Self {
+            file: Some(file),
+            path,
+        })
+    }
+}
+
+impl Drop for DestinationLock {
+    fn drop(&mut self) {
+        // Close the handle first (Windows cannot delete an open file), then remove the file.
+        drop(self.file.take());
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 fn http_identity_path(destination: &Path) -> PathBuf {
     let mut path = destination.as_os_str().to_owned();
     path.push(".nibiru-http.json");
@@ -558,17 +594,7 @@ impl Engine {
             fs::create_dir_all(parent).await?;
         }
 
-        let mut lock_path = request.destination.as_os_str().to_owned();
-        lock_path.push(".nibiru-http.lock");
-        let _destination_lock = StdOpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(PathBuf::from(lock_path))?;
-        _destination_lock
-            .try_lock()
-            .context("download destination is already in use")?;
+        let _destination_lock = DestinationLock::acquire(&request.destination)?;
 
         #[cfg(any(feature = "ftp", feature = "sftp", feature = "http3"))]
         let context = crate::protocols::TransferContext {
