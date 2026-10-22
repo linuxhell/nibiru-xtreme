@@ -2,9 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main, "chatgpt/**", "claude/**", "audit/**"]
+    branches: ["chatgpt/**", "claude/**", "audit/**"]
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -26,6 +27,7 @@ jobs:
         with:
           toolchain: 1.97.0
           components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Format
         if: runner.os == 'Linux'
         run: cargo fmt --all -- --check
@@ -52,20 +54,16 @@ jobs:
           cargo test --locked --test kad_amule -- --nocapture
       - name: Release build
         run: cargo build --locked --release
-      - name: Package Windows x64
+      - name: Smoke test Windows x64
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           ./target/release/nibiru-xtreme.exe --version
           if ($LASTEXITCODE -ne 0) { throw "Binary smoke test failed" }
-          New-Item -ItemType Directory -Force dist/nibiru-windows-x64 | Out-Null
-          Copy-Item target/release/nibiru-xtreme.exe, benchmarks/windows11.ps1, benchmarks/iniciar-teste.cmd, benchmarks/comparar-sync.ps1, benchmarks/comparar-sync.cmd, benchmarks/comparar-adaptativo.cmd, benchmarks/README.md, benchmarks/performance-2026-10-19.md, docs/protocols.md, LICENSE, THIRD_PARTY_NOTICES.md, LICENSE-APACHE-2.0.txt dist/nibiru-windows-x64/
-          $hash = (Get-FileHash dist/nibiru-windows-x64/nibiru-xtreme.exe -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  nibiru-xtreme.exe" | Set-Content -Encoding ascii dist/nibiru-windows-x64/SHA256SUMS.txt
       - name: Upload Windows x64
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: nibiru-windows-x64
-          path: dist/nibiru-windows-x64/
+          path: target/release/nibiru-xtreme.exe
           if-no-files-found: error
