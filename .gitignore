@@ -3,3 +3,12 @@
 *.part
 .DS_Store
 Thumbs.db
+
+__pycache__/
+
+# Runtime resume metadata; older versions may contain request URLs.
+*.nibiru-http.json
+*.nibiru-http.part
+*.nibiru-http.part.json
+*.nibiru-part.json
+*.nibiru-part.json.new

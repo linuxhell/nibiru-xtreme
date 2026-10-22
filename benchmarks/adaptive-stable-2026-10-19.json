@@ -1,0 +1,142 @@
+{
+  "size_bytes": 2147483648,
+  "rate_mib": 105.0,
+  "latency_ms": 40.0,
+  "rounds": 2,
+  "checkpoint_bytes": {},
+  "native_sync_mib": {},
+  "adaptive_labels": [
+    "adaptive"
+  ],
+  "connection_rate_mib": 32.0,
+  "overload_above": 0,
+  "overload_delay_ms": 0,
+  "pacing": "future slots without catch-up credit",
+  "profiles": {
+    "fixed": {
+      "binary_sha256": "77b9002fa8d1e87ec86f4b67f3ae6930214a02afe07f9871b7f45ae97a5e94a4",
+      "version": "nibiru-xtreme 0.1.4"
+    },
+    "adaptive": {
+      "binary_sha256": "77b9002fa8d1e87ec86f4b67f3ae6930214a02afe07f9871b7f45ae97a5e94a4",
+      "version": "nibiru-xtreme 0.1.4"
+    }
+  },
+  "samples": [
+    {
+      "label": "fixed",
+      "run": 1,
+      "seconds": 19.804439972000182,
+      "mib_per_second": 103.41115441262129,
+      "cpu_seconds": 6.917193999999999,
+      "requests": 149,
+      "sha256": "382045c648d7c2a42a01bb3132186a0397d40e2e4e85a99377dbc79c20e6671e",
+      "log_bytes": 5916,
+      "peak_active_requests": 12,
+      "engine_timings_ms": {
+        "elapsed_ms": 19710,
+        "transfer_ms": 19638,
+        "finalize_ms": 71,
+        "sync_ms": 71,
+        "close_ms": 0,
+        "destination_cleanup_ms": 0,
+        "rename_ms": 0,
+        "checkpoint_wait_ms": 0
+      },
+      "checkpoint_count": 0,
+      "checkpoint_sync_ms_sum": 0,
+      "adaptive_decisions": []
+    },
+    {
+      "label": "adaptive",
+      "run": 1,
+      "seconds": 19.76645142000052,
+      "mib_per_second": 103.6098972184632,
+      "cpu_seconds": 2.477526,
+      "requests": 149,
+      "sha256": "382045c648d7c2a42a01bb3132186a0397d40e2e4e85a99377dbc79c20e6671e",
+      "log_bytes": 6453,
+      "peak_active_requests": 12,
+      "engine_timings_ms": {
+        "elapsed_ms": 19670,
+        "transfer_ms": 19611,
+        "finalize_ms": 59,
+        "sync_ms": 58,
+        "close_ms": 0,
+        "destination_cleanup_ms": 0,
+        "rename_ms": 0,
+        "checkpoint_wait_ms": 0
+      },
+      "checkpoint_count": 0,
+      "checkpoint_sync_ms_sum": 0,
+      "adaptive_decisions": [
+        "previous_workers=12 target_workers=6 measured_bytes_per_second=113246208 reference_bytes_per_second=113246208 reason=probe_fewer",
+        "previous_workers=6 target_workers=12 measured_bytes_per_second=109596926 reference_bytes_per_second=113246208 reason=restore_previous",
+        "previous_workers=12 target_workers=12 measured_bytes_per_second=100663296 reference_bytes_per_second=0 reason=freeze_at_tail"
+      ]
+    },
+    {
+      "label": "adaptive",
+      "run": 2,
+      "seconds": 20.66750527899967,
+      "mib_per_second": 99.0927532062121,
+      "cpu_seconds": 2.025815999999999,
+      "requests": 107,
+      "sha256": "382045c648d7c2a42a01bb3132186a0397d40e2e4e85a99377dbc79c20e6671e",
+      "log_bytes": 6933,
+      "peak_active_requests": 12,
+      "engine_timings_ms": {
+        "elapsed_ms": 20550,
+        "transfer_ms": 20328,
+        "finalize_ms": 222,
+        "sync_ms": 221,
+        "close_ms": 0,
+        "destination_cleanup_ms": 0,
+        "rename_ms": 0,
+        "checkpoint_wait_ms": 0
+      },
+      "checkpoint_count": 0,
+      "checkpoint_sync_ms_sum": 0,
+      "adaptive_decisions": [
+        "previous_workers=12 target_workers=6 measured_bytes_per_second=113246208 reference_bytes_per_second=113246208 reason=probe_fewer",
+        "previous_workers=6 target_workers=3 measured_bytes_per_second=110100480 reference_bytes_per_second=113246208 reason=keep_gain_probe_fewer",
+        "previous_workers=3 target_workers=6 measured_bytes_per_second=92274688 reference_bytes_per_second=110100480 reason=restore_previous",
+        "previous_workers=6 target_workers=6 measured_bytes_per_second=109051904 reference_bytes_per_second=0 reason=freeze_at_tail"
+      ]
+    },
+    {
+      "label": "fixed",
+      "run": 2,
+      "seconds": 19.709124914001222,
+      "mib_per_second": 103.91125983199362,
+      "cpu_seconds": 2.065831000000001,
+      "requests": 149,
+      "sha256": "382045c648d7c2a42a01bb3132186a0397d40e2e4e85a99377dbc79c20e6671e",
+      "log_bytes": 5915,
+      "peak_active_requests": 12,
+      "engine_timings_ms": {
+        "elapsed_ms": 19593,
+        "transfer_ms": 19572,
+        "finalize_ms": 20,
+        "sync_ms": 20,
+        "close_ms": 0,
+        "destination_cleanup_ms": 0,
+        "rename_ms": 0,
+        "checkpoint_wait_ms": 0
+      },
+      "checkpoint_count": 0,
+      "checkpoint_sync_ms_sum": 0,
+      "adaptive_decisions": []
+    }
+  ],
+  "medians": {
+    "fixed": {
+      "seconds": 19.756782443000702,
+      "cpu_seconds": 4.491512500000001
+    },
+    "adaptive": {
+      "seconds": 20.216978349500096,
+      "cpu_seconds": 2.2516709999999995
+    }
+  }
+}

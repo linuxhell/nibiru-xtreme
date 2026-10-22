@@ -1,0 +1,3 @@
+# reqwest 0.12 requires this explicit opt-in for its HTTP/3 API.
+[build]
+rustflags = ["--cfg", "reqwest_unstable"]

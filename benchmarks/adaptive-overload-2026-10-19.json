@@ -1,0 +1,139 @@
+{
+  "size_bytes": 1073741824,
+  "rate_mib": 105.0,
+  "latency_ms": 40.0,
+  "rounds": 2,
+  "checkpoint_bytes": {},
+  "native_sync_mib": {},
+  "adaptive_labels": [
+    "adaptive"
+  ],
+  "connection_rate_mib": 32.0,
+  "overload_above": 8,
+  "overload_delay_ms": 20.0,
+  "pacing": "future slots without catch-up credit",
+  "profiles": {
+    "fixed": {
+      "binary_sha256": "77b9002fa8d1e87ec86f4b67f3ae6930214a02afe07f9871b7f45ae97a5e94a4",
+      "version": "nibiru-xtreme 0.1.4"
+    },
+    "adaptive": {
+      "binary_sha256": "77b9002fa8d1e87ec86f4b67f3ae6930214a02afe07f9871b7f45ae97a5e94a4",
+      "version": "nibiru-xtreme 0.1.4"
+    }
+  },
+  "samples": [
+    {
+      "label": "fixed",
+      "run": 1,
+      "seconds": 28.142606642999453,
+      "mib_per_second": 36.386110675171686,
+      "cpu_seconds": 1.9896129999999996,
+      "requests": 117,
+      "sha256": "2c06ade942ee3f17a048dd1064b2fab046a4bb95386d8bb41b68dc6711ac2af3",
+      "log_bytes": 7686,
+      "peak_active_requests": 12,
+      "engine_timings_ms": {
+        "elapsed_ms": 28030,
+        "transfer_ms": 27920,
+        "finalize_ms": 110,
+        "sync_ms": 109,
+        "close_ms": 0,
+        "destination_cleanup_ms": 0,
+        "rename_ms": 0,
+        "checkpoint_wait_ms": 0
+      },
+      "checkpoint_count": 0,
+      "checkpoint_sync_ms_sum": 0,
+      "adaptive_decisions": []
+    },
+    {
+      "label": "adaptive",
+      "run": 1,
+      "seconds": 17.960006799999974,
+      "mib_per_second": 57.015568613259184,
+      "cpu_seconds": 1.205635,
+      "requests": 75,
+      "sha256": "2c06ade942ee3f17a048dd1064b2fab046a4bb95386d8bb41b68dc6711ac2af3",
+      "log_bytes": 5938,
+      "peak_active_requests": 12,
+      "engine_timings_ms": {
+        "elapsed_ms": 17826,
+        "transfer_ms": 17547,
+        "finalize_ms": 278,
+        "sync_ms": 278,
+        "close_ms": 0,
+        "destination_cleanup_ms": 0,
+        "rename_ms": 0,
+        "checkpoint_wait_ms": 0
+      },
+      "checkpoint_count": 0,
+      "checkpoint_sync_ms_sum": 0,
+      "adaptive_decisions": [
+        "previous_workers=12 target_workers=6 measured_bytes_per_second=35651584 reference_bytes_per_second=35651584 reason=probe_fewer",
+        "previous_workers=6 target_workers=6 measured_bytes_per_second=110729625 reference_bytes_per_second=35651584 reason=freeze_at_tail"
+      ]
+    },
+    {
+      "label": "adaptive",
+      "run": 2,
+      "seconds": 17.709001436000108,
+      "mib_per_second": 57.82370077165054,
+      "cpu_seconds": 1.1177840000000003,
+      "requests": 75,
+      "sha256": "2c06ade942ee3f17a048dd1064b2fab046a4bb95386d8bb41b68dc6711ac2af3",
+      "log_bytes": 5935,
+      "peak_active_requests": 12,
+      "engine_timings_ms": {
+        "elapsed_ms": 17617,
+        "transfer_ms": 17587,
+        "finalize_ms": 30,
+        "sync_ms": 30,
+        "close_ms": 0,
+        "destination_cleanup_ms": 0,
+        "rename_ms": 0,
+        "checkpoint_wait_ms": 0
+      },
+      "checkpoint_count": 0,
+      "checkpoint_sync_ms_sum": 0,
+      "adaptive_decisions": [
+        "previous_workers=12 target_workers=6 measured_bytes_per_second=36700160 reference_bytes_per_second=36700160 reason=probe_fewer",
+        "previous_workers=6 target_workers=6 measured_bytes_per_second=113246208 reference_bytes_per_second=36700160 reason=freeze_at_tail"
+      ]
+    },
+    {
+      "label": "fixed",
+      "run": 2,
+      "seconds": 30.440756869000325,
+      "mib_per_second": 33.6391110249562,
+      "cpu_seconds": 1.2344549999999987,
+      "requests": 117,
+      "sha256": "2c06ade942ee3f17a048dd1064b2fab046a4bb95386d8bb41b68dc6711ac2af3",
+      "log_bytes": 8208,
+      "peak_active_requests": 12,
+      "engine_timings_ms": {
+        "elapsed_ms": 30321,
+        "transfer_ms": 30288,
+        "finalize_ms": 32,
+        "sync_ms": 32,
+        "close_ms": 0,
+        "destination_cleanup_ms": 0,
+        "rename_ms": 0,
+        "checkpoint_wait_ms": 0
+      },
+      "checkpoint_count": 0,
+      "checkpoint_sync_ms_sum": 0,
+      "adaptive_decisions": []
+    }
+  ],
+  "medians": {
+    "fixed": {
+      "seconds": 29.29168175599989,
+      "cpu_seconds": 1.612033999999999
+    },
+    "adaptive": {
+      "seconds": 17.83450411800004,
+      "cpu_seconds": 1.1617095000000002
+    }
+  }
+}

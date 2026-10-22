@@ -1,0 +1,211 @@
+{
+  "size_bytes": 1073741824,
+  "rate_mib": 105.0,
+  "latency_ms": 40.0,
+  "rounds": 3,
+  "checkpoint_bytes": {
+    "checkpoint": 268435456
+  },
+  "samples": [
+    {
+      "label": "reference",
+      "run": 1,
+      "seconds": 10.057122205999804,
+      "mib_per_second": 101.81839089010072,
+      "cpu_seconds": 0.9840930000000001,
+      "requests": 117,
+      "sha256": "2c06ade942ee3f17a048dd1064b2fab046a4bb95386d8bb41b68dc6711ac2af3",
+      "log_bytes": 3609,
+      "engine_timings_ms": {
+        "elapsed_ms": 9954,
+        "transfer_ms": 9753,
+        "finalize_ms": 201
+      }
+    },
+    {
+      "label": "diagnostics",
+      "run": 1,
+      "seconds": 9.886369819999345,
+      "mib_per_second": 103.57694670985592,
+      "cpu_seconds": 0.918185,
+      "requests": 117,
+      "sha256": "2c06ade942ee3f17a048dd1064b2fab046a4bb95386d8bb41b68dc6711ac2af3",
+      "log_bytes": 3669,
+      "engine_timings_ms": {
+        "elapsed_ms": 9785,
+        "transfer_ms": 9753,
+        "finalize_ms": 31,
+        "sync_ms": 31,
+        "close_ms": 0,
+        "destination_cleanup_ms": 0,
+        "rename_ms": 0
+      }
+    },
+    {
+      "label": "checkpoint",
+      "run": 1,
+      "seconds": 9.947502296000494,
+      "mib_per_second": 102.94041353593965,
+      "cpu_seconds": 1.181311,
+      "requests": 117,
+      "sha256": "2c06ade942ee3f17a048dd1064b2fab046a4bb95386d8bb41b68dc6711ac2af3",
+      "log_bytes": 3414,
+      "engine_timings_ms": {
+        "elapsed_ms": 9855,
+        "transfer_ms": 9753,
+        "finalize_ms": 101,
+        "sync_ms": 101,
+        "close_ms": 0,
+        "destination_cleanup_ms": 0,
+        "rename_ms": 0
+      },
+      "external_checkpoint": {
+        "count": 3,
+        "seconds": 0.3101129189999483
+      }
+    },
+    {
+      "label": "diagnostics",
+      "run": 2,
+      "seconds": 10.136789134000537,
+      "mib_per_second": 101.01818104959169,
+      "cpu_seconds": 0.9212320000000007,
+      "requests": 117,
+      "sha256": "2c06ade942ee3f17a048dd1064b2fab046a4bb95386d8bb41b68dc6711ac2af3",
+      "log_bytes": 3417,
+      "engine_timings_ms": {
+        "elapsed_ms": 10025,
+        "transfer_ms": 9753,
+        "finalize_ms": 272,
+        "sync_ms": 272,
+        "close_ms": 0,
+        "destination_cleanup_ms": 0,
+        "rename_ms": 0
+      }
+    },
+    {
+      "label": "checkpoint",
+      "run": 2,
+      "seconds": 9.991668489000403,
+      "mib_per_second": 102.48538581191899,
+      "cpu_seconds": 0.9807560000000004,
+      "requests": 117,
+      "sha256": "2c06ade942ee3f17a048dd1064b2fab046a4bb95386d8bb41b68dc6711ac2af3",
+      "log_bytes": 3410,
+      "engine_timings_ms": {
+        "elapsed_ms": 9855,
+        "transfer_ms": 9754,
+        "finalize_ms": 101,
+        "sync_ms": 101,
+        "close_ms": 0,
+        "destination_cleanup_ms": 0,
+        "rename_ms": 0
+      },
+      "external_checkpoint": {
+        "count": 3,
+        "seconds": 0.30562559200006945
+      }
+    },
+    {
+      "label": "reference",
+      "run": 2,
+      "seconds": 9.889089277000494,
+      "mib_per_second": 103.54846349517376,
+      "cpu_seconds": 1.0652989999999996,
+      "requests": 117,
+      "sha256": "2c06ade942ee3f17a048dd1064b2fab046a4bb95386d8bb41b68dc6711ac2af3",
+      "log_bytes": 3353,
+      "engine_timings_ms": {
+        "elapsed_ms": 9784,
+        "transfer_ms": 9754,
+        "finalize_ms": 29
+      }
+    },
+    {
+      "label": "checkpoint",
+      "run": 3,
+      "seconds": 9.992754308999793,
+      "mib_per_second": 102.47424967486222,
+      "cpu_seconds": 0.9866410000000005,
+      "requests": 117,
+      "sha256": "2c06ade942ee3f17a048dd1064b2fab046a4bb95386d8bb41b68dc6711ac2af3",
+      "log_bytes": 3409,
+      "engine_timings_ms": {
+        "elapsed_ms": 9853,
+        "transfer_ms": 9753,
+        "finalize_ms": 100,
+        "sync_ms": 100,
+        "close_ms": 0,
+        "destination_cleanup_ms": 0,
+        "rename_ms": 0
+      },
+      "external_checkpoint": {
+        "count": 3,
+        "seconds": 0.3033632580008998
+      }
+    },
+    {
+      "label": "reference",
+      "run": 3,
+      "seconds": 9.891802593999273,
+      "mib_per_second": 103.52006019824897,
+      "cpu_seconds": 0.9019269999999988,
+      "requests": 117,
+      "sha256": "2c06ade942ee3f17a048dd1064b2fab046a4bb95386d8bb41b68dc6711ac2af3",
+      "log_bytes": 3351,
+      "engine_timings_ms": {
+        "elapsed_ms": 9783,
+        "transfer_ms": 9753,
+        "finalize_ms": 29
+      }
+    },
+    {
+      "label": "diagnostics",
+      "run": 3,
+      "seconds": 10.155460109999694,
+      "mib_per_second": 100.83245750645077,
+      "cpu_seconds": 1.003222,
+      "requests": 117,
+      "sha256": "2c06ade942ee3f17a048dd1064b2fab046a4bb95386d8bb41b68dc6711ac2af3",
+      "log_bytes": 3415,
+      "engine_timings_ms": {
+        "elapsed_ms": 10018,
+        "transfer_ms": 9753,
+        "finalize_ms": 265,
+        "sync_ms": 264,
+        "close_ms": 0,
+        "destination_cleanup_ms": 0,
+        "rename_ms": 0
+      }
+    }
+  ],
+  "medians": {
+    "reference": {
+      "seconds": 9.891802593999273,
+      "cpu_seconds": 0.9840930000000001
+    },
+    "diagnostics": {
+      "seconds": 10.136789134000537,
+      "cpu_seconds": 0.9212320000000007
+    },
+    "checkpoint": {
+      "seconds": 9.991668489000403,
+      "cpu_seconds": 0.9866410000000005
+    }
+  },
+  "environment": "Linux x86_64, overlay; synthetic local HTTP/1.1; not Windows/CDN",
+  "profiles": {
+    "reference": {
+      "description": "0.1.1 at 0a8bffe7; unchanged sync_all on async worker",
+      "binary_sha256": "c86ad79ba7dbe9020f012a52d3cce82477db580aa233adf9e13b95e0df92f43a"
+    },
+    "diagnostics": {
+      "description": "0.1.2 experimental candidate with sync-pool-experiment.patch; NOT shipped",
+      "binary_sha256": "b9cbc6c16156c8dc627385473af1b9a3c7dfddf4c50a55ed268d1b7eced27ec4"
+    },
+    "checkpoint": {
+      "description": "Same experimental candidate plus external fsync every 256 MiB of observed progress; NOT shipped",
+      "binary_sha256": "b9cbc6c16156c8dc627385473af1b9a3c7dfddf4c50a55ed268d1b7eced27ec4"
+    }
+  }
+}

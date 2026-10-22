@@ -1,6 +1,6 @@
 [package]
 name = "nibiru-xtreme"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 description = "Lightweight, secure and high-performance download engine"
@@ -13,13 +13,52 @@ panic = "abort"
 strip = "symbols"
 opt-level = 3
 
+[features]
+default = ["ftp", "sftp", "http3", "upnp"]
+ftp = ["dep:suppaftp", "dep:rustls", "dep:webpki-roots"]
+sftp = ["dep:russh", "dep:russh-sftp"]
+http3 = ["reqwest/http3", "dep:tokio-util"]
+upnp = ["dep:igd-next"]
+
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 futures-util = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "stream", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 url = "2"
+percent-encoding = "2"
+tokio-util = { version = "0.7", optional = true, features = ["io"] }
+suppaftp = { version = "12.1", optional = true, default-features = false, features = ["tokio-rustls-ring", "deprecated"] }
+rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = { version = "1", optional = true }
+tempfile = "3"
+flate2 = "1"
+md4 = "0.10"
+md5 = "0.8"
+sha1 = "0.10"
+sha2 = "0.10"
+russh = { version = "0.64", optional = true, default-features = false, features = ["ring"] }
+russh-sftp = { version = "3", optional = true }
 uuid = { version = "1", features = ["v4"] }
+getrandom = "0.4"
+socket2 = { version = "0.6", features = ["all"] }
+num-bigint = "0.5"
+librqbit-utp = "0.7"
+librqbit-dualstack-sockets = "0.7"
+igd-next = { version = "0.18", optional = true, default-features = false, features = ["aio_tokio"] }
+
+[dev-dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+bytes = "1"
+h2 = "0.4"
+http = "1"
+rcgen = "0.14"
+rand = "0.10"
+
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
+quinn = { version = "0.11", default-features = false, features = ["rustls-ring", "runtime-tokio"] }

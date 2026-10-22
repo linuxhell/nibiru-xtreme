@@ -1,8 +1,13 @@
 use anyhow::{Result, anyhow};
 use std::{fs::File, io, sync::Arc};
 
-pub async fn write_at(file: Arc<File>, offset: u64, data: Vec<u8>) -> Result<()> {
-    tokio::task::spawn_blocking(move || write_all_at(&file, offset, &data))
+pub(crate) mod checkpoints;
+
+pub async fn write_at<D>(file: Arc<File>, offset: u64, data: D) -> Result<()>
+where
+    D: AsRef<[u8]> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || write_all_at(&file, offset, data.as_ref()))
         .await
         .map_err(|error| anyhow!("storage worker failed: {error}"))??;
     Ok(())
