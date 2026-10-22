@@ -26,6 +26,10 @@ pub enum TransferStage {
 pub struct TransferProgress {
     pub stage: TransferStage,
     pub verified: u64,
+    /// Parts authenticated against the link hashset and flushed to disk in this run.
+    /// Consumers must not reconstruct this map from the total verified byte count.
+    #[serde(default)]
+    pub verified_parts: Vec<bool>,
     pub total: u64,
     pub peer: Option<String>,
     pub queue_rank: Option<u32>,
@@ -95,6 +99,29 @@ pub async fn download_with_options(
             bail!("partial file exceeds requested size");
         }
     }
+    // Lock a separate coordination file: Windows byte-range locks on the data file
+    // would also prevent a media player from reading already verified parts.
+    let lock_path = stage.with_extension("lock");
+    let _writer_guard = tokio::task::spawn_blocking(move || -> Result<std::fs::File> {
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).truncate(false).read(true).write(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options
+                .share_mode(0)
+                .access_mode(0xC0010000)
+                .custom_flags(0x04000000); // Delete on close, including errors.
+        }
+        let guard = options
+            .open(lock_path)
+            .context("ED2K partial file is already in use")?;
+        guard
+            .try_lock()
+            .context("ED2K partial file is already in use")?;
+        Ok(guard)
+    })
+    .await??;
     let stage_clone = stage.clone();
     let disk = tokio::task::spawn_blocking(move || -> Result<std::fs::File> {
         let disk = std::fs::OpenOptions::new()
@@ -103,8 +130,6 @@ pub async fn download_with_options(
             .read(true)
             .write(true)
             .open(stage_clone)?;
-        disk.try_lock()
-            .context("ED2K partial file is already in use")?;
         Ok(disk)
     })
     .await??;
@@ -184,6 +209,7 @@ pub async fn download_with_options(
     progress(TransferProgress {
         stage: TransferStage::Completed,
         verified,
+        verified_parts: vec![true; file.part_count()],
         total: file.size,
         peer: None,
         queue_rank: None,
@@ -226,10 +252,15 @@ impl Context_<'_> {
         self.shared.lock().unwrap().complete.iter().all(|v| *v)
     }
     fn emit(&self, stage: TransferStage, peer: &Option<String>, queue_rank: Option<u32>) {
-        let verified = self.shared.lock().unwrap().verified;
-        (self.progress.lock().unwrap())(TransferProgress {
+        let mut progress = self.progress.lock().unwrap();
+        let (verified, verified_parts) = {
+            let shared = self.shared.lock().unwrap();
+            (shared.verified, shared.complete.clone())
+        };
+        progress(TransferProgress {
             stage,
             verified,
+            verified_parts,
             total: self.file.size,
             peer: peer.clone(),
             queue_rank,
@@ -407,6 +438,53 @@ pub(crate) mod tests {
         io::Write,
         sync::{Mutex, atomic::Ordering},
     };
+
+    #[tokio::test]
+    async fn preview_map_marks_only_authenticated_readable_parts() {
+        use std::io::{Read, Seek};
+        let data = vec![42; PART_SIZE as usize + 123];
+        let (file, _) = fixture_file(&data);
+        let (source, _, server) = fixture(data.clone(), false, false).await;
+        let root = tempfile::tempdir().unwrap();
+        let stage = root.path().join(format!(
+            ".nibiru-ed2k-{}-{}.part",
+            file.hash_hex(),
+            file.size
+        ));
+        let mut observed = false;
+        download_from_sources(
+            &file,
+            root.path(),
+            &[source],
+            [7; 16],
+            0,
+            Arc::new(AtomicBool::new(false)),
+            |progress| {
+                if matches!(progress.stage, TransferStage::Completed) {
+                    return;
+                }
+                for (index, verified) in progress.verified_parts.iter().enumerate() {
+                    if !verified {
+                        continue;
+                    }
+                    observed = true;
+                    let mut disk = std::fs::File::open(&stage).unwrap();
+                    disk.seek(std::io::SeekFrom::Start(index as u64 * PART_SIZE))
+                        .unwrap();
+                    let mut bytes = vec![0; file.part_len(index)];
+                    disk.read_exact(&mut bytes).unwrap();
+                    assert_eq!(
+                        bytes,
+                        data[index * PART_SIZE as usize..index * PART_SIZE as usize + bytes.len()]
+                    );
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert!(observed);
+        server.await.unwrap();
+    }
 
     pub(crate) fn fixture_file(data: &[u8]) -> (FileLink, Vec<[u8; 16]>) {
         let mut hashes: Vec<_> = data.chunks(PART_SIZE as usize).map(digest).collect();
