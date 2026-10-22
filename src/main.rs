@@ -139,6 +139,10 @@ struct ServeArgs {
     /// Tasks whose request carries credentials are never written.
     #[arg(long)]
     session_file: Option<PathBuf>,
+    /// Ask a UPnP router to forward the listening ports (BitTorrent, ED2K and Kad), renew them
+    /// while running and remove them on exit.
+    #[arg(long)]
+    upnp: bool,
     /// Accept `ed2k://|file|…|/` links (sources: `x-nibiru-ed2k-source`, servers, Kad).
     #[arg(long)]
     ed2k: bool,
@@ -341,34 +345,107 @@ async fn main() -> Result<()> {
             let engine = Engine::new(log.clone())?;
             let global_download_limit = config.session.download_limit;
             let service = BtService::start(config).await?;
+            #[cfg(not(feature = "upnp"))]
+            if args.upnp {
+                return Err(anyhow!("this build has no UPnP support"));
+            }
+            #[cfg(feature = "upnp")]
+            let mut upnp_ports = Vec::new();
+            #[cfg(feature = "upnp")]
+            if args.upnp {
+                use nibiru_xtreme::upnp::{Mapping, Proto};
+                let session = service.session();
+                upnp_ports.push(Mapping {
+                    proto: Proto::Tcp,
+                    port: session.port(),
+                });
+                upnp_ports.push(Mapping {
+                    proto: Proto::Udp,
+                    port: session.port(),
+                });
+                if let Some(dht) = session.dht() {
+                    upnp_ports.push(Mapping {
+                        proto: Proto::Udp,
+                        port: dht.port(),
+                    });
+                }
+            }
             let mut server = RpcServer::new(engine, log.clone(), args.secret.clone())
                 .with_default_dir(args.dir.clone())
                 .with_global_download_limit(global_download_limit)
                 .with_bittorrent(service);
             if args.ed2k {
-                server = server.with_ed2k(start_ed2k(&args, &log).await?);
+                let ed2k = start_ed2k(&args, &log).await?;
+                #[cfg(feature = "upnp")]
+                if args.upnp {
+                    use nibiru_xtreme::upnp::{Mapping, Proto};
+                    upnp_ports.push(Mapping {
+                        proto: Proto::Tcp,
+                        port: ed2k.announced_port(),
+                    });
+                    if let Some(kad) = ed2k.kad_status()
+                        && let Some(port) =
+                            kad["udp_port"].as_u64().and_then(|p| u16::try_from(p).ok())
+                    {
+                        upnp_ports.push(Mapping {
+                            proto: Proto::Udp,
+                            port,
+                        });
+                    }
+                }
+                server = server.with_ed2k(ed2k);
             }
             if let Some(path) = args.session_file.clone() {
                 server = server.with_session(path).await?;
             }
+            #[cfg(feature = "upnp")]
+            let upnp = args
+                .upnp
+                .then(|| nibiru_xtreme::upnp::Upnp::new("Nibiru Xtreme"));
+            #[cfg(feature = "upnp")]
+            if let Some(upnp) = upnp.clone() {
+                // Looking for the router can take seconds: do it without delaying the RPC server.
+                let log = log.clone();
+                tokio::spawn(async move {
+                    upnp.apply(upnp_ports).await;
+                    log.info(
+                        "upnp.status",
+                        &serde_json::to_string(&upnp.status()).unwrap_or_default(),
+                    );
+                });
+            }
             if let Some(pid) = args.stop_with_process {
                 let watched = server.clone();
+                #[cfg(feature = "upnp")]
+                let watched_upnp = upnp.clone();
                 tokio::spawn(async move {
                     loop {
                         tokio::time::sleep(Duration::from_secs(3)).await;
                         if !process_alive(pid).await {
                             // Save the session before the manager's exit takes us down too.
                             let _ = watched.flush_session().await;
+                            #[cfg(feature = "upnp")]
+                            if let Some(upnp) = watched_upnp {
+                                let _ =
+                                    tokio::time::timeout(Duration::from_secs(6), upnp.release())
+                                        .await;
+                            }
                             std::process::exit(0);
                         }
                     }
                 });
             }
             let stopping = server.clone();
+            #[cfg(feature = "upnp")]
+            let stopping_upnp = upnp.clone();
             tokio::spawn(async move {
                 wait_for_termination().await;
                 // Leave the session file current before exiting.
                 let _ = stopping.flush_session().await;
+                #[cfg(feature = "upnp")]
+                if let Some(upnp) = stopping_upnp {
+                    let _ = tokio::time::timeout(Duration::from_secs(6), upnp.release()).await;
+                }
                 std::process::exit(0);
             });
             server.serve(args.port).await?;

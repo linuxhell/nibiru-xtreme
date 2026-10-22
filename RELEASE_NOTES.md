@@ -1,5 +1,12 @@
 # Nibiru Xtreme — download engine (alpha)
 
+## 0.2.0-alpha.4 — PRÉ-RELEASE PARA TESTE (não é a release final)
+
+- **UPnP** (`serve --upnp` e `nibiru_xtreme::upnp::Upnp`): mapeia no roteador as portas TCP/UDP do BitTorrent,
+  o UDP do DHT e, com `--ed2k`, a TCP do ED2K e a UDP do Kad; renova a concessão e remove tudo ao sair.
+  Testado só contra um roteador falso em loopback; **nenhum roteador real foi testado**. Desligado por padrão.
+
+
 ## 0.2.0-alpha.3 — PRÉ-RELEASE PARA TESTE (não é a release final)
 
 Corrige o que o primeiro teste real no Windows (ISO de 8,7 GB) mostrou:

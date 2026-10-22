@@ -129,7 +129,8 @@ impl Ed2kService {
     }
 
     /// The port announced to servers: the real one once the listener is open.
-    fn announced_port(&self) -> u16 {
+    /// The TCP port peers are told to connect to (the listener's real port once started).
+    pub fn announced_port(&self) -> u16 {
         self.listener
             .get()
             .map_or(self.config.tcp_port, |l| l.status().tcp_port)

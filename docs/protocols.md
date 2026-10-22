@@ -311,3 +311,24 @@ conhece o ID. O ID Kad é o dos pacotes (16 bytes como trafegam). Um datagrama q
 - Lição do teste contra o aMule: o magic e as verify keys são **little-endian** na rede (`ENDIAN_SWAP_*` é no-op
   em máquinas little-endian); ler como big-endian dava um pacote que o aMule descartava em silêncio.
 - A versão anunciada passou de 5 para 6 (primeira com ofuscação). O ACK com chave da versão 8 não existe.
+
+## UPnP (mapeamento de portas no roteador)
+
+`nibiru_xtreme::upnp::Upnp` (feature `upnp`, ligada por padrão) e `serve --upnp`.
+
+- **O que faz:** descobre um roteador UPnP IGD (SSDP), pede o mapeamento **somente** das portas que o
+  chamador listou (porta externa = porta local, IPv4), com concessão de 1 h (renovada a cada 20 min enquanto
+  as portas forem desejadas) e remove tudo ao parar (`release`, ou Ctrl+C/SIGTERM/`--stop-with-process` no
+  `serve`). Se o roteador só aceita concessão permanente (erro 725), repete com concessão 0 e remove no fim.
+  Se o roteador some, procura de novo na renovação seguinte.
+- **No `serve --upnp`:** porta TCP e UDP do BitTorrent, UDP do DHT e, com `--ed2k`, a TCP do ED2K e a UDP do
+  Kad. O resultado vai para o log (`upnp.status`: `mapped`/`partial`/`failed`, IP externo, erro).
+- **Segurança:** só confia num roteador cujos URLs de serviço apontam para o endereço que respondeu ao SSDP
+  (padrão do `igd-next`), então uma resposta falsa não redireciona os pedidos; loopback é recusado fora de
+  testes. Nada é mapeado sem pedido explícito.
+- **Testado (loopback, roteador falso que fala o protocolo):** `tests/upnp.rs` (6): descoberta SSDP, descrição
+  do dispositivo e do serviço, `AddPortMapping`/`DeletePortMapping`/`GetExternalIPAddress`; mapeia o IP local e a
+  porta certos com a concessão; remove o que deixou de ser desejado; renova; retorna ao estado ocioso e apaga
+  tudo na liberação; roteador só-permanente; nenhum roteador; roteador que anuncia outro host (recusado).
+- **Não testado:** nenhum roteador real (modelos variam muito: alguns recusam a descrição, exigem porta
+  igual, limitam o nome ou ignoram a concessão), CGNAT (UPnP não resolve), IPv6, NAT-PMP/PCP.

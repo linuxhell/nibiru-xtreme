@@ -9,5 +9,7 @@ pub mod logging;
 pub mod protocols;
 pub mod rpc;
 pub mod storage;
+#[cfg(feature = "upnp")]
+pub mod upnp;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
