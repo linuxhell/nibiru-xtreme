@@ -47,6 +47,19 @@ def add(session, info, directory):
     return session.add_torrent(params)
 
 
+def flush_download(session, peer):
+    """Seeding confirms hashes, but the independent client's writes are asynchronous."""
+    mask = session.get_settings()["alert_mask"] | lt.alert.category_t.storage_notification
+    session.apply_settings({"alert_mask": mask})
+    peer.flush_cache()
+
+    def flushed():
+        return any(isinstance(alert, lt.cache_flushed_alert) and alert.handle == peer
+                   for alert in session.pop_alerts())
+
+    wait(flushed, "libtorrent flushes verified payload to disk")
+
+
 @contextlib.contextmanager
 def engine(binary, root, utp, encrypted, extra=()):
     port, peer_port = free_port(), free_port()
@@ -149,6 +162,8 @@ def scenario(binary, utp, encrypted, incoming, protocol="v1"):
                     magnet = f"magnet:?xt={xt}&x.pe=127.0.0.1:{session.listen_port()}"
                     gid = rpc("aria2.addUri", [[magnet], {"dir": str(output), "seed-time": "0"}])
                     wait(lambda: rpc("aria2.tellStatus", [gid])["status"] == "complete", "Nibiru downloads magnet from libtorrent")
+                if incoming:
+                    flush_download(session, peer)
                 assert (output / "payload.bin").read_bytes() == content
                 print(json.dumps({"transport": "utp" if utp else "tcp", "encrypted": encrypted,
                                   "protocol":protocol,
@@ -198,6 +213,8 @@ def lsd_scenario(binary, incoming):
                     gid = rpc("aria2.addUri", [[magnet], {"dir": str(output), "seed-time": "0"}])
                     wait(lambda: rpc("aria2.tellStatus", [gid])["status"] == "complete",
                          "Nibiru finds libtorrent through LSD", 60)
+                if incoming:
+                    flush_download(session, peer)
                 assert (output / "payload.bin").read_bytes() == content
                 print(json.dumps({"feature": "lsd", "direction": "libtorrent finds nibiru" if incoming else "nibiru finds libtorrent",
                                   "bytes_verified": len(content), "result": "passed"}), flush=True)
