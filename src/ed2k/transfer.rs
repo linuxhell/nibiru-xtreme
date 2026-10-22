@@ -508,7 +508,7 @@ impl Context_<'_> {
     }
     fn claim(&self, peer: &Peer) -> Option<usize> {
         let mut shared = self.shared.lock().unwrap();
-        let index = (0..shared.complete.len())
+        let index = preview_order(shared.complete.len())
             .find(|i| !shared.complete[*i] && !shared.claimed[*i] && peer.has_part(*i))?;
         shared.claimed[index] = true;
         Some(index)
@@ -701,6 +701,16 @@ impl Context_<'_> {
     }
 }
 
+/// The first part, then the last, then the rest in order. Players open a file by reading both ends
+/// (an AVI keeps its index at the end, an MP4 often its `moov`), so a preview of a partial download
+/// only works once the last part is there too.
+fn preview_order(parts: usize) -> impl Iterator<Item = usize> {
+    let last = parts.checked_sub(1).filter(|last| *last > 0);
+    (0..parts.min(1))
+        .chain(last)
+        .chain(1..parts.saturating_sub(1))
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::super::{peer, server};
@@ -709,6 +719,21 @@ pub(crate) mod tests {
         io::Write,
         sync::{Mutex, atomic::Ordering},
     };
+
+    #[test]
+    fn parts_are_fetched_first_then_last_then_in_order() {
+        let order = |parts| preview_order(parts).collect::<Vec<_>>();
+        assert_eq!(order(0), Vec::<usize>::new());
+        assert_eq!(order(1), vec![0]);
+        assert_eq!(order(2), vec![0, 1]);
+        assert_eq!(order(5), vec![0, 4, 1, 2, 3]);
+        let each_once = |parts: usize| {
+            let mut all = order(parts);
+            all.sort_unstable();
+            all == (0..parts).collect::<Vec<_>>()
+        };
+        assert!((0..40).all(each_once));
+    }
 
     #[tokio::test]
     async fn preview_map_marks_only_authenticated_readable_parts() {
