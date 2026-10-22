@@ -20,6 +20,62 @@ use tokio::{
 };
 
 const MAX_PACKET: usize = 4 * 1024 * 1024;
+
+/// How long a peer may take before it is given up on. The defaults are what the engine always
+/// used; callers (and tests) may shorten or lengthen them.
+#[derive(Clone, Copy, Debug)]
+pub struct Tuning {
+    /// Waiting for the peer's file name, part status and, if needed, hashset.
+    pub metadata_timeout: Duration,
+    /// Waiting in a peer's upload queue for a slot.
+    pub queue_wait: Duration,
+}
+impl Default for Tuning {
+    fn default() -> Self {
+        Self {
+            metadata_timeout: Duration::from_secs(30),
+            queue_wait: Duration::from_secs(300),
+        }
+    }
+}
+
+/// Why a peer was given up on. These travel inside the error chain (`downcast_ref`), so callers can
+/// tell "did not answer" from "does not have the file" without comparing text.
+#[derive(Debug)]
+pub struct HandshakeTimedOut;
+impl std::fmt::Display for HandshakeTimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ED2K peer handshake timed out")
+    }
+}
+#[derive(Debug)]
+pub struct MetadataTimedOut;
+impl std::fmt::Display for MetadataTimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ED2K peer metadata timed out")
+    }
+}
+#[derive(Debug)]
+pub struct QueueWaitTimedOut;
+impl std::fmt::Display for QueueWaitTimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("peer queue wait timed out")
+    }
+}
+#[derive(Debug)]
+pub struct PeerLacksFile;
+impl std::fmt::Display for PeerLacksFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("peer does not share the requested file")
+    }
+}
+impl std::error::Error for HandshakeTimedOut {}
+impl std::error::Error for MetadataTimedOut {}
+impl std::error::Error for QueueWaitTimedOut {}
+impl std::error::Error for PeerLacksFile {}
+
+/// A hashset already authenticated against the file link, so a peer need not send one.
+pub(crate) type KnownHashes = Option<Arc<Vec<[u8; 16]>>>;
 pub(crate) async fn cancelled(cancel: &AtomicBool) {
     loop {
         if cancel.load(Ordering::Acquire) {
@@ -144,18 +200,26 @@ pub(crate) fn hello_answer(data: &[u8]) -> Result<bool> {
 }
 
 type PartMetadata = (Vec<bool>, Vec<[u8; 16]>);
-async fn metadata(stream: &mut PeerStream, file: &FileLink) -> Result<PartMetadata> {
+async fn metadata(
+    stream: &mut PeerStream,
+    file: &FileLink,
+    known: &KnownHashes,
+) -> Result<PartMetadata> {
     send(stream, 0xe3, 0x58, &file.hash).await?;
     if file.part_count() > 1 {
         send(stream, 0xe3, 0x4f, &file.hash).await?;
     }
-    if file.size >= PART_SIZE {
+    // A hashset we already trust (kept from an earlier run or sent by another peer) is not asked
+    // for again: some peers answer the file name and status but never the hashset.
+    if file.size >= PART_SIZE && known.is_none() {
         send(stream, 0xe3, 0x51, &file.hash).await?;
     }
     let mut named = false;
     let mut status = file.part_count() == 1;
     let mut parts = vec![true; file.part_count()];
-    let mut hashes = (file.size < PART_SIZE).then(|| vec![file.hash]);
+    let mut hashes = (file.size < PART_SIZE)
+        .then(|| vec![file.hash])
+        .or_else(|| known.as_ref().map(|hashes| hashes.as_ref().clone()));
     while !named || !status || hashes.is_none() {
         let (protocol, op, data) = frame(stream).await?;
         if protocol == 0xc5 && op == 1 {
@@ -166,7 +230,7 @@ async fn metadata(stream: &mut PeerStream, file: &FileLink) -> Result<PartMetada
             continue;
         }
         match op {
-            0x48 => bail!("peer does not share the requested file"),
+            0x48 => return Err(PeerLacksFile.into()),
             0x59 => {
                 let mut r = Reader::new(&data);
                 if r.take(16)? != file.hash {
@@ -231,6 +295,7 @@ pub(crate) struct Peer {
 impl Peer {
     /// Connects, obfuscating when the mode and the source allow it. In `Prefer` mode a failed
     /// obfuscated handshake is retried once as a plain connection (old or misreporting peers).
+    #[cfg(test)]
     pub async fn connect(
         source: &FileSource,
         file: &FileLink,
@@ -239,8 +304,40 @@ impl Peer {
         mode: Obfuscation,
         cancel: Arc<AtomicBool>,
     ) -> Result<Self> {
-        let first =
-            Self::connect_once(source, file, identity, client_id, mode, cancel.clone()).await;
+        Self::connect_tuned(
+            source,
+            file,
+            identity,
+            client_id,
+            mode,
+            None,
+            Tuning::default(),
+            cancel,
+        )
+        .await
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn connect_tuned(
+        source: &FileSource,
+        file: &FileLink,
+        identity: [u8; 16],
+        client_id: u32,
+        mode: Obfuscation,
+        known: KnownHashes,
+        tuning: Tuning,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Self> {
+        let first = Self::connect_once(
+            source,
+            file,
+            identity,
+            client_id,
+            mode,
+            known.clone(),
+            tuning,
+            cancel.clone(),
+        )
+        .await;
         match first {
             Err(error)
                 if mode == Obfuscation::Prefer
@@ -254,6 +351,8 @@ impl Peer {
                     identity,
                     client_id,
                     Obfuscation::Disabled,
+                    known,
+                    tuning,
                     cancel,
                 )
                 .await
@@ -261,12 +360,15 @@ impl Peer {
             other => other,
         }
     }
+    #[allow(clippy::too_many_arguments)]
     async fn connect_once(
         source: &FileSource,
         file: &FileLink,
         identity: [u8; 16],
         client_id: u32,
         mode: Obfuscation,
+        known: KnownHashes,
+        tuning: Tuning,
         cancel: Arc<AtomicBool>,
     ) -> Result<Self> {
         check_cancel(&cancel)?;
@@ -312,19 +414,21 @@ impl Peer {
             Ok::<_, anyhow::Error>((stream, large))
         };
         let (stream, large) = tokio::select! {
-            result=tokio::time::timeout(Duration::from_secs(30),open)=>result.context("ED2K peer handshake timed out")??,
+            result=tokio::time::timeout(Duration::from_secs(30),open)=>result.context(HandshakeTimedOut)??,
             _=cancelled(&cancel)=>bail!("ED2K transfer cancelled"),
         };
-        Self::from_incoming(stream, file, large, cancel).await
+        Self::from_incoming_tuned(stream, file, large, known, tuning, cancel).await
     }
-    pub(crate) async fn from_incoming(
+    pub(crate) async fn from_incoming_tuned(
         mut stream: PeerStream,
         file: &FileLink,
         large: bool,
+        known: KnownHashes,
+        tuning: Tuning,
         cancel: Arc<AtomicBool>,
     ) -> Result<Self> {
         let (parts, hashes) = tokio::select! {
-            result=tokio::time::timeout(Duration::from_secs(30),metadata(&mut stream,file))=>result.context("ED2K peer metadata timed out")??,
+            result=tokio::time::timeout(tuning.metadata_timeout,metadata(&mut stream,file,&known))=>result.context(MetadataTimedOut)??,
             _=cancelled(&cancel)=>bail!("ED2K transfer cancelled"),
         };
         Ok(Self {
@@ -345,15 +449,24 @@ impl Peer {
     pub fn has_part(&self, index: usize) -> bool {
         self.parts.get(index).copied().unwrap_or(false)
     }
-    pub async fn acquire_slot(&mut self, mut queued: impl FnMut(u32)) -> Result<()> {
+    #[cfg(test)]
+    pub async fn acquire_slot(&mut self, queued: impl FnMut(u32)) -> Result<()> {
+        self.acquire_slot_for(Tuning::default().queue_wait, queued)
+            .await
+    }
+    pub async fn acquire_slot_for(
+        &mut self,
+        queue_wait: Duration,
+        mut queued: impl FnMut(u32),
+    ) -> Result<()> {
         send(&mut self.stream, 0xe3, 0x54, &self.file.hash).await?;
         // A peer that has no free slot may stay silent while we wait in its queue (aMule makes a new
         // client wait before the first slot), so the usual 30-second read limit does not apply here.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+        let deadline = tokio::time::Instant::now() + queue_wait;
         loop {
             let (protocol, op, data) = tokio::select! {
                 result = tokio::time::timeout_at(deadline, frame(&mut self.stream)) =>
-                    result.context("peer queue wait timed out")??,
+                    result.context(QueueWaitTimedOut)??,
                 _ = cancelled(&self.cancel) => bail!("ED2K transfer cancelled"),
             };
             match (protocol, op) {

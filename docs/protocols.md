@@ -332,3 +332,35 @@ conhece o ID. O ID Kad é o dos pacotes (16 bytes como trafegam). Um datagrama q
   tudo na liberação; roteador só-permanente; nenhum roteador; roteador que anuncia outro host (recusado).
 - **Não testado:** nenhum roteador real (modelos variam muito: alguns recusam a descrição, exigem porta
   igual, limitam o nome ou ignoram a concessão), CGNAT (UPnP não resolve), IPv6, NAT-PMP/PCP.
+
+## Retomada ED2K: hashset guardado e motivo da parada
+
+Corrige uma parada observada pelo usuário: download em 89,5% com 12 fontes, erro
+`ED2K peer metadata timed out: deadline has elapsed`, e a retomada não avançava.
+
+- **O que travava (reproduzido em teste):** cada par precisava enviar nome, status **e a lista de hashes**
+  (`OP_HASHSETREQUEST`) em 30 s. Um par que responde ao status mas não à lista de hashes dava "metadata timed
+  out", mesmo tendo as partes que faltam, e a lista validada **não era guardada**: toda retomada tinha de
+  pedi-la de novo a um par, e o progresso só era conferido depois que o primeiro par conectava. O erro final
+  mostrava só o **último** erro de qualquer par, escondendo o motivo real (por exemplo, pares que conectaram
+  mas não têm as partes que faltam).
+- **Agora:** o hashset autenticado contra o link é guardado ao lado do parcial
+  (`.nibiru-ed2k-<hash>-<tamanho>.hashset`, regravado atomicamente, **revalidado contra o link a cada leitura**,
+  descartado se alterado ou truncado, apagado ao concluir). Com ele: o parcial é conferido **antes** de qualquer
+  par responder (o progresso é real desde o início), e os pares não são mais obrigados a enviá-lo
+  (`OP_HASHSETREQUEST` não é enviado). O primeiro hashset recebido de qualquer par também vale para os demais,
+  e um par que só falhou na lista de hashes é tentado de novo na mesma tentativa.
+- **Motivo da parada:** o erro final contém um `Stalled` (`downcast_ref`) com `reason` (`no_sources`,
+  `unreachable`, `metadata_timeout`, `missing_parts`, `queue_timeout`, `peer_refused`, `part_failed`),
+  contagens por causa, partes que faltam e o último erro, para o chamador esperar, pedir fontes de novo e
+  tentar outra vez. O texto continua começando por `ED2K transfer incomplete; verified parts retained for resume`.
+- **`download_with_tuning(.., Tuning { metadata_timeout, queue_wait }, ..)`**: tempos ajustáveis (padrão 30 s e
+  300 s, os mesmos de antes). `download_with_options` mantém o comportamento.
+- **Testes:** 5 novos em `ed2k::transfer` com pares falsos que se comportam como os reais (sem hashset, sem as
+  partes, sem resposta): retomada sem pedir hashset; par silencioso classificado como `metadata_timeout`; o
+  relatório aponta "sem as partes que faltam" em vez do último timeout; par tentado de novo depois que outro
+  forneceu o hashset; hashset adulterado ou truncado é ignorado. Desligar o uso do hashset guardado faz o
+  teste principal falhar com exatamente a mensagem do usuário.
+- **Não provado:** que esta seja a causa do caso real do usuário (não há log do par nem da rede); e **a RPC
+  (`serve --ed2k`) ainda faz uma passada só por tarefa**: aproveita o hashset guardado e o relatório, mas não
+  espera nem pede fontes de novo (o ADM faz isso, ver `docs/ed2k-kad-native.md`).

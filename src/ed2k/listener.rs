@@ -150,6 +150,8 @@ impl CallbackClient {
         &self,
         source: &FileSource,
         file: &FileLink,
+        known: peer::KnownHashes,
+        tuning: peer::Tuning,
         cancel: Arc<AtomicBool>,
     ) -> Result<peer::Peer> {
         let (kad, tcp_port) = self
@@ -179,16 +181,28 @@ impl CallbackClient {
             }
         }
         let incoming = incoming.context("Kad callback timed out")?;
-        peer::Peer::from_incoming(incoming.stream, file, incoming.large, cancel).await
+        peer::Peer::from_incoming_tuned(
+            incoming.stream,
+            file,
+            incoming.large,
+            known,
+            tuning,
+            cancel,
+        )
+        .await
     }
-    pub(crate) async fn connect(
+    pub(crate) async fn connect_tuned(
         &self,
         source: &FileSource,
         file: &FileLink,
+        known: peer::KnownHashes,
+        tuning: peer::Tuning,
         cancel: Arc<AtomicBool>,
     ) -> Result<peer::Peer> {
         if source.buddy.is_some() {
-            return self.connect_through_buddy(source, file, cancel).await;
+            return self
+                .connect_through_buddy(source, file, known, tuning, cancel)
+                .await;
         }
         let server = self
             .server
@@ -206,7 +220,15 @@ impl CallbackClient {
             result=tokio::time::timeout(Duration::from_secs(30),&mut waiter.response)=>result.context("ED2K peer callback timed out")?.context("ED2K callback listener closed")?,
             _=peer::cancelled(&cancel)=>bail!("ED2K transfer cancelled"),
         };
-        peer::Peer::from_incoming(incoming.stream, file, incoming.large, cancel).await
+        peer::Peer::from_incoming_tuned(
+            incoming.stream,
+            file,
+            incoming.large,
+            known,
+            tuning,
+            cancel,
+        )
+        .await
     }
 }
 

@@ -1,7 +1,10 @@
 use super::{
     FileLink, FileSource,
     file::{PART_SIZE, digest},
-    peer::{Peer, check_cancel},
+    peer::{
+        HandshakeTimedOut, KnownHashes, MetadataTimedOut, Peer, PeerLacksFile, QueueWaitTimedOut,
+        Tuning, check_cancel,
+    },
 };
 use anyhow::{Context, Result, anyhow, bail};
 use futures_util::{StreamExt, stream::FuturesUnordered};
@@ -41,6 +44,86 @@ pub struct TransferOptions {
     pub obfuscation: super::obfuscation::Obfuscation,
 }
 
+/// The dominant reason a transfer could not finish in this attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StallReason {
+    /// No source could be tried (none given, or none reachable by any route we have).
+    NoSources,
+    /// Sources were tried but none could be connected.
+    Unreachable,
+    /// Peers connected but never sent the file information in time.
+    MetadataTimeout,
+    /// Peers answered, but none of them has the parts that are still missing.
+    MissingParts,
+    /// Peers have what is missing but kept us waiting in their upload queue.
+    QueueTimeout,
+    /// Peers refused: they do not share the file or had no slot.
+    PeerRefused,
+    /// A peer was sending a part and failed or sent bad data.
+    PartFailed,
+}
+
+/// What the attempt found, source by source. Verified parts are kept; this explains why more could
+/// not be fetched now so a caller can wait, re-ask for sources and try again.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Stalled {
+    pub reason: StallReason,
+    pub sources: usize,
+    pub unreachable: usize,
+    pub metadata_timeouts: usize,
+    pub refused: usize,
+    pub lacking_parts: usize,
+    pub queue_timeouts: usize,
+    pub part_failures: usize,
+    pub missing_parts: usize,
+    pub total_parts: usize,
+    /// The most recent peer error, for logs.
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+impl std::fmt::Display for Stalled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.sources == 0 {
+            write!(
+                f,
+                "no usable ED2K sources; a reachable callback route may be required"
+            )?;
+        } else {
+            let mut found = Vec::new();
+            for (count, text) in [
+                (
+                    self.lacking_parts,
+                    "connected but do not have the missing parts",
+                ),
+                (self.queue_timeouts, "kept us waiting in their queue"),
+                (self.part_failures, "failed while sending a part"),
+                (
+                    self.metadata_timeouts,
+                    "did not send the file information in time",
+                ),
+                (self.refused, "refused or do not share the file"),
+                (self.unreachable, "could not be reached"),
+            ] {
+                if count > 0 {
+                    found.push(format!("{count} {text}"));
+                }
+            }
+            write!(f, "{} sources tried: {}", self.sources, found.join(", "))?;
+        }
+        write!(
+            f,
+            "; {} of {} parts still missing",
+            self.missing_parts, self.total_parts
+        )?;
+        if let Some(last) = &self.last_error {
+            write!(f, " (last peer error: {last})")?;
+        }
+        Ok(())
+    }
+}
+impl std::error::Error for Stalled {}
+
 /// Download from server-discovered high-ID peers. Successful parts survive
 /// interruption. Every resumed part is read and hashed again, without trusting
 /// persisted completion flags. The final filename is never overwritten.
@@ -73,6 +156,31 @@ pub async fn download_with_options(
     directory: &Path,
     sources: &[FileSource],
     options: TransferOptions,
+    cancel: Arc<AtomicBool>,
+    progress: impl FnMut(TransferProgress) + Send,
+) -> Result<PathBuf> {
+    download_with_tuning(
+        file,
+        directory,
+        sources,
+        options,
+        Tuning::default(),
+        cancel,
+        progress,
+    )
+    .await
+}
+/// Like [`download_with_options`], with explicit peer time limits.
+///
+/// An attempt that cannot finish returns an error whose chain contains a [`Stalled`] describing
+/// why; the verified parts and the authenticated hashset stay on disk, so the next attempt starts
+/// from them without asking a peer for the hashset again.
+pub async fn download_with_tuning(
+    file: &FileLink,
+    directory: &Path,
+    sources: &[FileSource],
+    options: TransferOptions,
+    tuning: Tuning,
     cancel: Arc<AtomicBool>,
     mut progress: impl FnMut(TransferProgress) + Send,
 ) -> Result<PathBuf> {
@@ -122,6 +230,10 @@ pub async fn download_with_options(
         Ok(guard)
     })
     .await??;
+    // The hashset that authenticated earlier parts is kept next to them (re-validated against the
+    // link on every load), so a resume can verify the partial file and skip asking peers for it.
+    let hashset_path = stage.with_extension("hashset");
+    let saved_hashes = load_hashset(file, &hashset_path).await;
     let stage_clone = stage.clone();
     let disk = tokio::task::spawn_blocking(move || -> Result<std::fs::File> {
         let disk = std::fs::OpenOptions::new()
@@ -147,11 +259,21 @@ pub async fn download_with_options(
             claimed: vec![false; file.part_count()],
             verified: 0,
             scanned: false,
-            last_error: anyhow!(
-                "no usable ED2K sources; a reachable callback route may be required"
-            ),
+            hashes: saved_hashes.map(Arc::new),
+            hashset_path,
+            outcomes: Outcomes::default(),
+            last_error: None,
         }),
+        tuning,
     };
+    // With a hashset on disk the partial file can be checked before any peer answers, so the
+    // progress shown on resume is real from the start.
+    let known = context.shared.lock().unwrap().hashes.clone();
+    if let Some(hashes) = known {
+        context.emit(TransferStage::Checking, &None, None);
+        context.scan(&hashes, &None).await?;
+        context.emit(TransferStage::Connecting, &None, None);
+    }
     // Bounded attempt count avoids unbounded connections to a server-supplied list.
     let mut queue: Vec<&FileSource> = sources
         .iter()
@@ -177,17 +299,20 @@ pub async fn download_with_options(
             let Some((source, result)) = running.next().await else {
                 break;
             };
-            if result? > 0 {
+            let (fetched, retry) = result?;
+            if fetched > 0 || retry {
                 queue.push(source);
             }
         }
     }
     check_cancel(&cancel)?;
     if !context.all_complete() {
-        let error = context.shared.lock().unwrap().take_error();
-        return Err(error).context("ED2K transfer incomplete; verified parts retained for resume");
+        let stalled = context.stalled();
+        return Err(anyhow::Error::new(stalled))
+            .context("ED2K transfer incomplete; verified parts retained for resume");
     }
     let verified = context.shared.lock().unwrap().verified;
+    let context_hashset = context.shared.lock().unwrap().hashset_path.clone();
     let disk = context.disk.into_inner();
     disk.set_len(file.size).await?;
     disk.sync_all().await?;
@@ -206,6 +331,7 @@ pub async fn download_with_options(
         }
     })
     .await??;
+    let _ = tokio::fs::remove_file(&context_hashset).await;
     progress(TransferProgress {
         stage: TransferStage::Completed,
         verified,
@@ -220,18 +346,60 @@ pub async fn download_with_options(
 const MAX_PARALLEL_PEERS: usize = 4;
 const MAX_ROUNDS: usize = 6;
 
+/// How each source ended in this attempt.
+#[derive(Default)]
+struct Outcomes {
+    sources: usize,
+    unreachable: usize,
+    metadata_timeouts: usize,
+    refused: usize,
+    lacking_parts: usize,
+    queue_timeouts: usize,
+    part_failures: usize,
+}
+
 struct Shared {
     complete: Vec<bool>,
     /// Parts a worker is fetching right now; no other peer is asked for them.
     claimed: Vec<bool>,
     verified: u64,
     scanned: bool,
-    last_error: anyhow::Error,
+    /// A hashset already authenticated against the link: from disk or from the first peer that sent it.
+    hashes: Option<Arc<Vec<[u8; 16]>>>,
+    hashset_path: PathBuf,
+    outcomes: Outcomes,
+    last_error: Option<String>,
 }
-impl Shared {
-    fn take_error(&mut self) -> anyhow::Error {
-        std::mem::replace(&mut self.last_error, anyhow!("ED2K transfer failed"))
+
+/// Reads the saved hashset, accepting it only if it still authenticates against the link.
+async fn load_hashset(file: &FileLink, path: &Path) -> Option<Vec<[u8; 16]>> {
+    if file.size < PART_SIZE {
+        return Some(vec![file.hash]);
     }
+    let metadata = tokio::fs::symlink_metadata(path).await.ok()?;
+    if !metadata.is_file() || metadata.len() > 1 << 20 || metadata.len() % 16 != 0 {
+        return None;
+    }
+    let bytes = tokio::fs::read(path).await.ok()?;
+    let values = bytes
+        .chunks_exact(16)
+        .map(|chunk| <[u8; 16]>::try_from(chunk).ok())
+        .collect::<Option<Vec<_>>>()?;
+    file.validate_hashset(values).ok()
+}
+
+/// Writes the hashset atomically; failure only means the next run asks a peer again.
+async fn save_hashset(path: PathBuf, hashes: Vec<[u8; 16]>) {
+    let _ = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        use std::io::Write;
+        let directory = path.parent().unwrap_or(Path::new("."));
+        let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
+        temporary.write_all(&hashes.concat())?;
+        temporary.as_file().sync_all()?;
+        temporary.persist(&path).map_err(|e| e.error)?;
+        Ok(())
+    })
+    .await;
 }
 
 /// State shared by the peers working on one file at the same time.
@@ -245,6 +413,7 @@ struct Context_<'a> {
     shared: Mutex<Shared>,
     /// Signalled when a part is completed or given back, so idle peers re-check what is left.
     changed: tokio::sync::Notify,
+    tuning: Tuning,
 }
 
 impl Context_<'_> {
@@ -266,8 +435,76 @@ impl Context_<'_> {
             queue_rank,
         });
     }
-    fn soft_error(&self, error: anyhow::Error) {
-        self.shared.lock().unwrap().last_error = error;
+    fn soft_error(&self, error: &anyhow::Error) {
+        self.shared.lock().unwrap().last_error = Some(format!("{error:#}"));
+    }
+    /// What this attempt found, once it has nothing more to try.
+    fn stalled(&self) -> Stalled {
+        let shared = self.shared.lock().unwrap();
+        let o = &shared.outcomes;
+        let missing = shared.complete.iter().filter(|done| !**done).count();
+        let reason = if o.sources == 0 {
+            StallReason::NoSources
+        } else {
+            // The most common cause wins; on a tie the more informative one (listed first).
+            let mut best = (0, StallReason::Unreachable);
+            for (count, reason) in [
+                (o.lacking_parts, StallReason::MissingParts),
+                (o.queue_timeouts, StallReason::QueueTimeout),
+                (o.part_failures, StallReason::PartFailed),
+                (o.metadata_timeouts, StallReason::MetadataTimeout),
+                (o.refused, StallReason::PeerRefused),
+                (o.unreachable, StallReason::Unreachable),
+            ] {
+                if count > best.0 {
+                    best = (count, reason);
+                }
+            }
+            best.1
+        };
+        Stalled {
+            reason,
+            sources: o.sources,
+            unreachable: o.unreachable,
+            metadata_timeouts: o.metadata_timeouts,
+            refused: o.refused,
+            lacking_parts: o.lacking_parts,
+            queue_timeouts: o.queue_timeouts,
+            part_failures: o.part_failures,
+            missing_parts: missing,
+            total_parts: shared.complete.len(),
+            last_error: shared.last_error.clone(),
+        }
+    }
+    /// Re-reads what is already on disk and marks the parts that match the hashset. Done once.
+    async fn scan(&self, hashes: &[[u8; 16]], host: &Option<String>) -> Result<()> {
+        let _gate = self.scan_gate.lock().await;
+        if self.shared.lock().unwrap().scanned {
+            return Ok(());
+        }
+        self.emit(TransferStage::Checking, host, None);
+        for (index, expected) in hashes.iter().enumerate().take(self.file.part_count()) {
+            check_cancel(self.cancel)?;
+            let offset = index as u64 * PART_SIZE;
+            let count = self.file.part_len(index);
+            let mut disk = self.disk.lock().await;
+            if disk.metadata().await?.len() >= offset + count as u64 {
+                let mut bytes = vec![0; count];
+                disk.seek(std::io::SeekFrom::Start(offset)).await?;
+                disk.read_exact(&mut bytes).await?;
+                drop(disk);
+                if digest(&bytes) == *expected {
+                    let mut shared = self.shared.lock().unwrap();
+                    shared.complete[index] = true;
+                    shared.verified += count as u64;
+                }
+            }
+        }
+        self.shared.lock().unwrap().scanned = true;
+        Ok(())
+    }
+    fn note(&self, change: impl FnOnce(&mut Outcomes)) {
+        change(&mut self.shared.lock().unwrap().outcomes);
     }
     fn claim(&self, peer: &Peer) -> Option<usize> {
         let mut shared = self.shared.lock().unwrap();
@@ -286,74 +523,97 @@ impl Context_<'_> {
             .any(|i| !shared.complete[i] && shared.claimed[i] && peer.has_part(i))
     }
 
-    async fn work_tagged<'s>(&self, source: &'s FileSource) -> (&'s FileSource, Result<usize>) {
+    async fn work_tagged<'s>(
+        &self,
+        source: &'s FileSource,
+    ) -> (&'s FileSource, Result<(usize, bool)>) {
         (source, self.work(source).await)
     }
 
     /// Talks to one source until it has nothing more to give. Source failures are remembered and
     /// reported as `Ok`; only cancellation and local disk errors are returned as `Err`.
-    /// Returns how many parts this source delivered.
-    async fn work(&self, source: &FileSource) -> Result<usize> {
+    /// Returns how many parts this source delivered and whether it is worth another try this
+    /// attempt (it timed out only because it was asked for a hashset we have since obtained).
+    async fn work(&self, source: &FileSource) -> Result<(usize, bool)> {
         check_cancel(self.cancel)?;
+        self.note(|o| o.sources += 1);
         let host = source
             .host
             .map(|h| format!("{h}:{}", source.port))
             .or_else(|| Some(format!("ID {}", source.client_id)));
         self.emit(TransferStage::Connecting, &host, None);
+        let known: KnownHashes = self.shared.lock().unwrap().hashes.clone();
+        let had_known = known.is_some();
         let connected = if source.requires_callback {
             match &self.options.callbacks {
                 Some(callbacks) => {
                     callbacks
-                        .connect(source, self.file, self.cancel.clone())
+                        .connect_tuned(source, self.file, known, self.tuning, self.cancel.clone())
                         .await
                 }
                 None => Err(anyhow!("source needs a callback route")),
             }
         } else {
-            Peer::connect(
+            Peer::connect_tuned(
                 source,
                 self.file,
                 self.options.identity,
                 self.options.client_id,
                 self.options.obfuscation,
+                known,
+                self.tuning,
                 self.cancel.clone(),
             )
             .await
         };
-        let mut peer = match connected {
+        let peer = match connected {
             Ok(peer) => peer,
             Err(error) => {
-                self.soft_error(error);
-                return Ok(0);
+                self.soft_error(&error);
+                let metadata_timeout = error.downcast_ref::<MetadataTimedOut>().is_some();
+                self.note(|o| {
+                    if metadata_timeout {
+                        o.metadata_timeouts += 1;
+                    } else if error.downcast_ref::<PeerLacksFile>().is_some() {
+                        o.refused += 1;
+                    } else {
+                        // Includes handshake timeouts, refused connections and callbacks that never came.
+                        let _ = error.downcast_ref::<HandshakeTimedOut>();
+                        o.unreachable += 1;
+                    }
+                });
+                // A peer that only failed to send a hashset can be asked again once another peer
+                // (or the disk) has provided one.
+                let retry =
+                    metadata_timeout && !had_known && self.shared.lock().unwrap().hashes.is_some();
+                return Ok((0, retry));
             }
         };
-        {
-            // Only the first connected peer re-reads what is already on disk.
-            let _gate = self.scan_gate.lock().await;
-            if !self.shared.lock().unwrap().scanned {
-                self.emit(TransferStage::Checking, &host, None);
-                for index in 0..self.file.part_count() {
-                    check_cancel(self.cancel)?;
-                    let offset = index as u64 * PART_SIZE;
-                    let count = self.file.part_len(index);
-                    let mut disk = self.disk.lock().await;
-                    if disk.metadata().await?.len() >= offset + count as u64 {
-                        let mut bytes = vec![0; count];
-                        disk.seek(std::io::SeekFrom::Start(offset)).await?;
-                        disk.read_exact(&mut bytes).await?;
-                        drop(disk);
-                        if digest(&bytes) == peer.hashes[index] {
-                            let mut shared = self.shared.lock().unwrap();
-                            shared.complete[index] = true;
-                            shared.verified += count as u64;
-                        }
-                    }
+        self.work_peer(peer, &host).await
+    }
+
+    async fn work_peer(&self, mut peer: Peer, host: &Option<String>) -> Result<(usize, bool)> {
+        // The first authenticated hashset is kept, in memory for the other peers and on disk for
+        // the next attempt.
+        if self.file.part_count() > 1 {
+            let first = {
+                let mut shared = self.shared.lock().unwrap();
+                if shared.hashes.is_none() {
+                    shared.hashes = Some(Arc::new(peer.hashes.clone()));
+                    Some(shared.hashset_path.clone())
+                } else {
+                    None
                 }
-                self.shared.lock().unwrap().scanned = true;
+            };
+            if let Some(path) = first {
+                save_hashset(path, peer.hashes.clone()).await;
             }
         }
+        // Only the first connected peer re-reads what is already on disk (unless a saved hashset
+        // already did it before any peer was asked).
+        self.scan(&peer.hashes, host).await?;
         if self.all_complete() {
-            return Ok(0);
+            return Ok((0, false));
         }
         if !self
             .shared
@@ -364,15 +624,25 @@ impl Context_<'_> {
             .enumerate()
             .any(|(i, done)| !*done && peer.has_part(i))
         {
-            return Ok(0);
+            self.note(|o| o.lacking_parts += 1);
+            return Ok((0, false));
         }
-        self.emit(TransferStage::Queued, &host, None);
+        self.emit(TransferStage::Queued, host, None);
         if let Err(error) = peer
-            .acquire_slot(|rank| self.emit(TransferStage::Queued, &host, Some(rank)))
+            .acquire_slot_for(self.tuning.queue_wait, |rank| {
+                self.emit(TransferStage::Queued, host, Some(rank))
+            })
             .await
         {
-            self.soft_error(error);
-            return Ok(0);
+            self.soft_error(&error);
+            self.note(|o| {
+                if error.downcast_ref::<QueueWaitTimedOut>().is_some() {
+                    o.queue_timeouts += 1;
+                } else {
+                    o.refused += 1;
+                }
+            });
+            return Ok((0, false));
         }
         let mut fetched = 0;
         loop {
@@ -392,12 +662,13 @@ impl Context_<'_> {
                 self.release(index);
                 return Err(error);
             }
-            self.emit(TransferStage::Downloading, &host, None);
+            self.emit(TransferStage::Downloading, host, None);
             let bytes = match peer.part(index).await {
                 Ok(bytes) => bytes,
                 Err(error) => {
                     self.release(index);
-                    self.soft_error(error);
+                    self.soft_error(&error);
+                    self.note(|o| o.part_failures += 1);
                     break;
                 }
             };
@@ -424,9 +695,9 @@ impl Context_<'_> {
             }
             self.changed.notify_waiters();
             fetched += 1;
-            self.emit(TransferStage::Downloading, &host, None);
+            self.emit(TransferStage::Downloading, host, None);
         }
-        Ok(fetched)
+        Ok((fetched, false))
     }
 }
 
@@ -886,5 +1157,374 @@ pub(crate) mod tests {
                 .exists()
         );
         server.await.unwrap();
+    }
+
+    /// What one connection to a scripted peer does.
+    #[derive(Clone, Default)]
+    pub(crate) struct Plan {
+        /// Never answers the file name / part status request.
+        silent_metadata: bool,
+        /// Answers the name and status but never the hashset.
+        skip_hashset: bool,
+        /// Parts it says it has (all when `None`).
+        parts: Option<Vec<usize>>,
+    }
+
+    /// A peer that accepts any number of connections; the n-th one follows plan n (the last repeats).
+    pub(crate) async fn scripted_peer(
+        data: Vec<u8>,
+        plans: Vec<Plan>,
+    ) -> (FileSource, Arc<Mutex<usize>>, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (file, hashes) = fixture_file(&data);
+        let connections = Arc::new(Mutex::new(0usize));
+        let counted = connections.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let number = {
+                    let mut n = counted.lock().unwrap();
+                    *n += 1;
+                    *n - 1
+                };
+                let plan = plans[number.min(plans.len() - 1)].clone();
+                let (file, hashes, data) = (file.clone(), hashes.clone(), data.clone());
+                tokio::spawn(async move {
+                    let Ok((op, _)) = server::frame(&mut stream).await else {
+                        return;
+                    };
+                    assert_eq!(op, 1);
+                    let mut answer = vec![7; 16];
+                    answer.extend(123u32.to_le_bytes());
+                    answer.extend(0u16.to_le_bytes());
+                    answer.extend(1u32.to_le_bytes());
+                    answer.extend([3, 1, 0, 0xfe]);
+                    answer.extend((1u32 << 4).to_le_bytes());
+                    answer.extend([0; 6]);
+                    if peer::send(&mut stream, 0xe3, 0x4c, &answer).await.is_err() {
+                        return;
+                    }
+                    while let Ok((op, request)) = server::frame(&mut stream).await {
+                        let sent = match op {
+                            0x58 if !plan.silent_metadata => {
+                                let mut a = file.hash.to_vec();
+                                a.extend(11u16.to_le_bytes());
+                                a.extend(b"fixture.bin");
+                                peer::send(&mut stream, 0xe3, 0x59, &a).await
+                            }
+                            0x4f if !plan.silent_metadata => {
+                                let mut a = file.hash.to_vec();
+                                a.extend((file.part_count() as u16).to_le_bytes());
+                                let mut status = vec![0u8; file.part_count().div_ceil(8)];
+                                for part in 0..file.part_count() {
+                                    if plan.parts.as_ref().is_none_or(|p| p.contains(&part)) {
+                                        status[part / 8] |= 1 << (part % 8);
+                                    }
+                                }
+                                a.extend(status);
+                                peer::send(&mut stream, 0xe3, 0x50, &a).await
+                            }
+                            0x51 if !plan.silent_metadata && !plan.skip_hashset => {
+                                let mut a = file.hash.to_vec();
+                                a.extend((hashes.len() as u16).to_le_bytes());
+                                a.extend(hashes.concat());
+                                peer::send(&mut stream, 0xe3, 0x52, &a).await
+                            }
+                            0x54 => {
+                                if peer::send(&mut stream, 0xe3, 0x55, &[]).await.is_err() {
+                                    return;
+                                }
+                                Ok(())
+                            }
+                            0x47 => {
+                                let from = u32::from_le_bytes(request[16..20].try_into().unwrap())
+                                    as usize;
+                                let end = u32::from_le_bytes(request[28..32].try_into().unwrap())
+                                    as usize;
+                                let mut a = file.hash.to_vec();
+                                a.extend((from as u32).to_le_bytes());
+                                a.extend((end as u32).to_le_bytes());
+                                a.extend(&data[from..end]);
+                                peer::send(&mut stream, 0xe3, 0x46, &a).await
+                            }
+                            _ => Ok(()),
+                        };
+                        if sent.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        (
+            FileSource {
+                client_id: 0x0100007f,
+                host: Some(std::net::Ipv4Addr::LOCALHOST),
+                port,
+                requires_callback: false,
+                user_hash: None,
+                crypt: 0,
+                buddy: None,
+            },
+            connections,
+            handle,
+        )
+    }
+
+    fn quick() -> Tuning {
+        Tuning {
+            metadata_timeout: Duration::from_millis(700),
+            queue_wait: Duration::from_secs(5),
+        }
+    }
+    fn options() -> TransferOptions {
+        TransferOptions {
+            identity: [3; 16],
+            client_id: 123,
+            callbacks: None,
+            obfuscation: super::super::obfuscation::Obfuscation::Disabled,
+        }
+    }
+    fn two_part_data() -> Vec<u8> {
+        (0..PART_SIZE as usize + 300_000)
+            .map(|i| (i % 247) as u8)
+            .collect()
+    }
+    fn stalled(error: &anyhow::Error) -> &Stalled {
+        error.downcast_ref::<Stalled>().expect("a stall report")
+    }
+    async fn attempt(
+        file: &FileLink,
+        directory: &Path,
+        sources: &[FileSource],
+    ) -> (Result<PathBuf>, Vec<TransferProgress>) {
+        let mut states = Vec::new();
+        let result = download_with_tuning(
+            file,
+            directory,
+            sources,
+            options(),
+            quick(),
+            Arc::new(AtomicBool::new(false)),
+            |p| states.push(p),
+        )
+        .await;
+        (result, states)
+    }
+
+    #[tokio::test]
+    async fn a_resume_does_not_need_a_peer_to_send_the_hashset_again() {
+        let data = two_part_data();
+        let (file, _) = fixture_file(&data);
+        let directory = tempfile::tempdir().unwrap();
+        // First attempt: the only peer has part 0, so the file stays incomplete.
+        let (first, _, first_server) = scripted_peer(
+            data.clone(),
+            vec![Plan {
+                parts: Some(vec![0]),
+                ..Plan::default()
+            }],
+        )
+        .await;
+        let (result, _) = attempt(&file, directory.path(), &[first]).await;
+        let error = result.unwrap_err();
+        let report = stalled(&error);
+        assert_eq!(report.reason, StallReason::MissingParts);
+        assert_eq!((report.missing_parts, report.total_parts), (1, 2));
+        first_server.abort();
+        let hashset = directory.path().join(format!(
+            ".nibiru-ed2k-{}-{}.hashset",
+            file.hash_hex(),
+            file.size
+        ));
+        assert!(
+            hashset.exists(),
+            "the authenticated hashset is kept with the partial file"
+        );
+        // Second attempt: a peer that has everything but never sends a hashset. Before the hashset was
+        // kept this peer timed out ("ED2K peer metadata timed out") and the transfer stayed stuck.
+        let (second, _, second_server) = scripted_peer(
+            data.clone(),
+            vec![Plan {
+                skip_hashset: true,
+                ..Plan::default()
+            }],
+        )
+        .await;
+        let (result, _) = attempt(&file, directory.path(), &[second]).await;
+        let target = result.expect("resume completes from the saved hashset");
+        assert_eq!(tokio::fs::read(target).await.unwrap(), data);
+        assert!(
+            !hashset.exists(),
+            "the helper file is removed once the file is complete"
+        );
+        second_server.abort();
+    }
+
+    #[tokio::test]
+    async fn without_a_saved_hashset_a_silent_peer_is_reported_as_a_metadata_timeout() {
+        let data = two_part_data();
+        let (file, _) = fixture_file(&data);
+        let directory = tempfile::tempdir().unwrap();
+        let (peer, _, server) = scripted_peer(
+            data,
+            vec![Plan {
+                skip_hashset: true,
+                ..Plan::default()
+            }],
+        )
+        .await;
+        let (result, _) = attempt(&file, directory.path(), &[peer]).await;
+        let error = result.unwrap_err();
+        assert_eq!(stalled(&error).reason, StallReason::MetadataTimeout);
+        assert_eq!(stalled(&error).metadata_timeouts, 1);
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("verified parts retained for resume"),
+            "{text}"
+        );
+        assert!(
+            text.contains("did not send the file information in time"),
+            "{text}"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn the_report_names_peers_without_the_missing_parts_instead_of_the_last_timeout() {
+        let data = two_part_data();
+        let (file, hashes) = fixture_file(&data);
+        let directory = tempfile::tempdir().unwrap();
+        // Part 0 is already on disk and the hashset is known.
+        let stage = directory.path().join(format!(
+            ".nibiru-ed2k-{}-{}.part",
+            file.hash_hex(),
+            file.size
+        ));
+        let mut staged = data.clone();
+        staged[PART_SIZE as usize..].fill(0);
+        tokio::fs::write(&stage, &staged).await.unwrap();
+        tokio::fs::write(stage.with_extension("hashset"), hashes.concat())
+            .await
+            .unwrap();
+        let (silent, _, silent_server) = scripted_peer(
+            data.clone(),
+            vec![Plan {
+                silent_metadata: true,
+                ..Plan::default()
+            }],
+        )
+        .await;
+        let (lacking_a, _, a_server) = scripted_peer(
+            data.clone(),
+            vec![Plan {
+                parts: Some(vec![0]),
+                ..Plan::default()
+            }],
+        )
+        .await;
+        let (lacking_b, _, b_server) = scripted_peer(
+            data.clone(),
+            vec![Plan {
+                parts: Some(vec![0]),
+                ..Plan::default()
+            }],
+        )
+        .await;
+        let (result, states) =
+            attempt(&file, directory.path(), &[silent, lacking_a, lacking_b]).await;
+        let error = result.unwrap_err();
+        let report = stalled(&error);
+        assert_eq!(report.reason, StallReason::MissingParts, "{report}");
+        assert_eq!(
+            (
+                report.sources,
+                report.lacking_parts,
+                report.metadata_timeouts
+            ),
+            (3, 2, 1)
+        );
+        assert_eq!(report.missing_parts, 1);
+        // The progress was real from the first moment: the saved hashset checked the partial file
+        // before any peer answered.
+        let early = states
+            .iter()
+            .position(|p| matches!(p.stage, TransferStage::Checking))
+            .expect("a checking step");
+        let after_check = states[early..]
+            .iter()
+            .find(|p| p.verified > 0)
+            .expect("verified bytes");
+        assert_eq!(after_check.verified, PART_SIZE);
+        assert!(
+            after_check.peer.is_none(),
+            "reported before any peer was involved"
+        );
+        for server in [silent_server, a_server, b_server] {
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_peer_that_only_missed_the_hashset_is_tried_again_once_another_peer_provided_it() {
+        let data = two_part_data();
+        let (file, _) = fixture_file(&data);
+        let directory = tempfile::tempdir().unwrap();
+        // A has part 0 and sends the hashset; B has part 1 but never sends a hashset.
+        let (a, _, a_server) = scripted_peer(
+            data.clone(),
+            vec![Plan {
+                parts: Some(vec![0]),
+                ..Plan::default()
+            }],
+        )
+        .await;
+        let (b, b_connections, b_server) = scripted_peer(
+            data.clone(),
+            vec![Plan {
+                parts: Some(vec![1]),
+                skip_hashset: true,
+                ..Plan::default()
+            }],
+        )
+        .await;
+        let (result, _) = attempt(&file, directory.path(), &[a, b]).await;
+        let target = result.expect("B is asked again with the hashset A provided");
+        assert_eq!(tokio::fs::read(target).await.unwrap(), data);
+        assert!(
+            *b_connections.lock().unwrap() >= 2,
+            "B was connected a second time"
+        );
+        a_server.abort();
+        b_server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_damaged_saved_hashset_is_ignored_and_never_trusted() {
+        let data = two_part_data();
+        let (file, hashes) = fixture_file(&data);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(format!(
+            ".nibiru-ed2k-{}-{}.hashset",
+            file.hash_hex(),
+            file.size
+        ));
+        let mut bad = hashes.concat();
+        bad[3] ^= 0xff;
+        tokio::fs::write(&path, &bad).await.unwrap();
+        assert!(load_hashset(&file, &path).await.is_none());
+        tokio::fs::write(&path, &bad[..bad.len() - 5])
+            .await
+            .unwrap();
+        assert!(load_hashset(&file, &path).await.is_none());
+        tokio::fs::write(&path, hashes.concat()).await.unwrap();
+        assert_eq!(load_hashset(&file, &path).await.unwrap(), hashes);
+        // With nothing to try, the report says so and no peer is blamed.
+        let (result, _) = attempt(&file, directory.path(), &[]).await;
+        let error = result.unwrap_err();
+        assert_eq!(stalled(&error).reason, StallReason::NoSources);
     }
 }
