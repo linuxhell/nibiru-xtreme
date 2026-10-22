@@ -671,6 +671,42 @@ impl Context_<'_> {
     fn next_work(&self, peer: &Peer, label: &str) -> Option<Work> {
         let mut shared = self.shared.lock().unwrap();
         let geometry = block_work;
+        // Starting the first/tail part is not enough: its owner may be much slower than the
+        // other sources. Help these parts before opening or continuing middle parts, otherwise
+        // hundreds of megabytes can arrive while the player's header is still unavailable.
+        // Take unclaimed blocks from the back; never mix peers after a failed mixed hash.
+        let last_len = self.file.part_len(shared.complete.len().saturating_sub(1));
+        for index in preview_order(shared.complete.len(), last_len)
+            .take(preview_parts(shared.complete.len(), last_len))
+        {
+            if !peer.has_part(index) || shared.solo.contains(&index) {
+                continue;
+            }
+            let Some(part) = shared.open.get_mut(&index) else {
+                continue;
+            };
+            if part.opener == label {
+                continue;
+            }
+            if let Some(block) = (0..part.have.len())
+                .rev()
+                .find(|b| !part.have[*b] && part.asked_at[*b].is_none())
+            {
+                if part.opener.is_empty() {
+                    part.opener = label.to_owned();
+                }
+                part.asked_at[block] = Some(std::time::Instant::now());
+                return Some(geometry(index, block, part.data.len(), true));
+            }
+            if let Some(block) = (0..part.have.len()).rev().find(|b| {
+                !part.have[*b]
+                    && !part.asked_twice[*b]
+                    && part.asked_at[*b].is_some_and(|at| at.elapsed() >= self.tuning.endgame_after)
+            }) {
+                part.asked_twice[block] = true;
+                return Some(geometry(index, block, part.data.len(), true));
+            }
+        }
         let own = shared
             .open
             .iter()
@@ -1210,6 +1246,14 @@ fn block_len(part_len: usize, block: usize) -> usize {
 /// (an AVI keeps its index at the end, an MP4 often its `moov`), so a preview of a partial download
 /// only works once the last part is there too. Like aMule, the part before the last one also comes
 /// early when the last one is small (under a third of a part), since the index may span both.
+fn preview_parts(parts: usize, last_len: usize) -> usize {
+    parts.min(if last_len < PART_SIZE as usize / 3 {
+        3
+    } else {
+        2
+    })
+}
+
 fn preview_order(parts: usize, last_len: usize) -> impl Iterator<Item = usize> {
     let last = parts.checked_sub(1).filter(|last| *last > 0);
     let before_last = parts
@@ -1846,6 +1890,74 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn preview_parts_get_help_before_fresh_middle_parts() {
+        let data: Vec<u8> = (0..PART_SIZE as usize * 5)
+            .map(|i| ((i * 13 + i / 71) % 251) as u8)
+            .collect();
+        let (slow, _, slow_server) = scripted_peer(
+            data.clone(),
+            vec![Plan {
+                block_delay: Duration::from_millis(80),
+                ..Plan::default()
+            }],
+        )
+        .await;
+        let (fast, _, fast_server) = scripted_peer(data.clone(), vec![Plan::default()]).await;
+        let dir = tempfile::tempdir().unwrap();
+        let (file, _) = fixture_file(&data);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let seen = events.clone();
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let late = Mutex::new(Some((sender, fast)));
+        let mut opts = options();
+        opts.late_sources = Some(receiver);
+        opts.events = Some(Arc::new(move |event| {
+            if matches!(event, TransferEvent::PartStarted { index: 0, .. })
+                && let Some((sender, source)) = late.lock().unwrap().take()
+            {
+                sender.send(source).unwrap();
+            }
+            seen.lock().unwrap().push(event);
+        }));
+        let path = download_with_tuning(
+            &file,
+            dir.path(),
+            &[slow],
+            opts,
+            quick(),
+            Arc::new(AtomicBool::new(false)),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), data);
+        let events = events.lock().unwrap();
+        let helper = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    TransferEvent::PartStarted {
+                        index: 0,
+                        shadow: true,
+                        ..
+                    }
+                )
+            })
+            .expect("a fast peer must help with the slow first part");
+        let middle = events
+            .iter()
+            .position(|event| matches!(event, TransferEvent::PartStarted { index: 1..=3, .. }))
+            .unwrap();
+        assert!(
+            helper < middle,
+            "middle parts must not delay the preview: {events:?}"
+        );
+        slow_server.abort();
+        fast_server.abort();
+    }
+
+    #[tokio::test]
     async fn an_idle_peer_helps_with_the_last_parts_and_the_slow_one_stops() {
         let data = two_part_data();
         // The first connection is slow (about 5 s for part 0 alone), the second is fast.
@@ -2040,27 +2152,35 @@ pub(crate) mod tests {
         .unwrap();
         assert_eq!(std::fs::read(path).unwrap(), data);
         let events = events.lock().unwrap();
-        let started = |event: &TransferEvent| match event {
-            TransferEvent::PartStarted { peer, index, .. } => Some((peer.clone(), *index)),
-            _ => None,
-        };
-        // Whichever part the dying peer had opened, it is the next one a peer starts.
+        // The helper can already be working on the failed part. Whether it starts before
+        // or after the failure, it must finish that part before opening fresh work.
         let (failed_at, failed_part) = events
             .iter()
             .enumerate()
-            .find_map(|(at, e)| match e {
+            .find_map(|(at, event)| match event {
                 TransferEvent::PartFailed { index, .. } => Some((at, *index)),
                 _ => None,
             })
             .expect("a part failed");
-        let next = events[failed_at..]
+        let recovered = events[failed_at..]
             .iter()
-            .find_map(started)
-            .expect("someone started a part after the failure");
-        assert_eq!(
-            next.1,
-            failed_part,
-            "after the failure: {:?}",
+            .position(|event| {
+                matches!(event,
+                    TransferEvent::PartDone { index, .. } if *index == failed_part
+                )
+            })
+            .expect("the orphaned part was completed");
+        let fresh = events[failed_at..]
+            .iter()
+            .position(|event| {
+                matches!(event,
+                    TransferEvent::PartStarted { index, .. } if *index != failed_part
+                )
+            })
+            .unwrap();
+        assert!(
+            recovered < fresh,
+            "fresh work overtook the orphan: {:?}",
             &events[failed_at..]
         );
         dying_server.abort();

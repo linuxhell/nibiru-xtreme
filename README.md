@@ -6,11 +6,11 @@ Motor de downloads em Rust, com contrato nativo JSON-RPC e um subconjunto de com
 
 ## Estado
 
-**0.2.0-alpha.4 é uma pré-versão de teste, não a 1.0.** As pré-releases `v0.2.0-alpha.2` e `v0.2.0-alpha.3` estão publicadas (binários para Windows, Linux e macOS com SHA-256); a alpha.4 existe no código e ainda não foi publicada. O ADM já usa o Xtreme como motor de downloads.
+**Versão estável 0.2.0.** Motor nativo do Apocalipse Download Manager, distribuído para Windows, Linux e macOS com arquivos SHA-256.
 
-**Caminho para a 1.0:** a 1.0 só será publicada depois de (1) confirmar em uso real, com uma transferência ED2K incompleta de verdade, que a retomada descrita em [protocolos](docs/protocols.md) funciona; (2) teste do UPnP num roteador real; e (3) CI verde nas três plataformas. Nada disso foi feito até agora; veja o [checklist](docs/CHECKLIST-1.0.md).
+A prévia ED2K não depende de chegar a 30 ou 40 MB no total: o ADM libera o botão quando a primeira parte está autenticada por MD4 (até 9.728.000 bytes). Outros peers ajudam a terminar o início e o fim do arquivo antes das partes do meio, evitando que um peer lento retenha a prévia. MP4/AVI podem precisar também do índice no fim; trechos ainda ausentes aguardam dados, sem fornecer buracos do arquivo ao player.
 
-A auditoria do código está em andamento. “Compilado”, “testado automaticamente” e “validado em uso real” são estados diferentes. A documentação de evidências está na [matriz de capacidades](docs/CAPABILITY-MATRIX.md); limitações e formatos estão em [protocolos](docs/protocols.md).
+O teste enviado pelo usuário em 22/10/2026 confirma tráfego ED2K público, UPnP com ID alto e repetição automática das tentativas no ADM. Nesse arquivo, 77 de 86 partes foram verificadas; as fontes consultadas não tinham as nove restantes. Isso não comprova conclusão desse arquivo nem compatibilidade com todos os roteadores. Veja [protocolos](docs/protocols.md) e [matriz de capacidades](docs/CAPABILITY-MATRIX.md) para os limites.
 
 ## Protocolos e limites
 
@@ -25,8 +25,8 @@ A auditoria do código está em andamento. “Compilado”, “testado automatic
 | TCP/uTP e MSE/PE | Transportes com ofuscação opcional ou obrigatória; MSE não autentica o par |
 | DHT / LSD | DHT IPv4/IPv6; LSD opt-in somente IPv4 e uma interface |
 | Hole punching | BEP 55 sobre uTP; testes em loopback com restrição emulada, sem NAT real validado |
-| ED2K | Download MD4 por partes, até quatro fontes simultâneas, retomada que guarda o hashset autenticado e confere o parcial antes de falar com os pares, relatório do motivo da parada, ofuscação entre clientes e callbacks de servidor/buddy |
-| UPnP | Mapeia as portas pedidas no roteador (`serve --upnp`), renova e remove ao sair; testado só contra um roteador simulado |
+| ED2K | Download MD4 por partes, até oito fontes simultâneas, retomada que guarda o hashset autenticado e confere o parcial antes de falar com os pares, relatório do motivo da parada, ofuscação entre clientes e callbacks de servidor/buddy |
+| UPnP | Mapeia as portas pedidas no roteador (`serve --upnp`), renova e remove ao sair; testado automaticamente com roteador simulado; log do usuário confirma mapeamento real com ID alto |
 | Kad2 | Sessão persistente, lookup de fontes, verificação de contatos, filtro de IP e ofuscação UDP; recursos avançados incompletos |
 
 Compartilhamento explícito, upload e fila ED2K existem como API de biblioteca; não estão expostos como serviço de compartilhamento completo pelo RPC/CLI. Faltam, entre outros: Metalink, WebDAV completo, créditos, identificação segura, AICH, source exchange, ofuscação ED2K cliente-servidor, busca/publicação Kad, teste de firewall e papel de buddy.
@@ -63,7 +63,7 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets --all-features
 ```
 
-Os testes independentes usam libtorrent 2.1.1 e aMule como outros clientes; não são motores embutidos. Exigem instalação separada. Testes que dependem de software ausente ou IPv6 indisponível podem ser pulados: confirme a saída. Não há validação nesta base em rede ED2K/Kad pública, NAT real ou uso real de Windows/macOS. O agendador HTTP fixo permanece padrão; adaptatividade e checkpoints em segundo plano são opt-in. Benchmarks não provam superioridade universal.
+Os testes independentes usam libtorrent 2.1.1 e aMule como outros clientes; não são motores embutidos. Exigem instalação separada. Testes que dependem de software ausente ou IPv6 indisponível podem ser pulados: confirme a saída. Há log de uso real de ED2K/UPnP no Windows; os testes automatizados de protocolo continuam usando loopback. Não há comprovação de todos os tipos de NAT ou conclusão do arquivo incompleto desse log. O agendador HTTP fixo permanece padrão; adaptatividade e checkpoints em segundo plano são opt-in. Benchmarks não provam superioridade universal.
 
 ## Segurança, CI e licença
 

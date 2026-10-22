@@ -6,11 +6,11 @@ Rust download engine with a native JSON-RPC contract and an aria2 compatibility 
 
 ## Status
 
-**0.2.0-alpha.4 is a test pre-release, not 1.0.** The `v0.2.0-alpha.2` and `v0.2.0-alpha.3` pre-releases are published (Windows, Linux and macOS binaries with SHA-256); alpha.4 exists in the code and has not been published. ADM already uses Xtreme as its download engine.
+**Stable version 0.2.0.** The native engine for Apocalipse Download Manager, packaged for Windows, Linux and macOS with SHA-256 files.
 
-**Road to 1.0:** 1.0 will only be published after (1) confirming in real use, with a genuinely incomplete ED2K transfer, that the resume behaviour described in [protocols](docs/protocols.md) works; (2) testing UPnP on a real router; and (3) green CI on all three platforms. None of this has been done yet; see the [checklist](docs/CHECKLIST-1.0.md).
+ED2K preview does not require a fixed 30–40 MB total: ADM enables it once the first MD4-authenticated part is available (up to 9,728,000 bytes). Other peers help finish the header and tail before middle parts so a slow source cannot monopolize preview data. MP4/AVI may also need their tail index; missing ranges wait for data rather than exposing disk holes.
 
-Code auditing is in progress. “Compiled”, “automatically tested” and “validated in real use” are different states. See the [capability matrix](docs/CAPABILITY-MATRIX.md) for evidence and [protocol documentation](docs/protocols.md) for formats and limitations.
+The user's 2026-10-22 log confirms public ED2K traffic, UPnP with High ID and automatic retry in ADM. It verified 77 of 86 parts; the consulted sources lacked the remaining nine. This does not establish completion of that file or compatibility with every router. See [protocols](docs/protocols.md) and the [capability matrix](docs/CAPABILITY-MATRIX.md) for limitations.
 
 ## Protocols and limitations
 
@@ -25,8 +25,8 @@ Code auditing is in progress. “Compiled”, “automatically tested” and “
 | TCP/uTP and MSE/PE | Optional/required obfuscation; MSE does not authenticate peers |
 | DHT / LSD | IPv4/IPv6 DHT; opt-in LSD is IPv4-only on one interface |
 | Hole punching | BEP 55 over uTP; restricted loopback emulation, no validated real NAT traversal |
-| ED2K | MD4 part download, up to four simultaneous sources, resume that keeps the authenticated hashset and checks the partial file before talking to peers, a report of why a transfer stalled, peer obfuscation and server/buddy callbacks |
-| UPnP | Maps the requested ports on the router (`serve --upnp`), renews them and removes them on exit; tested only against a simulated router |
+| ED2K | MD4 part download, up to eight simultaneous sources, resume that keeps the authenticated hashset and checks the partial file before talking to peers, a report of why a transfer stalled, peer obfuscation and server/buddy callbacks |
+| UPnP | Maps the requested ports on the router (`serve --upnp`), renews them and removes them on exit; automated simulation plus a user log of real mapping with High ID |
 | Kad2 | Persistent session, source lookup, contact verification, IP filter and UDP obfuscation; advanced features incomplete |
 
 Explicit sharing, uploads and an ED2K queue exist as library APIs, not a complete RPC/CLI sharing service. Remaining gaps include Metalink, full WebDAV, credits, secure identification, AICH, source exchange, ED2K client-server obfuscation, Kad keyword search/publication, firewall testing and acting as a buddy.
@@ -63,7 +63,7 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets --all-features
 ```
 
-Independent tests use libtorrent 2.1.1 and aMule as other clients, not embedded engines; they require separate installation. Tests may skip when external programs or IPv6 are unavailable: inspect the output. This base has no public ED2K/Kad, real NAT or real-world Windows/macOS validation. Fixed HTTP scheduling remains the default; adaptivity and background checkpoints are opt-in. Benchmarks do not establish universal superiority.
+Independent tests use libtorrent 2.1.1 and aMule as other clients, not embedded engines; they require separate installation. Tests may skip when external programs or IPv6 are unavailable: inspect the output. A Windows user log shows public ED2K traffic and real UPnP mapping; automated protocol tests use loopback. Completion of that incomplete file and all NAT configurations remain unverified. Fixed HTTP scheduling remains the default; adaptivity and background checkpoints are opt-in. Benchmarks do not establish universal superiority.
 
 ## Security, CI and license
 

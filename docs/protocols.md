@@ -202,9 +202,9 @@ blocks, an out-of-order raw response, a resumed multipart file, an independently
 verified MD4 test vector, exact ED2K part-boundary hashing, corrupted data and
 hashsets, cancellation during a stalled handshake, 64-bit offsets beyond 4 GiB,
 and a destination-created-during-finalization race. These fixtures do not prove
-interoperability with every public client or server. Transfers use up to four sources concurrently, with an entire part reserved to
-one source. They retain verified partial data on incomplete attempts; dividing
-a single part among multiple peers remains unimplemented.
+interoperability with every public client or server. Transfers use up to eight peers concurrently. Each request carries up to three blocks; peers can cooperate on the same part and only MD4-authenticated complete parts are written and exposed to ADM. Helpers prioritize header/tail parts before middle parts, following the preview geometry used by aMule. A failed mixed-source part is retried with one owner to identify corrupt sources. Late Kad sources can join an ongoing transfer. Up to six rounds are made per attempt; ADM retains verified parts and retries stalled attempts.
+
+ADM preview requires the first verified part, not a fixed downloaded-byte percentage. MP4/AVI may also require the tail index. Missing ranges wait instead of returning disk holes. aMule master `6a1105634d81242a581a0f36a7e00379b12a83f3` (`src/PartFile.cpp`, `PreviewAvailable`) uses a received 256 KiB prefix; ADM deliberately requires the full first MD4-verified part (up to 9,728,000 bytes).
 
 Incoming TCP tests exercise the advertised identity and no-file responses. A real
 TCP server/callback fixture requests a Low-ID source through OP_CALLBACKREQUEST,

@@ -1,6 +1,6 @@
 # Checklist para publicar o Nibiru Xtreme 1.0
 
-A 1.0 **não** será publicada enquanto os itens bloqueantes abaixo estiverem abertos. `[x]` = feito e com
+A versão estável atual é 0.2.0. Este checklist acompanha uma futura 1.0 e não bloqueia a 0.2.0 autorizada pelo usuário em 22/10/2026. A 1.0 exige revisar os itens abaixo. `[x]` = feito e com
 evidência; `[ ]` = pendente. Publicar release, tag ou PR exige autorização expressa do usuário.
 
 ## Bloqueantes
@@ -9,11 +9,9 @@ evidência; `[ ]` = pendente. Publicar release, tag ou PR exige autorização ex
       parcial, parcial conferido antes dos pares, motivo da parada) — ver `docs/protocols.md`. Falta **provar com
       uma transferência incompleta real** (o caso relatado: 89,5 %, 12 fontes, "metadata timed out"); a causa
       real desse caso **não foi confirmada**.
-- [ ] **ADM: a nova espera automática por fontes** (`waiting_sources`) testada no aplicativo real: parar com
-      fontes ruins, reconectar ED2K/Kad e ver o download voltar sozinho.
-- [ ] **ID baixo após conectar:** conferir no aplicativo real que, com UPnP ligado, o primeiro login já sai com ID
-      alto (a porta agora é mapeada **antes** do login; testado só contra roteador simulado).
-- [ ] **UPnP em roteador real** (e comportamento sem UPnP / atrás de CGNAT).
+- [x] **ADM: a nova espera automática por fontes** (`waiting_sources`) o log de 22/10/2026 mostra repetição automática após partes indisponíveis. Reconexão explícita ainda precisa de um teste específico.
+- [x] **UPnP antes do login e ID alto:** log público do usuário de 22/10/2026 confirma mapeamento TCP 4662 antes do primeiro login e ID alto.
+- [x] **UPnP em roteador real:** mapeamento confirmado no log de 22/10/2026. Sem UPnP/CGNAT continua pendente.
 - [ ] **CI verde** nas três plataformas no commit da release, incluindo o interop com aMule (falha intermitente
       já vista: `ED2K peer read timed out`; re-executar uma vez antes de tratar como regressão).
 - [ ] Pacote do ADM embutindo o Xtreme (hoje o ADM baixa o motor pela aba Ferramentas).

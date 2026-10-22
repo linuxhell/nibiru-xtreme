@@ -1,4 +1,12 @@
-# Nibiru Xtreme — download engine (alpha)
+# Nibiru Xtreme — download engine
+
+## 0.2.0 — stable
+
+- ED2K: peers help complete the first and tail parts before middle parts, so a slow source does not postpone preview until most of the file has downloaded.
+- ED2K: up to eight parallel peers, three blocks per request, late Kad sources, authenticated resume hashsets and explicit reasons for missing parts or failed sources.
+- HTTP: the destination lock is released and removed when a transfer ends; resume identity/checkpoints remain available only where needed.
+- Public Windows user log confirms UPnP mapping with High ID and 77/86 verified ED2K parts; the remaining parts were unavailable from the responding sources. This is not a completed-file test.
+- Known protocol limitations remain: see `docs/protocols.md`.
 
 ## 0.2.0-alpha.4 — PRÉ-RELEASE PARA TESTE (não é a release final)
 
@@ -44,8 +52,7 @@ WebDAV é só GET; sem Metalink; sem ofuscação cliente↔servidor ED2K; sem bu
 Os binários não são assinados. Confira o SHA-256 do `.sha256` ao lado de cada arquivo.
 
 Nibiru Xtreme is a single-binary download engine with an aria2-compatible JSON-RPC interface, built to be
-the engine of the Apocalipse Download Manager. **This is an alpha**: it passes its own loopback tests and
-interoperability tests against aria2c, but it has had little exposure to the open internet.
+the engine of the Apocalipse Download Manager. Protocol coverage and independent test evidence are documented in `docs/CAPABILITY-MATRIX.md`. Historical alpha notes above describe their original validation status.
 
 ## Bandwidth limit fix
 
