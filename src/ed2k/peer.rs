@@ -2,7 +2,7 @@
 use super::obfuscation::{self, Obfuscation, PeerStream};
 use super::{
     FileLink, FileSource,
-    file::{BLOCK_SIZE, PART_SIZE},
+    file::PART_SIZE,
     metadata::{Reader, Value, tag},
 };
 use anyhow::{Context, Result, bail};
@@ -49,14 +49,6 @@ pub struct HandshakeTimedOut;
 impl std::fmt::Display for HandshakeTimedOut {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("ED2K peer handshake timed out")
-    }
-}
-/// Another peer finished the part first, so this transfer stopped on purpose.
-#[derive(Debug)]
-pub struct PartSuperseded;
-impl std::fmt::Display for PartSuperseded {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("part already completed by another peer")
     }
 }
 #[derive(Debug)]
@@ -495,19 +487,113 @@ impl Peer {
             }
         }
     }
-    /// The whole part, verified. Kept for callers that do not need progress.
-    #[cfg(test)]
-    pub async fn part(&mut self, index: usize) -> Result<Vec<u8>> {
-        self.part_with(index, &mut |_| true).await
+    /// One block of the file, `[from, end)` in absolute offsets and inside one part.
+    pub async fn block(&mut self, from: u64, end: u64) -> Result<Vec<u8>> {
+        check_cancel(&self.cancel)?;
+        let wide = end > u32::MAX as u64;
+        if wide && !self.large {
+            bail!("peer does not support 64-bit file offsets");
+        }
+        let mut request = self.file.hash.to_vec();
+        if wide {
+            for offset in [from, 0, 0, end, 0, 0] {
+                request.extend(offset.to_le_bytes());
+            }
+        } else {
+            for offset in [from, 0, 0, end, 0, 0] {
+                request.extend((offset as u32).to_le_bytes());
+            }
+        }
+        send(
+            &mut self.stream,
+            if wide { 0xc5 } else { 0xe3 },
+            if wide { 0xa3 } else { 0x47 },
+            &request,
+        )
+        .await?;
+        let mut block = vec![0; (end - from) as usize];
+        let mut covered = vec![false; block.len()];
+        let mut remaining = block.len();
+        let mut compressed = Vec::new();
+        let mut compressed_size = None;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+        while remaining > 0 {
+            let (protocol, op, data) = tokio::time::timeout_at(deadline, self.receive())
+                .await
+                .context("peer block timed out")??;
+            match (protocol, op) {
+                (0xe3, 0x48 | 0x57) => bail!("peer stopped the transfer"),
+                (0xe3, 0x46) | (0xc5, 0xa2) => {
+                    let mut r = Reader::new(&data);
+                    if r.take(16)? != self.file.hash {
+                        bail!("peer block hash mismatch");
+                    }
+                    let (a, b) = if op == 0xa2 {
+                        (r.u64()?, r.u64()?)
+                    } else {
+                        (r.u32()? as u64, r.u32()? as u64)
+                    };
+                    if a < from
+                        || b > end
+                        || b <= a
+                        || data.len() - r.pos != (b - a) as usize
+                        || !compressed.is_empty()
+                    {
+                        bail!("peer block exceeds requested range");
+                    }
+                    let range = (a - from) as usize..(b - from) as usize;
+                    if covered[range.clone()].iter().any(|b| *b) {
+                        bail!("peer sent overlapping data");
+                    }
+                    remaining -= range.len();
+                    block[range.clone()].copy_from_slice(&data[r.pos..]);
+                    covered[range].fill(true);
+                }
+                (0xc5, 0x40 | 0xa1) => {
+                    let mut r = Reader::new(&data);
+                    if r.take(16)? != self.file.hash {
+                        bail!("compressed peer block hash mismatch");
+                    }
+                    let offset = if op == 0xa1 {
+                        r.u64()?
+                    } else {
+                        r.u32()? as u64
+                    };
+                    let total = r.u32()? as usize;
+                    if offset != from
+                        || total == 0
+                        || total > block.len() + 65536
+                        || compressed_size.is_some_and(|n| n != total)
+                        || remaining != block.len()
+                    {
+                        bail!("invalid compressed peer block");
+                    }
+                    compressed_size = Some(total);
+                    if compressed.len() + data.len() - r.pos > total {
+                        bail!("compressed peer block exceeds declared length");
+                    }
+                    compressed.extend(&data[r.pos..]);
+                    if compressed.len() == total {
+                        let mut decoded = Vec::new();
+                        flate2::read::ZlibDecoder::new(&compressed[..])
+                            .take(block.len() as u64 + 1)
+                            .read_to_end(&mut decoded)?;
+                        if decoded.len() != block.len() {
+                            bail!("compressed peer block size mismatch");
+                        }
+                        block = decoded;
+                        remaining = 0;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(block)
     }
 
-    /// The whole part, verified. `on_block` is told how many bytes have arrived after each block
-    /// and stops the transfer by returning `false` (the part was finished by another peer).
-    pub async fn part_with(
-        &mut self,
-        index: usize,
-        on_block: &mut (dyn FnMut(usize) -> bool + Send),
-    ) -> Result<Vec<u8>> {
+    /// The whole part, verified (the transfer itself assembles parts from blocks of several peers).
+    #[cfg(test)]
+    pub async fn part(&mut self, index: usize) -> Result<Vec<u8>> {
         check_cancel(&self.cancel)?;
         if !self.has_part(index) {
             bail!("peer does not have this part");
@@ -516,109 +602,9 @@ impl Peer {
         let mut part = Vec::with_capacity(self.file.part_len(index));
         while part.len() < self.file.part_len(index) {
             let from = start + part.len() as u64;
-            let end = (from + BLOCK_SIZE).min(start + self.file.part_len(index) as u64);
-            let wide = end > u32::MAX as u64;
-            if wide && !self.large {
-                bail!("peer does not support 64-bit file offsets");
-            }
-            let mut request = self.file.hash.to_vec();
-            if wide {
-                for offset in [from, 0, 0, end, 0, 0] {
-                    request.extend(offset.to_le_bytes());
-                }
-            } else {
-                for offset in [from, 0, 0, end, 0, 0] {
-                    request.extend((offset as u32).to_le_bytes());
-                }
-            }
-            send(
-                &mut self.stream,
-                if wide { 0xc5 } else { 0xe3 },
-                if wide { 0xa3 } else { 0x47 },
-                &request,
-            )
-            .await?;
-            let mut block = vec![0; (end - from) as usize];
-            let mut covered = vec![false; block.len()];
-            let mut remaining = block.len();
-            let mut compressed = Vec::new();
-            let mut compressed_size = None;
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
-            while remaining > 0 {
-                let (protocol, op, data) = tokio::time::timeout_at(deadline, self.receive())
-                    .await
-                    .context("peer block timed out")??;
-                match (protocol, op) {
-                    (0xe3, 0x48 | 0x57) => bail!("peer stopped the transfer"),
-                    (0xe3, 0x46) | (0xc5, 0xa2) => {
-                        let mut r = Reader::new(&data);
-                        if r.take(16)? != self.file.hash {
-                            bail!("peer block hash mismatch");
-                        }
-                        let (a, b) = if op == 0xa2 {
-                            (r.u64()?, r.u64()?)
-                        } else {
-                            (r.u32()? as u64, r.u32()? as u64)
-                        };
-                        if a < from
-                            || b > end
-                            || b <= a
-                            || data.len() - r.pos != (b - a) as usize
-                            || !compressed.is_empty()
-                        {
-                            bail!("peer block exceeds requested range");
-                        }
-                        let range = (a - from) as usize..(b - from) as usize;
-                        if covered[range.clone()].iter().any(|b| *b) {
-                            bail!("peer sent overlapping data");
-                        }
-                        remaining -= range.len();
-                        block[range.clone()].copy_from_slice(&data[r.pos..]);
-                        covered[range].fill(true);
-                    }
-                    (0xc5, 0x40 | 0xa1) => {
-                        let mut r = Reader::new(&data);
-                        if r.take(16)? != self.file.hash {
-                            bail!("compressed peer block hash mismatch");
-                        }
-                        let offset = if op == 0xa1 {
-                            r.u64()?
-                        } else {
-                            r.u32()? as u64
-                        };
-                        let total = r.u32()? as usize;
-                        if offset != from
-                            || total == 0
-                            || total > block.len() + 65536
-                            || compressed_size.is_some_and(|n| n != total)
-                            || remaining != block.len()
-                        {
-                            bail!("invalid compressed peer block");
-                        }
-                        compressed_size = Some(total);
-                        if compressed.len() + data.len() - r.pos > total {
-                            bail!("compressed peer block exceeds declared length");
-                        }
-                        compressed.extend(&data[r.pos..]);
-                        if compressed.len() == total {
-                            let mut decoded = Vec::new();
-                            flate2::read::ZlibDecoder::new(&compressed[..])
-                                .take(block.len() as u64 + 1)
-                                .read_to_end(&mut decoded)?;
-                            if decoded.len() != block.len() {
-                                bail!("compressed peer block size mismatch");
-                            }
-                            block = decoded;
-                            remaining = 0;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            part.extend(block);
-            if !on_block(part.len()) {
-                return Err(anyhow::anyhow!(PartSuperseded));
-            }
+            let end =
+                (from + super::file::BLOCK_SIZE).min(start + self.file.part_len(index) as u64);
+            part.extend(self.block(from, end).await?);
         }
         if super::file::digest(&part) != self.hashes[index] {
             bail!("ED2K part failed MD4 verification");

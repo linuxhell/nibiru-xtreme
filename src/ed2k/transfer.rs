@@ -1,9 +1,9 @@
 use super::{
     FileLink, FileSource,
-    file::{PART_SIZE, digest},
+    file::{BLOCK_SIZE, PART_SIZE, digest},
     peer::{
-        HandshakeTimedOut, KnownHashes, MetadataTimedOut, PartSuperseded, Peer, PeerLacksFile,
-        QueueWaitTimedOut, Tuning, check_cancel,
+        HandshakeTimedOut, KnownHashes, MetadataTimedOut, Peer, PeerLacksFile, QueueWaitTimedOut,
+        Tuning, check_cancel,
     },
 };
 use anyhow::{Context, Result, anyhow, bail};
@@ -86,6 +86,7 @@ pub enum TransferEvent {
         elapsed_ms: u64,
     },
     PartDone {
+        peers: usize,
         peer: String,
         index: usize,
         bytes: usize,
@@ -96,10 +97,6 @@ pub enum TransferEvent {
         index: usize,
         error: String,
         elapsed_ms: u64,
-    },
-    PartSuperseded {
-        peer: String,
-        index: usize,
     },
 }
 pub type EventSink = Arc<dyn Fn(TransferEvent) + Send + Sync>;
@@ -325,10 +322,8 @@ pub async fn download_with_tuning(
         changed: tokio::sync::Notify::new(),
         shared: Mutex::new(Shared {
             complete: vec![false; file.part_count()],
-            claimed: vec![false; file.part_count()],
-            claimed_at: vec![None; file.part_count()],
-            shadows: vec![0; file.part_count()],
-            in_flight: vec![0; file.part_count()],
+            open: std::collections::HashMap::new(),
+            solo: std::collections::HashSet::new(),
             verified: 0,
             scanned: false,
             hashes: saved_hashes.map(Arc::new),
@@ -362,7 +357,7 @@ pub async fn download_with_tuning(
         // Sources that delivered parts get another connection next round (they may have dropped
         // mid-part); sources that delivered nothing are not retried.
         loop {
-            while running.len() < MAX_PARALLEL_PEERS {
+            while running.len() < MAX_PARALLEL_PEERS && !context.all_complete() {
                 match pending.next() {
                     Some(source) => running.push(shared_context.work_tagged(source)),
                     None => break,
@@ -372,6 +367,10 @@ pub async fn download_with_tuning(
                 break;
             };
             let (fetched, retry) = result?;
+            if context.all_complete() {
+                // Everything is verified: stop connecting to the sources still waiting or being tried.
+                break;
+            }
             if fetched > 0 || retry {
                 queue.push(source);
             }
@@ -431,15 +430,36 @@ struct Outcomes {
     part_failures: usize,
 }
 
+/// A part being assembled from blocks that may come from different peers.
+struct PartBuf {
+    data: Vec<u8>,
+    have: Vec<bool>,
+    /// When each block was asked for (a block nobody has delivered for long is asked again).
+    asked_at: Vec<Option<std::time::Instant>>,
+    asked_twice: Vec<bool>,
+    /// The peer that opened the part takes blocks from the front, helpers from the back.
+    opener: String,
+    started: std::time::Instant,
+    contributors: Vec<String>,
+}
+
+/// One block to fetch: part, block number, absolute byte range.
+struct Work {
+    index: usize,
+    block: usize,
+    from: u64,
+    end: u64,
+    /// This peer did not open the part.
+    helping: bool,
+}
+
 struct Shared {
     complete: Vec<bool>,
-    /// Parts a worker is fetching right now; no other peer is asked for them.
-    claimed: Vec<bool>,
-    /// When the part was claimed, and how many other peers also fetch it (reta final).
-    claimed_at: Vec<Option<std::time::Instant>>,
-    shadows: Vec<u8>,
-    /// Bytes of each part received so far, before it is verified.
-    in_flight: Vec<u64>,
+    /// Parts being fetched right now, block by block, possibly from several peers at once.
+    open: std::collections::HashMap<usize, PartBuf>,
+    /// Parts whose blocks came from several peers and failed verification: they are fetched again
+    /// by one peer at a time, so the peer that sends bad data can be told apart.
+    solo: std::collections::HashSet<usize>,
     verified: u64,
     scanned: bool,
     /// A hashset already authenticated against the link: from disk or from the first peer that sent it.
@@ -503,11 +523,16 @@ impl Context_<'_> {
         let (verified, verified_parts, in_flight) = {
             let shared = self.shared.lock().unwrap();
             let in_flight = shared
-                .in_flight
-                .iter()
-                .zip(&shared.complete)
-                .filter(|(_, done)| !**done)
-                .map(|(bytes, _)| *bytes)
+                .open
+                .values()
+                .map(|part| {
+                    part.have
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, got)| **got)
+                        .map(|(block, _)| block_len(part.data.len(), block))
+                        .sum::<usize>() as u64
+                })
                 .sum();
             (shared.verified, shared.complete.clone(), in_flight)
         };
@@ -592,51 +617,149 @@ impl Context_<'_> {
     fn note(&self, change: impl FnOnce(&mut Outcomes)) {
         change(&mut self.shared.lock().unwrap().outcomes);
     }
-    /// The next part for this peer: first one nobody is fetching; failing that, in the last stretch,
-    /// a part another peer has been fetching for a while (both race, the first to finish wins).
-    fn claim(&self, peer: &Peer) -> Option<(usize, bool)> {
+    /// The next block for this peer. It continues the part it opened; otherwise it opens a part
+    /// nobody has (first part, last part, then in order); otherwise it helps with a part other
+    /// peers are fetching, taking blocks from the back; finally it asks again for a block that has
+    /// been outstanding for a long time (the first answer wins).
+    fn next_work(&self, peer: &Peer, label: &str) -> Option<Work> {
         let mut shared = self.shared.lock().unwrap();
-        let free = preview_order(shared.complete.len())
-            .find(|i| !shared.complete[*i] && !shared.claimed[*i] && peer.has_part(*i));
-        if let Some(index) = free {
-            shared.claimed[index] = true;
-            shared.claimed_at[index] = Some(std::time::Instant::now());
-            shared.in_flight[index] = 0;
-            return Some((index, false));
+        let geometry = |index: usize, block: usize, len: usize, helping: bool| {
+            let start = index as u64 * PART_SIZE + block as u64 * BLOCK_SIZE;
+            let end = (start + BLOCK_SIZE).min(index as u64 * PART_SIZE + len as u64);
+            Work {
+                index,
+                block,
+                from: start,
+                end,
+                helping,
+            }
+        };
+        let own = shared
+            .open
+            .iter()
+            .filter(|(i, part)| part.opener == label && peer.has_part(**i))
+            .filter_map(|(i, part)| {
+                part.have
+                    .iter()
+                    .zip(&part.asked_at)
+                    .position(|(got, asked)| !*got && asked.is_none())
+                    .map(|block| (*i, block))
+            })
+            .min();
+        if let Some((index, block)) = own {
+            let part = shared.open.get_mut(&index).unwrap();
+            part.asked_at[block] = Some(std::time::Instant::now());
+            let len = part.data.len();
+            return Some(geometry(index, block, len, false));
         }
-        let shadow = (0..shared.complete.len()).find(|i| {
-            !shared.complete[*i]
-                && shared.claimed[*i]
-                && shared.shadows[*i] == 0
-                && peer.has_part(*i)
-                && shared.claimed_at[*i].is_some_and(|at| at.elapsed() >= self.tuning.endgame_after)
-        })?;
-        shared.shadows[shadow] += 1;
-        Some((shadow, true))
+        let fresh = preview_order(shared.complete.len())
+            .find(|i| !shared.complete[*i] && !shared.open.contains_key(i) && peer.has_part(*i));
+        if let Some(index) = fresh {
+            let len = self.file.part_len(index);
+            let blocks = len.div_ceil(BLOCK_SIZE as usize);
+            let mut part = PartBuf {
+                data: vec![0; len],
+                have: vec![false; blocks],
+                asked_at: vec![None; blocks],
+                asked_twice: vec![false; blocks],
+                opener: label.to_owned(),
+                started: std::time::Instant::now(),
+                contributors: Vec::new(),
+            };
+            part.asked_at[0] = Some(std::time::Instant::now());
+            shared.open.insert(index, part);
+            return Some(geometry(index, 0, len, false));
+        }
+        let help = shared
+            .open
+            .iter()
+            .filter(|(i, _)| peer.has_part(**i) && !shared.solo.contains(*i))
+            .filter_map(|(i, part)| {
+                part.have
+                    .iter()
+                    .zip(&part.asked_at)
+                    .rposition(|(got, asked)| !*got && asked.is_none())
+                    .map(|block| (*i, block))
+            })
+            .min();
+        if let Some((index, block)) = help {
+            let part = shared.open.get_mut(&index).unwrap();
+            part.asked_at[block] = Some(std::time::Instant::now());
+            let len = part.data.len();
+            return Some(geometry(index, block, len, true));
+        }
+        let stale = shared
+            .open
+            .iter()
+            .filter(|(i, _)| peer.has_part(**i) && !shared.solo.contains(*i))
+            .filter_map(|(i, part)| {
+                (0..part.have.len())
+                    .rev()
+                    .find(|b| {
+                        !part.have[*b]
+                            && !part.asked_twice[*b]
+                            && part.asked_at[*b]
+                                .is_some_and(|at| at.elapsed() >= self.tuning.endgame_after)
+                    })
+                    .map(|block| (*i, block))
+            })
+            .min();
+        if let Some((index, block)) = stale {
+            let part = shared.open.get_mut(&index).unwrap();
+            part.asked_twice[block] = true;
+            let len = part.data.len();
+            return Some(geometry(index, block, len, true));
+        }
+        None
     }
-    fn release(&self, index: usize, shadow: bool) {
+    /// A block could not be fetched: let someone else ask for it.
+    fn release_block(&self, work: &Work) {
         let mut shared = self.shared.lock().unwrap();
-        if shadow {
-            shared.shadows[index] = shared.shadows[index].saturating_sub(1);
-        } else {
-            shared.claimed[index] = false;
-            shared.claimed_at[index] = None;
-            shared.in_flight[index] = 0;
+        if let Some(part) = shared
+            .open
+            .get_mut(&work.index)
+            .filter(|part| !part.have[work.block])
+        {
+            part.asked_at[work.block] = None;
+            part.asked_twice[work.block] = false;
         }
         drop(shared);
         self.changed.notify_waiters();
+    }
+    /// Stores a block. When it was the last one, returns the whole part to verify and write.
+    fn put_block(&self, work: &Work, bytes: &[u8], label: &str) -> Option<(Vec<u8>, usize, u64)> {
+        let mut shared = self.shared.lock().unwrap();
+        let part = shared.open.get_mut(&work.index)?;
+        if part.have[work.block] || bytes.len() != (work.end - work.from) as usize {
+            return None;
+        }
+        let offset = work.block * BLOCK_SIZE as usize;
+        part.data[offset..offset + bytes.len()].copy_from_slice(bytes);
+        part.have[work.block] = true;
+        if !part.contributors.iter().any(|c| c == label) {
+            part.contributors.push(label.to_owned());
+        }
+        if part.have.iter().all(|got| *got) {
+            let part = shared.open.remove(&work.index)?;
+            return Some((
+                part.data,
+                part.contributors.len(),
+                part.started.elapsed().as_millis() as u64,
+            ));
+        }
+        None
+    }
+    /// Whether this peer could still be given work once the blocks being fetched elsewhere land
+    /// (they may fail and come back).
+    fn waiting_for_others(&self, peer: &Peer) -> bool {
+        let shared = self.shared.lock().unwrap();
+        shared.open.keys().any(|i| peer.has_part(*i))
     }
     fn event(&self, event: TransferEvent) {
         if let Some(sink) = &self.options.events {
             sink(event);
         }
     }
-    fn blocked_by_others(&self, peer: &Peer) -> bool {
-        let shared = self.shared.lock().unwrap();
-        (0..shared.complete.len())
-            .any(|i| !shared.complete[i] && shared.claimed[i] && peer.has_part(i))
-    }
-
     async fn work_tagged<'s>(
         &self,
         source: &'s FileSource,
@@ -812,115 +935,127 @@ impl Context_<'_> {
             waited_ms: queued_at.elapsed().as_millis() as u64,
         });
         let mut fetched = 0;
+        // What this peer has done for the part it is on now, for the slow-part warning.
+        let mut run: Option<(usize, std::time::Instant, usize, bool)> = None;
         loop {
+            if self.all_complete() {
+                break;
+            }
             let wake = self.changed.notified();
             tokio::pin!(wake);
             wake.as_mut().enable();
-            let Some((index, shadow)) = self.claim(&peer) else {
-                if self.all_complete() || !self.blocked_by_others(&peer) {
+            let Some(work) = self.next_work(&peer, &label) else {
+                if !self.waiting_for_others(&peer) {
                     break;
                 }
-                // Parts this peer has are being fetched elsewhere: if that fails they come back,
-                // and after a while this peer helps with them.
+                // Every block of the parts this peer has is being fetched elsewhere: if one fails
+                // it comes back, and a block outstanding for long is asked again.
                 let _ = tokio::time::timeout(Duration::from_millis(250), wake).await;
                 check_cancel(self.cancel)?;
                 continue;
             };
             if let Err(error) = check_cancel(self.cancel) {
-                self.release(index, shadow);
+                self.release_block(&work);
                 return Err(error);
             }
-            self.emit(TransferStage::Downloading, host, None);
-            self.event(TransferEvent::PartStarted {
-                peer: label.clone(),
-                index,
-                shadow,
-            });
-            let started = std::time::Instant::now();
-            let mut flagged_slow = false;
-            let result = peer
-                .part_with(index, &mut |received| {
-                    let elapsed = started.elapsed();
-                    {
-                        let mut shared = self.shared.lock().unwrap();
-                        if shared.complete[index] {
-                            return false;
-                        }
-                        shared.in_flight[index] = shared.in_flight[index].max(received as u64);
-                    }
-                    if !flagged_slow
-                        && elapsed >= Duration::from_secs(20)
-                        && (received as f64) / elapsed.as_secs_f64() < 16_384.0
-                    {
-                        flagged_slow = true;
-                        self.event(TransferEvent::PartSlow {
-                            peer: label.clone(),
-                            index,
-                            received,
-                            elapsed_ms: elapsed.as_millis() as u64,
-                        });
-                    }
-                    self.emit(TransferStage::Downloading, host, None);
-                    true
-                })
-                .await;
-            let elapsed_ms = started.elapsed().as_millis() as u64;
-            let bytes = match result {
-                Ok(bytes) => bytes,
-                Err(error) if error.downcast_ref::<PartSuperseded>().is_some() => {
-                    self.release(index, shadow);
-                    self.event(TransferEvent::PartSuperseded {
-                        peer: label.clone(),
-                        index,
-                    });
-                    continue;
-                }
+            if run.is_none_or(|(index, ..)| index != work.index) {
+                run = Some((work.index, std::time::Instant::now(), 0, false));
+                self.emit(TransferStage::Downloading, host, None);
+                self.event(TransferEvent::PartStarted {
+                    peer: label.clone(),
+                    index: work.index,
+                    shadow: work.helping,
+                });
+            }
+            let asked = std::time::Instant::now();
+            let block = match peer.block(work.from, work.end).await {
+                Ok(block) => block,
                 Err(error) => {
-                    self.release(index, shadow);
+                    self.release_block(&work);
                     self.event(TransferEvent::PartFailed {
                         peer: label.clone(),
-                        index,
+                        index: work.index,
                         error: format!("{error:#}"),
-                        elapsed_ms,
+                        elapsed_ms: asked.elapsed().as_millis() as u64,
                     });
                     self.soft_error(&error);
                     self.note(|o| o.part_failures += 1);
                     break;
                 }
             };
-            // Data reaches disk only after the entire part verifies against
-            // a hashset whose root matches the user's ED2K link.
+            if let Some((index, since, bytes, flagged)) = run.as_mut() {
+                *bytes += block.len();
+                let elapsed = since.elapsed();
+                if !*flagged
+                    && elapsed >= Duration::from_secs(20)
+                    && (*bytes as f64) / elapsed.as_secs_f64() < 16_384.0
+                {
+                    *flagged = true;
+                    self.event(TransferEvent::PartSlow {
+                        peer: label.clone(),
+                        index: *index,
+                        received: *bytes,
+                        elapsed_ms: elapsed.as_millis() as u64,
+                    });
+                }
+            }
+            let finished = self.put_block(&work, &block, &label);
+            self.changed.notify_waiters();
+            let Some((part, peers, elapsed_ms)) = finished else {
+                self.emit(TransferStage::Downloading, host, None);
+                continue;
+            };
+            // The part is only written once it verifies against a hashset whose root matches the
+            // user's ED2K link.
+            let verified = peer.hashes.get(work.index) == Some(&digest(&part));
+            if !verified {
+                self.event(TransferEvent::PartFailed {
+                    peer: label.clone(),
+                    index: work.index,
+                    error: format!(
+                        "part failed MD4 verification ({peers} peers contributed blocks)"
+                    ),
+                    elapsed_ms,
+                });
+                self.soft_error(&anyhow!("ED2K part failed MD4 verification"));
+                self.note(|o| o.part_failures += 1);
+                if peers > 1 {
+                    // Not clear who sent the bad block: fetch the part again, one peer at a time.
+                    self.shared.lock().unwrap().solo.insert(work.index);
+                    self.changed.notify_waiters();
+                    continue;
+                }
+                break;
+            }
             let written = async {
                 let mut disk = self.disk.lock().await;
-                disk.seek(std::io::SeekFrom::Start(index as u64 * PART_SIZE))
+                disk.seek(std::io::SeekFrom::Start(work.index as u64 * PART_SIZE))
                     .await?;
-                disk.write_all(&bytes).await?;
+                disk.write_all(&part).await?;
                 disk.flush().await?;
                 Ok::<_, std::io::Error>(())
             }
             .await;
             if let Err(error) = written {
-                self.release(index, shadow);
                 return Err(error.into());
             }
             let first = {
                 let mut shared = self.shared.lock().unwrap();
-                let first = !shared.complete[index];
+                let first = !shared.complete[work.index];
                 if first {
-                    shared.complete[index] = true;
-                    shared.verified += bytes.len() as u64;
+                    shared.complete[work.index] = true;
+                    shared.verified += part.len() as u64;
                 }
-                shared.claimed[index] = false;
-                shared.in_flight[index] = 0;
                 first
             };
             self.changed.notify_waiters();
             if first {
                 fetched += 1;
                 self.event(TransferEvent::PartDone {
+                    peers,
                     peer: label.clone(),
-                    index,
-                    bytes: bytes.len(),
+                    index: work.index,
+                    bytes: part.len(),
                     elapsed_ms,
                 });
             }
@@ -928,6 +1063,11 @@ impl Context_<'_> {
         }
         Ok((fetched, false))
     }
+}
+
+/// Length of block `block` in a part of `part_len` bytes.
+fn block_len(part_len: usize, block: usize) -> usize {
+    (part_len - block * BLOCK_SIZE as usize).min(BLOCK_SIZE as usize)
 }
 
 /// The first part, then the last, then the rest in order. Players open a file by reading both ends
@@ -1587,6 +1727,101 @@ pub(crate) mod tests {
                 .any(|e| matches!(e, TransferEvent::PartStarted { .. }))
         );
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn several_peers_split_the_blocks_of_one_part_and_the_download_stops_when_done() {
+        // One part-sized file; each connection sends a block only every 80 ms, so one peer alone
+        // would need about 4 s for the 53 blocks.
+        let data: Vec<u8> = (0..PART_SIZE as usize - 1000)
+            .map(|i| (i % 241) as u8)
+            .collect();
+        let slow = Plan {
+            block_delay: Duration::from_millis(80),
+            ..Plan::default()
+        };
+        let (source, connections, server) = scripted_peer(data.clone(), vec![slow]).await;
+        let (file, _) = fixture_file(&data);
+        let dir = tempfile::tempdir().unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let seen = events.clone();
+        let mut opts = options();
+        opts.events = Some(Arc::new(move |event| seen.lock().unwrap().push(event)));
+        let started = std::time::Instant::now();
+        let path = download_with_tuning(
+            &file,
+            dir.path(),
+            &vec![source; 4],
+            opts,
+            quick(),
+            Arc::new(AtomicBool::new(false)),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), data);
+        assert!(
+            started.elapsed() < Duration::from_millis(2500),
+            "took {:?}: four peers should split the blocks",
+            started.elapsed()
+        );
+        assert_eq!(*connections.lock().unwrap(), 4);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn the_download_ends_as_soon_as_everything_is_verified() {
+        let data = two_part_data();
+        let (good, _, good_server) = scripted_peer(data.clone(), vec![Plan::default()]).await;
+        // How long the good source alone takes (hashing 10 MB is slow in a debug build).
+        let baseline_dir = tempfile::tempdir().unwrap();
+        let baseline_start = std::time::Instant::now();
+        download_with_tuning(
+            &fixture_file(&data).0,
+            baseline_dir.path(),
+            std::slice::from_ref(&good),
+            options(),
+            quick(),
+            Arc::new(AtomicBool::new(false)),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let baseline = baseline_start.elapsed();
+        let (silent, _, silent_server) = scripted_peer(
+            data.clone(),
+            vec![Plan {
+                silent_metadata: true,
+                ..Plan::default()
+            }],
+        )
+        .await;
+        let (file, _) = fixture_file(&data);
+        let dir = tempfile::tempdir().unwrap();
+        let mut sources = vec![good];
+        sources.extend(std::iter::repeat_n(silent, 12));
+        let started = std::time::Instant::now();
+        let path = download_with_tuning(
+            &file,
+            dir.path(),
+            &sources,
+            options(),
+            quick(),
+            Arc::new(AtomicBool::new(false)),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), data);
+        // quick() gives silent peers 700 ms each; waiting for them (or trying the rest of the list)
+        // would add well over a second to the time the good source needs on its own.
+        assert!(
+            started.elapsed() < baseline + Duration::from_millis(450),
+            "took {:?} against {baseline:?} with only the good source",
+            started.elapsed()
+        );
+        good_server.abort();
+        silent_server.abort();
     }
 
     fn quick() -> Tuning {
