@@ -425,6 +425,9 @@ async fn bt_service() -> Arc<BtService> {
         session: SessionConfig {
             bind: "127.0.0.1".parse().unwrap(),
             allow_private_trackers: true,
+            // This helper is used by the TCP persistence test below, like its seeder.
+            // A Windows TCP ephemeral port can be reserved for UDP (WSAEACCES).
+            enable_utp: false,
             ..SessionConfig::default()
         },
         seed_time: Some(Duration::ZERO),
