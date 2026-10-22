@@ -6,7 +6,9 @@ Rust 下载引擎，提供原生 JSON-RPC 契约及部分 aria2 兼容接口。
 
 ## 状态
 
-**0.2.0-alpha.2 仍在开发，尚未完成全部多协议功能。** 在 Xtreme 完成并通过集成验证前，ADM 保留现有引擎。2026-10-21 查询时尚无已发布 release；CI 产物是测试候选文件。
+**0.2.0-alpha.4 是测试用预发布版本，不是 1.0。** 预发布版 `v0.2.0-alpha.2` 与 `v0.2.0-alpha.3` 已发布（含 Windows、Linux、macOS 二进制文件及 SHA-256）；alpha.4 已在代码中，尚未发布。ADM 已使用 Xtreme 作为下载引擎。
+
+**通往 1.0 的路径：** 只有在 (1) 用真实的未完成 ED2K 传输确认[协议文档](docs/protocols.md)所述的续传可用；(2) 在真实路由器上测试 UPnP；(3) 三个平台的 CI 全部通过之后，才会发布 1.0。以上目前均未完成，见[清单](docs/CHECKLIST-1.0.md)。
 
 代码审计仍在进行。“已编译”“已通过自动测试”和“已在真实使用环境验证”是不同状态。证据见[能力矩阵](docs/CAPABILITY-MATRIX.md)，格式和限制见[协议文档](docs/protocols.md)。
 
@@ -23,7 +25,8 @@ Rust 下载引擎，提供原生 JSON-RPC 契约及部分 aria2 兼容接口。
 | TCP/uTP 与 MSE/PE | 可选或强制混淆；MSE 不提供对端身份认证 |
 | DHT / LSD | IPv4/IPv6 DHT；LSD 需主动开启，仅支持 IPv4 单接口 |
 | 打洞 | 基于 uTP 的 BEP 55；仅验证受限回环模拟，未验证真实 NAT 穿透 |
-| ED2K | MD4 分块下载、最多四个并行来源、续传、客户端混淆及服务器/buddy 回调 |
+| ED2K | 按分块 MD4 下载，最多同时四个来源，续传时保留已验证的哈希集并在联系节点前先校验部分文件，停止原因报告，客户端间混淆，服务器/buddy 回调 |
+| UPnP | 在路由器上映射所请求的端口（`serve --upnp`），自动续期并在退出时移除；仅在模拟路由器上测试过 |
 | Kad2 | 持久会话、来源查找、联系人验证、IP 过滤和 UDP 混淆；高级功能尚未完成 |
 
 显式共享、上传及 ED2K 队列仅提供库 API，尚不是完整的 RPC/CLI 共享服务。待完成项目包括 Metalink、完整 WebDAV、积分、安全身份认证、AICH、来源交换、ED2K 客户端与服务器混淆、Kad 关键词搜索/发布、防火墙检测及作为 buddy 服务。
@@ -38,6 +41,8 @@ nibiru-xtreme serve --port 6800 --secret SECRET --dir downloads --session-file s
 ```
 
 `serve` 绑定 IPv4 回环地址。`nibiru.*` 是原生契约；`aria2.*` 别名只覆盖已实现方法。`--session-file` 以稳定 GID 恢复未完成任务，恢复后处于暂停状态。带有可识别凭据的任务不会保存，需要管理器重建。旧版 `--input-file`、`--save-session` 不等同于原生持久化。
+
+`nibiru-xtreme diagnose URL --dir 文件夹` 会分别测量无磁盘的网络、磁盘以及同一链接上的引擎，并写出 `nibiru-diagnose-report.txt`。`download` 中按 Ctrl+C 即暂停，再次运行同一命令会从中断处继续。
 
 ED2K 使用 `--ed2k`、`--ed2k-server host:port`，可选 `--ed2k-nodes-file nodes.dat`。LSD 使用 `--enable-lpd [--lpd-interface IP]`。选项与限制请参阅 `--help` 和协议文档。不要将真实凭据写入终端历史。
 
@@ -67,3 +72,7 @@ cargo test --locked --all-targets --all-features
 `ci.yml` 检查 Windows、Linux、macOS，并在 Linux 上运行互操作测试。`release.yml` 构建安装包，发布需明确授权。ADM 的分发及签名清单契约仍待完成。
 
 MIT；依赖保留各自许可。参见 [LICENSE](LICENSE)、[第三方声明](THIRD_PARTY_NOTICES.md)及 [Apache 2.0](LICENSE-APACHE-2.0.txt)。
+
+## 赞助项目
+
+Nibiru Xtreme 是免费的。如果它对您有用，可以通过 PayPal 支持：[捐赠给 jv12802@gmail.com](https://www.paypal.com/cgi-bin/webscr?cmd=_donations&business=jv12802%40gmail.com&currency_code=BRL)。捐赠完全自愿，除已公开的内容外不提供任何额外权益，也不影响许可、支持或进度。

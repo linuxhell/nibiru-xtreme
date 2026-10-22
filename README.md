@@ -6,7 +6,9 @@ Motor de downloads em Rust, com contrato nativo JSON-RPC e um subconjunto de com
 
 ## Estado
 
-**0.2.0-alpha.2 é uma versão de desenvolvimento, não uma implementação multiprotocolo concluída.** O ADM continua usando seu motor atual até o Xtreme estar concluído e sua integração validada. Não há release publicada na consulta de 21/10/2026; artefatos da CI são candidatos de teste.
+**0.2.0-alpha.4 é uma pré-versão de teste, não a 1.0.** As pré-releases `v0.2.0-alpha.2` e `v0.2.0-alpha.3` estão publicadas (binários para Windows, Linux e macOS com SHA-256); a alpha.4 existe no código e ainda não foi publicada. O ADM já usa o Xtreme como motor de downloads.
+
+**Caminho para a 1.0:** a 1.0 só será publicada depois de (1) confirmar em uso real, com uma transferência ED2K incompleta de verdade, que a retomada descrita em [protocolos](docs/protocols.md) funciona; (2) teste do UPnP num roteador real; e (3) CI verde nas três plataformas. Nada disso foi feito até agora; veja o [checklist](docs/CHECKLIST-1.0.md).
 
 A auditoria do código está em andamento. “Compilado”, “testado automaticamente” e “validado em uso real” são estados diferentes. A documentação de evidências está na [matriz de capacidades](docs/CAPABILITY-MATRIX.md); limitações e formatos estão em [protocolos](docs/protocols.md).
 
@@ -23,7 +25,8 @@ A auditoria do código está em andamento. “Compilado”, “testado automatic
 | TCP/uTP e MSE/PE | Transportes com ofuscação opcional ou obrigatória; MSE não autentica o par |
 | DHT / LSD | DHT IPv4/IPv6; LSD opt-in somente IPv4 e uma interface |
 | Hole punching | BEP 55 sobre uTP; testes em loopback com restrição emulada, sem NAT real validado |
-| ED2K | Download MD4 por partes, até quatro fontes simultâneas, retomada, ofuscação entre clientes e callbacks de servidor/buddy |
+| ED2K | Download MD4 por partes, até quatro fontes simultâneas, retomada que guarda o hashset autenticado e confere o parcial antes de falar com os pares, relatório do motivo da parada, ofuscação entre clientes e callbacks de servidor/buddy |
+| UPnP | Mapeia as portas pedidas no roteador (`serve --upnp`), renova e remove ao sair; testado só contra um roteador simulado |
 | Kad2 | Sessão persistente, lookup de fontes, verificação de contatos, filtro de IP e ofuscação UDP; recursos avançados incompletos |
 
 Compartilhamento explícito, upload e fila ED2K existem como API de biblioteca; não estão expostos como serviço de compartilhamento completo pelo RPC/CLI. Faltam, entre outros: Metalink, WebDAV completo, créditos, identificação segura, AICH, source exchange, ofuscação ED2K cliente-servidor, busca/publicação Kad, teste de firewall e papel de buddy.
@@ -38,6 +41,8 @@ nibiru-xtreme serve --port 6800 --secret SEGREDO --dir downloads --session-file 
 ```
 
 `serve` usa loopback IPv4. `nibiru.*` oferece o contrato nativo; `aria2.*` mantém apenas os métodos implementados. `--session-file` restaura tarefas inacabadas pausadas com GIDs estáveis. Tarefas com credenciais reconhecidas não são persistidas; o gerenciador deve recriá-las. As opções legadas `--input-file` e `--save-session` não equivalem à persistência nativa.
+
+`nibiru-xtreme diagnose URL --dir PASTA` mede a rede sem disco, o disco e o motor no mesmo link e escreve `nibiru-diagnose-report.txt`. No `download`, Ctrl+C pausa e a mesma linha de comando continua de onde parou.
 
 Para ED2K, adicione `--ed2k`, servidores por `--ed2k-server host:porta` e, opcionalmente, `--ed2k-nodes-file nodes.dat`. LSD usa `--enable-lpd [--lpd-interface IP]`. Use `--help` e a documentação de protocolos para opções e limites. Não grave credenciais reais no histórico do terminal.
 
@@ -67,3 +72,7 @@ O código Rust próprio proíbe `unsafe`. TLS valida certificados; SFTP exige ch
 `ci.yml` valida Windows, Linux e macOS e testa interoperabilidade no Linux. `release.yml` prepara pacotes e só deve publicar mediante autorização explícita. O contrato de distribuição/manifesto assinado do ADM ainda precisa ser concluído.
 
 MIT. Dependências mantêm suas licenças; veja [LICENSE](LICENSE), [avisos de terceiros](THIRD_PARTY_NOTICES.md) e [Apache 2.0](LICENSE-APACHE-2.0.txt).
+
+## Apoie o projeto
+
+O Nibiru Xtreme é gratuito. Se ele for útil para você, pode contribuir pelo PayPal: [doar para jv12802@gmail.com](https://www.paypal.com/cgi-bin/webscr?cmd=_donations&business=jv12802%40gmail.com&currency_code=BRL). A doação é voluntária, não dá acesso a nada além do que já é público e não influencia licença, suporte ou prazos.
