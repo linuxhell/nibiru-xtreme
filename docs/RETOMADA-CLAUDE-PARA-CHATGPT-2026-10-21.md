@@ -1,5 +1,9 @@
 # Retomada: o que o Claude fez até aqui, para o ChatGPT assumir (21/10/2026)
 
+> **Atualização 22/10/2026:** o que aconteceu depois deste arquivo (retomada HTTP real, `diagnose`, UPnP,
+> integração do slot do motor no ADM, threads por site, ED2K com compartilhamento/Kad/UPnP) está em
+> `docs/RETOMADA-CLAUDE-PARA-CHATGPT-2026-10-22.md`. Este arquivo continua válido para o que ele cobre.
+
 Escrito pelo Claude a pedido do usuário (Juliano Vieira de Sá). O ChatGPT assume daqui. Depois o usuário
 volta ao Claude, que continua de onde o ChatGPT parou. **Leia tudo antes de editar.** Este arquivo é fiel
 ao que foi feito e testado; onde algo **não** foi provado, está dito. Ele não declara nada como "pronto"
