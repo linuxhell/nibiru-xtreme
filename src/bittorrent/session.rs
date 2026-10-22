@@ -77,7 +77,7 @@ pub struct Session {
 
 fn new_peer_id() -> [u8; 20] {
     let mut id = [0u8; 20];
-    id[..8].copy_from_slice(b"-NX0200-");
+    id[..8].copy_from_slice(b"-NX0201-");
     id[8..].copy_from_slice(&uuid::Uuid::new_v4().as_bytes()[..12]);
     id
 }

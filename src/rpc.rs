@@ -886,8 +886,9 @@ impl RpcServer {
                     Err(error) => {
                         task.status = "error".into();
                         task.speed = 0;
-                        task.error = Some(error.to_string());
-                        log.error("rpc.download_failed", &format!("gid={gid} error={error}"));
+                        let message = crate::engine::download_error_message(&error);
+                        task.error = Some(message.clone());
+                        log.error("rpc.download_failed", &format!("gid={gid} error={message}"));
                     }
                 }
             }

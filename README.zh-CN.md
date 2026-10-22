@@ -4,9 +4,11 @@
 
 Rust 下载引擎，提供原生 JSON-RPC 契约及部分 aria2 兼容接口。
 
+HTTPS 同时使用公共根证书和系统信任库，继续验证 TLS 证书。RPC 诊断会标识证书信任错误，不暴露 URL 或凭据。
+
 ## 状态
 
-**稳定版 0.2.0。** Apocalipse Download Manager 的原生下载引擎，提供 Windows、Linux 和 macOS 程序及 SHA-256 校验文件。
+**稳定版 0.2.1。** Apocalipse Download Manager 的原生下载引擎，提供 Windows、Linux 和 macOS 程序及 SHA-256 校验文件。
 
 ED2K 预览不依赖固定的 30–40 MB 总下载量：首个分块通过 MD4 验证后即可启用（最多 9,728,000 字节）。其他来源会优先协助完成文件开头和末尾，避免慢速来源拖延预览。MP4/AVI 可能还需要末尾索引；尚未下载的范围会等待数据，不会向播放器发送文件空洞。
 

@@ -2059,21 +2059,6 @@ pub(crate) mod tests {
     async fn the_download_ends_as_soon_as_everything_is_verified() {
         let data = two_part_data();
         let (good, _, good_server) = scripted_peer(data.clone(), vec![Plan::default()]).await;
-        // How long the good source alone takes (hashing 10 MB is slow in a debug build).
-        let baseline_dir = tempfile::tempdir().unwrap();
-        let baseline_start = std::time::Instant::now();
-        download_with_tuning(
-            &fixture_file(&data).0,
-            baseline_dir.path(),
-            std::slice::from_ref(&good),
-            options(),
-            quick(),
-            Arc::new(AtomicBool::new(false)),
-            |_| {},
-        )
-        .await
-        .unwrap();
-        let baseline = baseline_start.elapsed();
         let (silent, _, silent_server) = scripted_peer(
             data.clone(),
             vec![Plan {
@@ -2086,25 +2071,40 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut sources = vec![good];
         sources.extend(std::iter::repeat_n(silent, 12));
-        let started = std::time::Instant::now();
+        let verified_at = Arc::new(Mutex::new(None));
+        let record = verified_at.clone();
+        let mut tuning = quick();
+        tuning.metadata_timeout = Duration::from_secs(10);
         let path = download_with_tuning(
             &file,
             dir.path(),
             &sources,
             options(),
-            quick(),
+            tuning,
             Arc::new(AtomicBool::new(false)),
-            |_| {},
+            move |progress| {
+                if progress.verified == progress.total {
+                    record
+                        .lock()
+                        .unwrap()
+                        .get_or_insert_with(std::time::Instant::now);
+                }
+            },
         )
         .await
         .unwrap();
         assert_eq!(std::fs::read(path).unwrap(), data);
-        // quick() gives silent peers 700 ms each; waiting for them (or trying the rest of the list)
-        // would add well over a second to the time the good source needs on its own.
+        // Measure only the time after the payload was verified. Comparing two entire
+        // downloads made CPU/disk contention on shared runners look like a shutdown bug.
+        // Silent metadata requests are still pending for 10 seconds at this point.
+        let cleanup = verified_at
+            .lock()
+            .unwrap()
+            .expect("no verified progress")
+            .elapsed();
         assert!(
-            started.elapsed() < baseline + Duration::from_millis(450),
-            "took {:?} against {baseline:?} with only the good source",
-            started.elapsed()
+            cleanup < Duration::from_millis(450),
+            "completion cleanup took {cleanup:?}"
         );
         good_server.abort();
         silent_server.abort();

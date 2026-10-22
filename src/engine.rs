@@ -28,6 +28,50 @@ use crate::{bittorrent::limiter::RateLimiter, logging::LogSink, storage};
 
 mod adaptive;
 
+/// Useful transport diagnostics without copying nested URLs, proxy credentials or headers.
+pub(crate) fn download_error_message(error: &anyhow::Error) -> String {
+    let causes = error
+        .chain()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    let detail = if causes.contains("unknownissuer") {
+        Some("TLS certificate validation failed (untrusted issuer)")
+    } else if causes.contains("invalid peer certificate")
+        || causes.contains("certificate verify failed")
+    {
+        Some("TLS certificate validation failed")
+    } else if let Some(request) = error.downcast_ref::<reqwest::Error>() {
+        if request.is_timeout() {
+            Some("request timed out")
+        } else if request.is_connect() {
+            Some("connection failed")
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    detail.map_or_else(|| error.to_string(), |detail| format!("{error}: {detail}"))
+}
+
+#[cfg(test)]
+mod transport_diagnostic_tests {
+    #[test]
+    fn certificate_diagnostics_keep_the_cause_without_nested_secrets() {
+        let error = anyhow::anyhow!("invalid peer certificate: UnknownIssuer https://user:secret@example.test/?token=private")
+            .context("HTTP request failed");
+        let message = super::download_error_message(&error);
+        assert_eq!(
+            message,
+            "HTTP request failed: TLS certificate validation failed (untrusted issuer)"
+        );
+        assert!(!message.contains("secret"));
+        assert!(!message.contains("private"));
+    }
+}
+
 const MIN_SEGMENTED_SIZE: u64 = 8 * 1024 * 1024;
 const RANGE_CHUNK_SIZE: u64 = 4 * 1024 * 1024;
 const MAX_HTTP_RANGE_SIZE: u64 = 32 * 1024 * 1024;

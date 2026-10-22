@@ -4,9 +4,11 @@
 
 Motor de downloads em Rust, com contrato nativo JSON-RPC e um subconjunto de compatibilidade com aria2.
 
+O HTTPS usa as raízes públicas e os certificados confiáveis do sistema, mantendo a validação TLS. Erros RPC distinguem falhas de confiança no certificado sem expor URLs ou credenciais.
+
 ## Estado
 
-**Versão estável 0.2.0.** Motor nativo do Apocalipse Download Manager, distribuído para Windows, Linux e macOS com arquivos SHA-256.
+**Versão estável 0.2.1.** Motor nativo do Apocalipse Download Manager, distribuído para Windows, Linux e macOS com arquivos SHA-256.
 
 A prévia ED2K não depende de chegar a 30 ou 40 MB no total: o ADM libera o botão quando a primeira parte está autenticada por MD4 (até 9.728.000 bytes). Outros peers ajudam a terminar o início e o fim do arquivo antes das partes do meio, evitando que um peer lento retenha a prévia. MP4/AVI podem precisar também do índice no fim; trechos ainda ausentes aguardam dados, sem fornecer buracos do arquivo ao player.
 

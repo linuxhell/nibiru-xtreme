@@ -1,4 +1,8 @@
-# Nibiru Xtreme 0.2.0
+# Nibiru Xtreme 0.2.1
+
+- HTTPS now includes the operating system trust store alongside public roots, retaining certificate and hostname validation. This fixes downloads when the required CA is trusted by the OS.
+- RPC errors report TLS certificate trust failures instead of only a generic HTTP request failure; nested secrets remain hidden.
+- The same NirSoft URLs reported by the user were downloaded through RPC and their ZIP CRCs verified (98,007 / 2,985 / 2,867 bytes).
 
 - ED2K preview scheduling prioritizes verified header and tail parts, with cooperative requests across up to eight peers. Missing source parts remain pending with explicit diagnostics.
 - HTTP destination locks are released when transfers finish. Resume checkpoints are retained where required.

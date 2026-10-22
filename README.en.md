@@ -4,9 +4,11 @@
 
 Rust download engine with a native JSON-RPC contract and an aria2 compatibility subset.
 
+HTTPS uses public roots together with the operating system trust store while keeping TLS validation enabled. RPC diagnostics identify certificate trust failures without exposing URLs or credentials.
+
 ## Status
 
-**Stable version 0.2.0.** The native engine for Apocalipse Download Manager, packaged for Windows, Linux and macOS with SHA-256 files.
+**Stable version 0.2.1.** The native engine for Apocalipse Download Manager, packaged for Windows, Linux and macOS with SHA-256 files.
 
 ED2K preview does not require a fixed 30–40 MB total: ADM enables it once the first MD4-authenticated part is available (up to 9,728,000 bytes). Other peers help finish the header and tail before middle parts so a slow source cannot monopolize preview data. MP4/AVI may also need their tail index; missing ranges wait for data rather than exposing disk holes.
 
