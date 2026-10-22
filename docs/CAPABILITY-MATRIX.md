@@ -93,3 +93,25 @@ Limites do ambiente que afetam a leitura:
 3. ~~Retomada em FTP/FTPS/SFTP~~ (feito; ver `docs/protocols.md`).
 4. ~~LSD e hole punching~~ (feitos, com interop libtorrent; falta NAT real).
 5. CI do Xtreme em Windows e macOS com IPv6; desempenho contra o aria2-ultra que o ADM usa.
+
+## Atualização de biblioteca ED2K para o ADM — 22/10/2026
+
+O commit `15d2537` acrescenta `TransferProgress.verified_parts`: mapa das partes
+verificadas por hash e gravadas, obtido do estado desta execução. O total de bytes
+verificados não deve ser convertido em um prefixo contíguo. O lock de escritor foi
+separado dos dados para permitir leitura de partes verificadas no Windows;
+nesse sistema ele usa delete-on-close. Unix conserva o arquivo de coordenação
+para evitar corrida de unlink entre escritores.
+
+O ADM `claude/ed2k-share` usa esse mapa para a ação **Visualizar** do ED2K no player
+configurado, por um servidor HTTP privado com HEAD/Range e espera de até 90 s por
+partes ausentes. Esse servidor pertence ao ADM: `nibiru.streamUrl` continua sendo
+o streaming de torrent. Não há priorização ED2K por seek; certos contêineres
+precisam das partes finais para começar. Após reinício, o parcial é re-hashado
+antes de autorizar a prévia.
+
+Evidência: 7 testes locais de transferência ED2K passaram, incluindo fixture que
+abre e compara as partes indicadas pelo progresso com o escritor ainda ativo.
+A suíte do Windows na CI `39706594575` também passou. No ADM, 3 testes do módulo
+real cobrem Range, token/Host e espera por verificação. Reprodução pelo player do
+usuário e desempenho público da prévia continuam pendentes do teste do aplicativo.
