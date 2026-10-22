@@ -21,8 +21,8 @@ pub use peer::Tuning;
 pub use server::{Buddy, FileSource, OfferedFile, SearchResult, ServerConnection};
 pub use share::{CachedShare, RescanReport, ShareRegistry, SharedFileInfo, hash_shared_file};
 pub use transfer::{
-    StallReason, Stalled, TransferOptions, TransferProgress, TransferStage, download_from_sources,
-    download_with_options, download_with_tuning,
+    EventSink, StallReason, Stalled, TransferEvent, TransferOptions, TransferProgress,
+    TransferStage, download_from_sources, download_with_options, download_with_tuning,
 };
 pub use upload::{
     Admission, FileUploadStats, UploadClientInfo, UploadConfig, UploadManager, UploadSnapshot,

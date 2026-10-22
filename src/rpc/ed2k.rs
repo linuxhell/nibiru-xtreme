@@ -437,6 +437,7 @@ impl Ed2kService {
                 client_id,
                 callbacks,
                 obfuscation,
+                events: None,
             },
             cancel.clone(),
             |p: TransferProgress| {

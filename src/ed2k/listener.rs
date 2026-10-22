@@ -547,6 +547,7 @@ mod tests {
             identity: [3; 16],
             client_id: connection.client_id,
             callbacks: Some(CallbackClient::new(connection, listener.callbacks())),
+            events: None,
         };
         let directory = tempfile::tempdir().unwrap();
         let source = FileSource {
@@ -642,6 +643,7 @@ mod tests {
                 kad.clone(),
                 port,
             )),
+            events: None,
         };
         let source = FileSource {
             client_id: 1,

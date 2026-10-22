@@ -352,6 +352,7 @@ async fn fetch(
             client_id: 0x0100007f,
             callbacks: None,
             obfuscation: mode,
+            events: None,
         },
         Arc::new(AtomicBool::new(false)),
         |_| {},

@@ -2,8 +2,8 @@ use super::{
     FileLink, FileSource,
     file::{PART_SIZE, digest},
     peer::{
-        HandshakeTimedOut, KnownHashes, MetadataTimedOut, Peer, PeerLacksFile, QueueWaitTimedOut,
-        Tuning, check_cancel,
+        HandshakeTimedOut, KnownHashes, MetadataTimedOut, PartSuperseded, Peer, PeerLacksFile,
+        QueueWaitTimedOut, Tuning, check_cancel,
     },
 };
 use anyhow::{Context, Result, anyhow, bail};
@@ -36,12 +36,80 @@ pub struct TransferProgress {
     pub total: u64,
     pub peer: Option<String>,
     pub queue_rank: Option<u32>,
+    /// Bytes received for parts that are still being fetched (not verified yet, so not in
+    /// `verified`). Without it a download looks frozen while a slow peer sends one part.
+    #[serde(default)]
+    pub in_flight: u64,
 }
+
+/// What the transfer is doing with each peer, for a log that can explain a stall.
+#[derive(Debug, Clone)]
+pub enum TransferEvent {
+    Connecting {
+        peer: String,
+    },
+    PeerFailed {
+        peer: String,
+        kind: &'static str,
+        error: String,
+    },
+    PeerReady {
+        peer: String,
+        offers: usize,
+        wanted: usize,
+    },
+    PeerHasNothingNew {
+        peer: String,
+    },
+    Queued {
+        peer: String,
+        rank: Option<u32>,
+    },
+    QueueFailed {
+        peer: String,
+        kind: &'static str,
+        error: String,
+    },
+    SlotGranted {
+        peer: String,
+        waited_ms: u64,
+    },
+    PartStarted {
+        peer: String,
+        index: usize,
+        shadow: bool,
+    },
+    PartSlow {
+        peer: String,
+        index: usize,
+        received: usize,
+        elapsed_ms: u64,
+    },
+    PartDone {
+        peer: String,
+        index: usize,
+        bytes: usize,
+        elapsed_ms: u64,
+    },
+    PartFailed {
+        peer: String,
+        index: usize,
+        error: String,
+        elapsed_ms: u64,
+    },
+    PartSuperseded {
+        peer: String,
+        index: usize,
+    },
+}
+pub type EventSink = Arc<dyn Fn(TransferEvent) + Send + Sync>;
+
 pub struct TransferOptions {
     pub identity: [u8; 16],
     pub client_id: u32,
     pub callbacks: Option<super::CallbackClient>,
     pub obfuscation: super::obfuscation::Obfuscation,
+    pub events: Option<EventSink>,
 }
 
 /// The dominant reason a transfer could not finish in this attempt.
@@ -145,6 +213,7 @@ pub async fn download_from_sources(
             client_id,
             callbacks: None,
             obfuscation: super::obfuscation::Obfuscation::Prefer,
+            events: None,
         },
         cancel,
         progress,
@@ -257,6 +326,9 @@ pub async fn download_with_tuning(
         shared: Mutex::new(Shared {
             complete: vec![false; file.part_count()],
             claimed: vec![false; file.part_count()],
+            claimed_at: vec![None; file.part_count()],
+            shadows: vec![0; file.part_count()],
+            in_flight: vec![0; file.part_count()],
             verified: 0,
             scanned: false,
             hashes: saved_hashes.map(Arc::new),
@@ -339,6 +411,7 @@ pub async fn download_with_tuning(
         total: file.size,
         peer: None,
         queue_rank: None,
+        in_flight: 0,
     });
     Ok(target)
 }
@@ -362,6 +435,11 @@ struct Shared {
     complete: Vec<bool>,
     /// Parts a worker is fetching right now; no other peer is asked for them.
     claimed: Vec<bool>,
+    /// When the part was claimed, and how many other peers also fetch it (reta final).
+    claimed_at: Vec<Option<std::time::Instant>>,
+    shadows: Vec<u8>,
+    /// Bytes of each part received so far, before it is verified.
+    in_flight: Vec<u64>,
     verified: u64,
     scanned: bool,
     /// A hashset already authenticated against the link: from disk or from the first peer that sent it.
@@ -422,9 +500,16 @@ impl Context_<'_> {
     }
     fn emit(&self, stage: TransferStage, peer: &Option<String>, queue_rank: Option<u32>) {
         let mut progress = self.progress.lock().unwrap();
-        let (verified, verified_parts) = {
+        let (verified, verified_parts, in_flight) = {
             let shared = self.shared.lock().unwrap();
-            (shared.verified, shared.complete.clone())
+            let in_flight = shared
+                .in_flight
+                .iter()
+                .zip(&shared.complete)
+                .filter(|(_, done)| !**done)
+                .map(|(bytes, _)| *bytes)
+                .sum();
+            (shared.verified, shared.complete.clone(), in_flight)
         };
         progress(TransferProgress {
             stage,
@@ -433,6 +518,7 @@ impl Context_<'_> {
             total: self.file.size,
             peer: peer.clone(),
             queue_rank,
+            in_flight,
         });
     }
     fn soft_error(&self, error: &anyhow::Error) {
@@ -506,16 +592,44 @@ impl Context_<'_> {
     fn note(&self, change: impl FnOnce(&mut Outcomes)) {
         change(&mut self.shared.lock().unwrap().outcomes);
     }
-    fn claim(&self, peer: &Peer) -> Option<usize> {
+    /// The next part for this peer: first one nobody is fetching; failing that, in the last stretch,
+    /// a part another peer has been fetching for a while (both race, the first to finish wins).
+    fn claim(&self, peer: &Peer) -> Option<(usize, bool)> {
         let mut shared = self.shared.lock().unwrap();
-        let index = preview_order(shared.complete.len())
-            .find(|i| !shared.complete[*i] && !shared.claimed[*i] && peer.has_part(*i))?;
-        shared.claimed[index] = true;
-        Some(index)
+        let free = preview_order(shared.complete.len())
+            .find(|i| !shared.complete[*i] && !shared.claimed[*i] && peer.has_part(*i));
+        if let Some(index) = free {
+            shared.claimed[index] = true;
+            shared.claimed_at[index] = Some(std::time::Instant::now());
+            shared.in_flight[index] = 0;
+            return Some((index, false));
+        }
+        let shadow = (0..shared.complete.len()).find(|i| {
+            !shared.complete[*i]
+                && shared.claimed[*i]
+                && shared.shadows[*i] == 0
+                && peer.has_part(*i)
+                && shared.claimed_at[*i].is_some_and(|at| at.elapsed() >= self.tuning.endgame_after)
+        })?;
+        shared.shadows[shadow] += 1;
+        Some((shadow, true))
     }
-    fn release(&self, index: usize) {
-        self.shared.lock().unwrap().claimed[index] = false;
+    fn release(&self, index: usize, shadow: bool) {
+        let mut shared = self.shared.lock().unwrap();
+        if shadow {
+            shared.shadows[index] = shared.shadows[index].saturating_sub(1);
+        } else {
+            shared.claimed[index] = false;
+            shared.claimed_at[index] = None;
+            shared.in_flight[index] = 0;
+        }
+        drop(shared);
         self.changed.notify_waiters();
+    }
+    fn event(&self, event: TransferEvent) {
+        if let Some(sink) = &self.options.events {
+            sink(event);
+        }
     }
     fn blocked_by_others(&self, peer: &Peer) -> bool {
         let shared = self.shared.lock().unwrap();
@@ -542,6 +656,10 @@ impl Context_<'_> {
             .map(|h| format!("{h}:{}", source.port))
             .or_else(|| Some(format!("ID {}", source.client_id)));
         self.emit(TransferStage::Connecting, &host, None);
+        let label = host.clone().unwrap_or_default();
+        self.event(TransferEvent::Connecting {
+            peer: label.clone(),
+        });
         let known: KnownHashes = self.shared.lock().unwrap().hashes.clone();
         let had_known = known.is_some();
         let connected = if source.requires_callback {
@@ -571,6 +689,19 @@ impl Context_<'_> {
             Err(error) => {
                 self.soft_error(&error);
                 let metadata_timeout = error.downcast_ref::<MetadataTimedOut>().is_some();
+                self.event(TransferEvent::PeerFailed {
+                    peer: label.clone(),
+                    kind: if metadata_timeout {
+                        "metadata_timeout"
+                    } else if error.downcast_ref::<PeerLacksFile>().is_some() {
+                        "refused"
+                    } else if error.downcast_ref::<HandshakeTimedOut>().is_some() {
+                        "handshake_timeout"
+                    } else {
+                        "unreachable"
+                    },
+                    error: format!("{error:#}"),
+                });
                 self.note(|o| {
                     if metadata_timeout {
                         o.metadata_timeouts += 1;
@@ -615,26 +746,58 @@ impl Context_<'_> {
         if self.all_complete() {
             return Ok((0, false));
         }
-        if !self
-            .shared
-            .lock()
-            .unwrap()
-            .complete
-            .iter()
-            .enumerate()
-            .any(|(i, done)| !*done && peer.has_part(i))
-        {
+        let label = host.clone().unwrap_or_default();
+        let (offers, wanted) = {
+            let shared = self.shared.lock().unwrap();
+            let offers = (0..shared.complete.len())
+                .filter(|i| peer.has_part(*i))
+                .count();
+            let wanted = shared
+                .complete
+                .iter()
+                .enumerate()
+                .filter(|(i, done)| !**done && peer.has_part(*i))
+                .count();
+            (offers, wanted)
+        };
+        if wanted == 0 {
+            self.event(TransferEvent::PeerHasNothingNew {
+                peer: label.clone(),
+            });
             self.note(|o| o.lacking_parts += 1);
             return Ok((0, false));
         }
+        self.event(TransferEvent::PeerReady {
+            peer: label.clone(),
+            offers,
+            wanted,
+        });
         self.emit(TransferStage::Queued, host, None);
+        let queued_at = std::time::Instant::now();
+        let mut last_rank = None;
         if let Err(error) = peer
             .acquire_slot_for(self.tuning.queue_wait, |rank| {
+                if last_rank != Some(rank) {
+                    last_rank = Some(rank);
+                    self.event(TransferEvent::Queued {
+                        peer: label.clone(),
+                        rank: Some(rank),
+                    });
+                }
                 self.emit(TransferStage::Queued, host, Some(rank))
             })
             .await
         {
             self.soft_error(&error);
+            self.event(TransferEvent::QueueFailed {
+                peer: label.clone(),
+                kind: if error.downcast_ref::<QueueWaitTimedOut>().is_some() {
+                    "queue_timeout"
+                } else {
+                    "refused"
+                },
+                error: format!("{error:#}"),
+            });
             self.note(|o| {
                 if error.downcast_ref::<QueueWaitTimedOut>().is_some() {
                     o.queue_timeouts += 1;
@@ -644,29 +807,82 @@ impl Context_<'_> {
             });
             return Ok((0, false));
         }
+        self.event(TransferEvent::SlotGranted {
+            peer: label.clone(),
+            waited_ms: queued_at.elapsed().as_millis() as u64,
+        });
         let mut fetched = 0;
         loop {
             let wake = self.changed.notified();
             tokio::pin!(wake);
             wake.as_mut().enable();
-            let Some(index) = self.claim(&peer) else {
+            let Some((index, shadow)) = self.claim(&peer) else {
                 if self.all_complete() || !self.blocked_by_others(&peer) {
                     break;
                 }
-                // Parts this peer has are being fetched elsewhere: if that fails they come back.
+                // Parts this peer has are being fetched elsewhere: if that fails they come back,
+                // and after a while this peer helps with them.
                 let _ = tokio::time::timeout(Duration::from_millis(250), wake).await;
                 check_cancel(self.cancel)?;
                 continue;
             };
             if let Err(error) = check_cancel(self.cancel) {
-                self.release(index);
+                self.release(index, shadow);
                 return Err(error);
             }
             self.emit(TransferStage::Downloading, host, None);
-            let bytes = match peer.part(index).await {
+            self.event(TransferEvent::PartStarted {
+                peer: label.clone(),
+                index,
+                shadow,
+            });
+            let started = std::time::Instant::now();
+            let mut flagged_slow = false;
+            let result = peer
+                .part_with(index, &mut |received| {
+                    let elapsed = started.elapsed();
+                    {
+                        let mut shared = self.shared.lock().unwrap();
+                        if shared.complete[index] {
+                            return false;
+                        }
+                        shared.in_flight[index] = shared.in_flight[index].max(received as u64);
+                    }
+                    if !flagged_slow
+                        && elapsed >= Duration::from_secs(20)
+                        && (received as f64) / elapsed.as_secs_f64() < 16_384.0
+                    {
+                        flagged_slow = true;
+                        self.event(TransferEvent::PartSlow {
+                            peer: label.clone(),
+                            index,
+                            received,
+                            elapsed_ms: elapsed.as_millis() as u64,
+                        });
+                    }
+                    self.emit(TransferStage::Downloading, host, None);
+                    true
+                })
+                .await;
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            let bytes = match result {
                 Ok(bytes) => bytes,
+                Err(error) if error.downcast_ref::<PartSuperseded>().is_some() => {
+                    self.release(index, shadow);
+                    self.event(TransferEvent::PartSuperseded {
+                        peer: label.clone(),
+                        index,
+                    });
+                    continue;
+                }
                 Err(error) => {
-                    self.release(index);
+                    self.release(index, shadow);
+                    self.event(TransferEvent::PartFailed {
+                        peer: label.clone(),
+                        index,
+                        error: format!("{error:#}"),
+                        elapsed_ms,
+                    });
                     self.soft_error(&error);
                     self.note(|o| o.part_failures += 1);
                     break;
@@ -684,17 +900,30 @@ impl Context_<'_> {
             }
             .await;
             if let Err(error) = written {
-                self.release(index);
+                self.release(index, shadow);
                 return Err(error.into());
             }
-            {
+            let first = {
                 let mut shared = self.shared.lock().unwrap();
-                shared.complete[index] = true;
+                let first = !shared.complete[index];
+                if first {
+                    shared.complete[index] = true;
+                    shared.verified += bytes.len() as u64;
+                }
                 shared.claimed[index] = false;
-                shared.verified += bytes.len() as u64;
-            }
+                shared.in_flight[index] = 0;
+                first
+            };
             self.changed.notify_waiters();
-            fetched += 1;
+            if first {
+                fetched += 1;
+                self.event(TransferEvent::PartDone {
+                    peer: label.clone(),
+                    index,
+                    bytes: bytes.len(),
+                    elapsed_ms,
+                });
+            }
             self.emit(TransferStage::Downloading, host, None);
         }
         Ok((fetched, false))
@@ -1193,6 +1422,8 @@ pub(crate) mod tests {
         skip_hashset: bool,
         /// Parts it says it has (all when `None`).
         parts: Option<Vec<usize>>,
+        /// Pause before each block it sends (a slow peer).
+        block_delay: Duration,
     }
 
     /// A peer that accepts any number of connections; the n-th one follows plan n (the last repeats).
@@ -1273,6 +1504,7 @@ pub(crate) mod tests {
                                 a.extend((from as u32).to_le_bytes());
                                 a.extend((end as u32).to_le_bytes());
                                 a.extend(&data[from..end]);
+                                tokio::time::sleep(plan.block_delay).await;
                                 peer::send(&mut stream, 0xe3, 0x46, &a).await
                             }
                             _ => Ok(()),
@@ -1299,10 +1531,69 @@ pub(crate) mod tests {
         )
     }
 
+    #[tokio::test]
+    async fn an_idle_peer_helps_with_the_last_parts_and_the_slow_one_stops() {
+        let data = two_part_data();
+        // The first connection is slow (about 5 s for part 0 alone), the second is fast.
+        let (source, _connections, server) = scripted_peer(
+            data.clone(),
+            vec![
+                Plan {
+                    block_delay: Duration::from_millis(100),
+                    ..Plan::default()
+                },
+                Plan::default(),
+            ],
+        )
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let (file, _) = fixture_file(&data);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let seen = events.clone();
+        let mut opts = options();
+        opts.events = Some(Arc::new(move |event| seen.lock().unwrap().push(event)));
+        let started = std::time::Instant::now();
+        let mut in_flight = 0;
+        let path = download_with_tuning(
+            &file,
+            dir.path(),
+            &[source.clone(), source],
+            opts,
+            quick(),
+            Arc::new(AtomicBool::new(false)),
+            |progress| in_flight = in_flight.max(progress.in_flight),
+        )
+        .await
+        .unwrap();
+        assert!(
+            in_flight > 0,
+            "bytes of a part in progress were never reported"
+        );
+        assert_eq!(std::fs::read(path).unwrap(), data);
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "took {:?}: the fast peer should have finished the slow peer's part",
+            started.elapsed()
+        );
+        let events = events.lock().unwrap();
+        let done = events
+            .iter()
+            .filter(|e| matches!(e, TransferEvent::PartDone { .. }))
+            .count();
+        assert_eq!(done, 2, "{events:?}");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, TransferEvent::PartStarted { .. }))
+        );
+        server.abort();
+    }
+
     fn quick() -> Tuning {
         Tuning {
             metadata_timeout: Duration::from_millis(700),
             queue_wait: Duration::from_secs(5),
+            endgame_after: Duration::from_millis(200),
         }
     }
     fn options() -> TransferOptions {
@@ -1311,6 +1602,7 @@ pub(crate) mod tests {
             client_id: 123,
             callbacks: None,
             obfuscation: super::super::obfuscation::Obfuscation::Disabled,
+            events: None,
         }
     }
     fn two_part_data() -> Vec<u8> {

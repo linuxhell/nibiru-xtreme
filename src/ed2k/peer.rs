@@ -29,12 +29,15 @@ pub struct Tuning {
     pub metadata_timeout: Duration,
     /// Waiting in a peer's upload queue for a slot.
     pub queue_wait: Duration,
+    /// A part another peer has been fetching this long may be fetched by an idle peer too.
+    pub endgame_after: Duration,
 }
 impl Default for Tuning {
     fn default() -> Self {
         Self {
             metadata_timeout: Duration::from_secs(30),
             queue_wait: Duration::from_secs(300),
+            endgame_after: Duration::from_secs(30),
         }
     }
 }
@@ -46,6 +49,14 @@ pub struct HandshakeTimedOut;
 impl std::fmt::Display for HandshakeTimedOut {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("ED2K peer handshake timed out")
+    }
+}
+/// Another peer finished the part first, so this transfer stopped on purpose.
+#[derive(Debug)]
+pub struct PartSuperseded;
+impl std::fmt::Display for PartSuperseded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("part already completed by another peer")
     }
 }
 #[derive(Debug)]
@@ -484,7 +495,19 @@ impl Peer {
             }
         }
     }
+    /// The whole part, verified. Kept for callers that do not need progress.
+    #[cfg(test)]
     pub async fn part(&mut self, index: usize) -> Result<Vec<u8>> {
+        self.part_with(index, &mut |_| true).await
+    }
+
+    /// The whole part, verified. `on_block` is told how many bytes have arrived after each block
+    /// and stops the transfer by returning `false` (the part was finished by another peer).
+    pub async fn part_with(
+        &mut self,
+        index: usize,
+        on_block: &mut (dyn FnMut(usize) -> bool + Send),
+    ) -> Result<Vec<u8>> {
         check_cancel(&self.cancel)?;
         if !self.has_part(index) {
             bail!("peer does not have this part");
@@ -593,6 +616,9 @@ impl Peer {
                 }
             }
             part.extend(block);
+            if !on_block(part.len()) {
+                return Err(anyhow::anyhow!(PartSuperseded));
+            }
         }
         if super::file::digest(&part) != self.hashes[index] {
             bail!("ED2K part failed MD4 verification");
