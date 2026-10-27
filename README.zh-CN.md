@@ -2,13 +2,15 @@
 
 # Nibiru Xtreme
 
+0.2.2 修复截断后以空格或句点结尾的种子名称，同时限制 Unicode 名称的字节数和 UTF-16 长度，区分大小写不敏感的文件别名，并拒绝文件与目录冲突。ED2K 和 HTTP RPC 拒绝非便携名称，保留合法的 `$` 和单引号。Web 种子仍使用网络中的原始名称。参见[10 月 27 日审计](docs/AUDIT-2026-10-27.md)。
+
 Rust 下载引擎，提供原生 JSON-RPC 契约及部分 aria2 兼容接口。
 
 HTTPS 同时使用公共根证书和系统信任库，继续验证 TLS 证书。RPC 诊断会标识证书信任错误，不暴露 URL 或凭据。
 
 ## 状态
 
-**稳定版 0.2.1。** Apocalipse Download Manager 的原生下载引擎，提供 Windows、Linux 和 macOS 程序及 SHA-256 校验文件。
+**稳定版 0.2.2。** Apocalipse Download Manager 的原生下载引擎，提供 Windows、Linux 和 macOS 程序及 SHA-256 校验文件。
 
 ED2K 预览不依赖固定的 30–40 MB 总下载量：首个分块通过 MD4 验证后即可启用（最多 9,728,000 字节）。其他来源会优先协助完成文件开头和末尾，避免慢速来源拖延预览。MP4/AVI 可能还需要末尾索引；尚未下载的范围会等待数据，不会向播放器发送文件空洞。
 

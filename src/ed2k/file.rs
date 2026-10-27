@@ -24,18 +24,7 @@ impl FileLink {
         let name = percent_encoding::percent_decode_str(fields[2])
             .decode_utf8()?
             .into_owned();
-        let reserved = name.split('.').next().unwrap_or("").to_ascii_uppercase();
-        if name.is_empty()
-            || name.len() > 240
-            || name.ends_with([' ', '.'])
-            || name
-                .chars()
-                .any(|c| c.is_control() || "<>:\"/\\|?*".contains(c))
-            || ["CON", "PRN", "AUX", "NUL"].contains(&reserved.as_str())
-            || (reserved.len() == 4
-                && (reserved.starts_with("COM") || reserved.starts_with("LPT"))
-                && matches!(reserved.as_bytes()[3], b'1'..=b'9'))
-        {
+        if name.len() > 240 || !crate::file_names::portable_component(&name) {
             bail!("ED2K filename is not a safe single filename");
         }
         if fields[3].is_empty() || !fields[3].bytes().all(|b| b.is_ascii_digit()) {
@@ -113,6 +102,11 @@ mod tests {
             "a%00b",
             "a%3ab",
             "a.",
+            "CON%20.txt",
+            "COM%C2%B9.txt",
+            "LPT%C2%B2",
+            "CONOUT%24.txt",
+            "movie%C2%A0",
             "%FF",
         ] {
             assert!(

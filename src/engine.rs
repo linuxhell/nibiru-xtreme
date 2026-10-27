@@ -1686,13 +1686,7 @@ fn redact_url(url: &Url) -> String {
 }
 
 pub fn safe_output_name(value: &str) -> bool {
-    let p = Path::new(value);
-    p.components().count() == 1
-        && !value.is_empty()
-        && value != "."
-        && value != ".."
-        && !value.contains('/')
-        && !value.contains('\\')
+    crate::file_names::portable_component(value)
 }
 
 #[cfg(test)]
@@ -1759,6 +1753,19 @@ mod tests {
     #[test]
     fn rejects_traversal_names() {
         assert!(safe_output_name("file.iso"));
+        assert!(safe_output_name("$ O'Brien's Movie.mkv"));
+        for name in [
+            "movie ",
+            "movie.",
+            "movie\u{a0}",
+            "CON.mp4",
+            "CON .mp4",
+            "LPT¹.txt",
+            "clip.mkv:stream",
+            "bad\0name",
+        ] {
+            assert!(!safe_output_name(name), "{name:?}");
+        }
         assert!(!safe_output_name("../file.iso"));
         assert!(!safe_output_name("dir/file.iso"));
         assert!(!safe_output_name("dir\\file.iso"));

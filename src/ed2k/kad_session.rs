@@ -1703,6 +1703,9 @@ mod tests {
         .await
         .unwrap();
         session.set_obfuscation(false); // this test's fixture speaks plain Kad
+        // Direct Inner calls must hold the foreground lock, as the public
+        // lookup API does; otherwise maintenance can consume the fixture reply.
+        let _foreground = session.inner.lookup_lock.lock().await;
         let inner = session.inner.clone();
         let work = tokio::spawn(async move { inner.ensure_verified(&peer).await });
 

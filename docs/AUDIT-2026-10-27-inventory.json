@@ -1,0 +1,485 @@
+{
+  "scope": "Static inventory, compiler linting and test coverage; manual review focused on naming, storage, RPC, ED2K, web seeds and failures observed in tests. This inventory is not a claim that every line was manually verified.",
+  "files": [
+    {
+      "path": ".cargo/config.toml",
+      "lines": 3,
+      "sha256": "42b8115e8db82fc7e485d9c1fa2dd8632867eb660fb4aa09007f2afafb9271d9"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "lines": 79,
+      "sha256": "59dcfbb740430188cdd4956c8ef58017e66d86a886f88f677816182f64e980fd"
+    },
+    {
+      "path": ".github/workflows/release.yml",
+      "lines": 72,
+      "sha256": "6ac0eca28eedc054c87dc21081c498daded23b22a972a18c35b71ab81a789515"
+    },
+    {
+      "path": "Cargo.toml",
+      "lines": 64,
+      "sha256": "5db1b3abd40ca07cb9e30ed65aa7ce3d4781a3e1aa8b77422b965403f364d45c"
+    },
+    {
+      "path": "benchmarks/adaptive-overload-2026-10-19.json",
+      "lines": 139,
+      "sha256": "dde895a57b7a7d5ad0ddc7f35c1588a40dc4c31e5e4ca1a0e3aee758c4cfc405"
+    },
+    {
+      "path": "benchmarks/adaptive-reference-2026-10-19.json",
+      "lines": 131,
+      "sha256": "e4156bb62f6f58d20b1e4337921cbb07ede1eda60289ac6f69bf1dfaa2deafa6"
+    },
+    {
+      "path": "benchmarks/adaptive-stable-2026-10-19.json",
+      "lines": 142,
+      "sha256": "322b05de57f57634767f1bd6c445867954e5493374553e32eb5c29e46ff1eb5a"
+    },
+    {
+      "path": "benchmarks/controlled_http.py",
+      "lines": 277,
+      "sha256": "92fd68e039f96e8feefa2ca4f60bfd3f4e0021178d661cede352ff635982f55b"
+    },
+    {
+      "path": "benchmarks/finalization-experiment-2026-10-19.json",
+      "lines": 211,
+      "sha256": "b35ddf5b32fb1e28912d341e857d94f386e9599a5c87fb678cf3dafd06410ed9"
+    },
+    {
+      "path": "benchmarks/native-checkpoint-experiment-2026-10-19.json",
+      "lines": 164,
+      "sha256": "a829fec4db9cfe21fe69199a1a4a6936b32535af12b606d49b3a6acdd3b3af34"
+    },
+    {
+      "path": "examples/inspect_lists.rs",
+      "lines": 15,
+      "sha256": "8311f4c3da7c319c3f04b4e3b343fcd6072a9d6ea74f227252faa7417d2c8f38"
+    },
+    {
+      "path": "rust-toolchain.toml",
+      "lines": 4,
+      "sha256": "0506c53cddc8435a55513d5f662c302ff6eb4035f012d5d5e5a47e96a7f40420"
+    },
+    {
+      "path": "src/bittorrent/bencode.rs",
+      "lines": 321,
+      "sha256": "173e14d4d48a7307a22bb2248ec070fb61c0f722033c4646464d572d45b6b73e"
+    },
+    {
+      "path": "src/bittorrent/bitfield.rs",
+      "lines": 119,
+      "sha256": "8ed09d2eb3692a291aafcd2d75dc0c15ada9aecb3fdf23769b30b074b5ada8a4"
+    },
+    {
+      "path": "src/bittorrent/dht.rs",
+      "lines": 954,
+      "sha256": "12b0c0e5f8feb543747bfadfb025fa4f420e0e3055aa651054970dc4d032684a"
+    },
+    {
+      "path": "src/bittorrent/dht_security.rs",
+      "lines": 94,
+      "sha256": "993ab11dca3f3b8739a787d4f8d9c0d54580dfaadd20db91aa5ee90750d3d7ae"
+    },
+    {
+      "path": "src/bittorrent/limiter.rs",
+      "lines": 172,
+      "sha256": "727a2ba0a75bada073b248c2a45065184eba75846ebc2bd0ced7009133745eb2"
+    },
+    {
+      "path": "src/bittorrent/lsd.rs",
+      "lines": 274,
+      "sha256": "9a0717c37b4dd2c6aed64d33eabd7896d617f425dfc5eb3c02d9983a47f3f648"
+    },
+    {
+      "path": "src/bittorrent/magnet.rs",
+      "lines": 263,
+      "sha256": "d06861349355d58a71824b31347182bf50fc6c68787f77b677ddd6a0ba226f20"
+    },
+    {
+      "path": "src/bittorrent/message.rs",
+      "lines": 1017,
+      "sha256": "440f22ad88787d42e4a6e35dd01eb2dd6f95a7ef9c8bd50bc0b6ce2ea3cef5bd"
+    },
+    {
+      "path": "src/bittorrent/metainfo.rs",
+      "lines": 710,
+      "sha256": "8c69de620b98a1fae775fb72321b00467d252f461e42dcfe7b71ef1f7d29961c"
+    },
+    {
+      "path": "src/bittorrent/mod.rs",
+      "lines": 21,
+      "sha256": "11984211a483d8ea221da2dbeb4e014940038fd6b1d9c321eb52a782ba88d11f"
+    },
+    {
+      "path": "src/bittorrent/mse.rs",
+      "lines": 387,
+      "sha256": "0df22811793ab594222a922587fdd8e559febe1b42b7ae4fde83a075ce24f402"
+    },
+    {
+      "path": "src/bittorrent/peer.rs",
+      "lines": 1449,
+      "sha256": "213790018cc714dc2d7038ce7e6582313069d54a52f7692b4e52603bc26db545"
+    },
+    {
+      "path": "src/bittorrent/picker.rs",
+      "lines": 592,
+      "sha256": "894c701d698e7b90ae9051eb6de69cde4778af0ff97dc2c3f1a1c21331c17dce"
+    },
+    {
+      "path": "src/bittorrent/session.rs",
+      "lines": 614,
+      "sha256": "dbd2d0215eb13066e6cf50b88135c8946e606cf9d2be1e1f510d84ad682145be"
+    },
+    {
+      "path": "src/bittorrent/storage.rs",
+      "lines": 867,
+      "sha256": "cc15f748bc2a9cf8ab52a05c934d61657fda7d37b4b052f6a28a34a24f530348"
+    },
+    {
+      "path": "src/bittorrent/stream.rs",
+      "lines": 411,
+      "sha256": "af8681d401090277fdaeae6e64f285a5bee3953038d1d887e82504ff6ae1b739"
+    },
+    {
+      "path": "src/bittorrent/torrent.rs",
+      "lines": 1670,
+      "sha256": "f47c208b67d17de69ec81e071caf0cc96b490f961a489112ee352e77eef0060d"
+    },
+    {
+      "path": "src/bittorrent/tracker.rs",
+      "lines": 790,
+      "sha256": "ee80694b26fbce8a9cf5114b197eeec3a0749e1b915797bfbb2bd59fd3cbcbac"
+    },
+    {
+      "path": "src/bittorrent/v2.rs",
+      "lines": 409,
+      "sha256": "6fb224b62ab37f445bced2d8e73847ac031f3129fcc0a92a420c10aed361d99b"
+    },
+    {
+      "path": "src/bittorrent/webseed.rs",
+      "lines": 398,
+      "sha256": "e7100049253b829992991e7c03d38fd71d9924a8acff6f09d17df1f0128ffa9b"
+    },
+    {
+      "path": "src/diagnose.rs",
+      "lines": 665,
+      "sha256": "dbbae460c63fec606dbaac901ae4aa808c870d5c408c62910dc68b68b7236589"
+    },
+    {
+      "path": "src/ed2k/file.rs",
+      "lines": 150,
+      "sha256": "2d646cbc7c2baecf00e53aa7c1fddf0f0385ab3e7cc7e0a4264c02bf9f50f415"
+    },
+    {
+      "path": "src/ed2k/ip_filter.rs",
+      "lines": 209,
+      "sha256": "f44fbe63d9a0bbdd9898041519d173d4be9e59e70ab22bb33d9d0105c2ffd64d"
+    },
+    {
+      "path": "src/ed2k/kad.rs",
+      "lines": 95,
+      "sha256": "0c2621af2729d4d8d54c2ccc9f9cc530f3a2fab5d75b1633563a6a93eec5c02c"
+    },
+    {
+      "path": "src/ed2k/kad_crypto.rs",
+      "lines": 214,
+      "sha256": "824b778aac927276230df62835033673fbb1aa09e3fc812718020606c78b21aa"
+    },
+    {
+      "path": "src/ed2k/kad_session.rs",
+      "lines": 2389,
+      "sha256": "475eb20546455c729320ce58cd57bc220d4e41f4a51e9c694716659f63724f48"
+    },
+    {
+      "path": "src/ed2k/listener.rs",
+      "lines": 678,
+      "sha256": "d110ce5b64b391e9f0ea7876c5fa9d056960a1259795c793969ef66029418473"
+    },
+    {
+      "path": "src/ed2k/metadata.rs",
+      "lines": 277,
+      "sha256": "a2d6ecd5258f7dd55c83fafd3fe20ee9f9966cacccda158faf4746cb23ab1eb6"
+    },
+    {
+      "path": "src/ed2k/mod.rs",
+      "lines": 75,
+      "sha256": "c10261cf0c9213ec2ed13d6935e633babd9ba67f9c4487c0eb5c51a819a0c32e"
+    },
+    {
+      "path": "src/ed2k/obfuscation.rs",
+      "lines": 517,
+      "sha256": "ae5a5b3780e356833e149b7078b98035c0a13ce89bf81db0af8f9504819f8c32"
+    },
+    {
+      "path": "src/ed2k/peer.rs",
+      "lines": 739,
+      "sha256": "d133cda5c11ce600377400d50c55b4b187f165547e6f33e6394283d418f37af9"
+    },
+    {
+      "path": "src/ed2k/server.rs",
+      "lines": 933,
+      "sha256": "4c9a56796ff816d51b0c718acde50f4bf3d9f39f93f900ef6f21e05e583f41e0"
+    },
+    {
+      "path": "src/ed2k/share.rs",
+      "lines": 609,
+      "sha256": "22564423af58b00f122c4e3bec01310e2ba80b3ef2ccc19861e6467564a4965a"
+    },
+    {
+      "path": "src/ed2k/transfer.rs",
+      "lines": 2503,
+      "sha256": "ea22affd199fdb76788b28e35ef870e9a5a62b7b38f15eaaf4e4553c7b0c7f3a"
+    },
+    {
+      "path": "src/ed2k/upload.rs",
+      "lines": 850,
+      "sha256": "82546e00da815ba5641d139be4a19a800d4e44c6b325e608581e3dd578ccfba4"
+    },
+    {
+      "path": "src/engine.rs",
+      "lines": 1789,
+      "sha256": "d3e6cb66c2bdec1d2bcc1a67fd5a1cebdd65a8ec85d78fb5661d5c1c58e3c870"
+    },
+    {
+      "path": "src/engine/adaptive.rs",
+      "lines": 309,
+      "sha256": "1aec53c2c6d1e4051471354af8836bb705f43f6ba7a1c5d7acbb728dff97238f"
+    },
+    {
+      "path": "src/engine/h2_tests.rs",
+      "lines": 268,
+      "sha256": "1275b48ec109f6b23d458484fe3c4e422bc4e2d3c6a654728aca092ce993f5ff"
+    },
+    {
+      "path": "src/file_names.rs",
+      "lines": 45,
+      "sha256": "455c3c56ccc6a7c3f1490d21f3e59bb75a6e0167919c7ab655fbf452095780ef"
+    },
+    {
+      "path": "src/lib.rs",
+      "lines": 18,
+      "sha256": "84494003e59f00504abb686528d5ffccc647883d6e5eaf2a990e539554558947"
+    },
+    {
+      "path": "src/lifetime.rs",
+      "lines": 22,
+      "sha256": "ad4f92831bf9007428d15236d9c60bfa944c22e5a6da321509c745897f851d11"
+    },
+    {
+      "path": "src/logging.rs",
+      "lines": 70,
+      "sha256": "e33cb383cbdd95413e468e4b83a317cc2e7104da4019e235547a420403cab1d0"
+    },
+    {
+      "path": "src/main.rs",
+      "lines": 705,
+      "sha256": "0728eb1a99f56025016faa523914610860fb5346f86a07c9e60f8f6cc975e600"
+    },
+    {
+      "path": "src/protocols/ftp.rs",
+      "lines": 250,
+      "sha256": "78116abb01abb3ec85b14a7c77c2d2c57045046bff06324343b34509c47149c7"
+    },
+    {
+      "path": "src/protocols/http3.rs",
+      "lines": 69,
+      "sha256": "6afd26b449475b513133fc4e6ad3551f16f3d91803907c807447bb4a998d1212"
+    },
+    {
+      "path": "src/protocols/mod.rs",
+      "lines": 40,
+      "sha256": "050aaddda02c1d2c37497b4260fc55e7d0d575dbb82442ab496d2f56c61853e5"
+    },
+    {
+      "path": "src/protocols/sftp.rs",
+      "lines": 177,
+      "sha256": "fa1445b7935fa6c5c7b0ee3c2dae689fdd2a5d45a9bed34646be0ecd9d646d21"
+    },
+    {
+      "path": "src/protocols/streaming.rs",
+      "lines": 399,
+      "sha256": "1123ee10f7653c08bf0c2661dbd7a97a4b0ec7e4eb75e5c52d9a581853a98e6f"
+    },
+    {
+      "path": "src/rpc.rs",
+      "lines": 1096,
+      "sha256": "24c0fa02a2fd53f36494d8b926c77ac32fb68a38b4a19ee60d78436fc0250258"
+    },
+    {
+      "path": "src/rpc/bt.rs",
+      "lines": 886,
+      "sha256": "aae3b9307d348c55edafb1fbd28785936cbe5d30c1941f21147158294a3b16d4"
+    },
+    {
+      "path": "src/rpc/ed2k.rs",
+      "lines": 833,
+      "sha256": "a6815295113e0d25c79d9e9e2467ea4a6f3d6bea7533f759ba7797ba756e3eae"
+    },
+    {
+      "path": "src/rpc/session.rs",
+      "lines": 541,
+      "sha256": "81ec9815d30df4864f6d9630c46db893fa7b638d1da1d7f2857105c385eebd2e"
+    },
+    {
+      "path": "src/storage.rs",
+      "lines": 50,
+      "sha256": "df6b2904a738bb8d9f0c4fcb530deb5f74c22fe5afa1150b86a314a6640f9905"
+    },
+    {
+      "path": "src/storage/checkpoints.rs",
+      "lines": 185,
+      "sha256": "2781c715c03fea697f12c8a86dc855e5eae2bd99335c76b35eb0c4b6cb20cd6d"
+    },
+    {
+      "path": "src/upnp.rs",
+      "lines": 310,
+      "sha256": "4ef04d570927e1b2d2818849ffa1d9ead97021a972ab76a0e5368869e3cc127d"
+    },
+    {
+      "path": "tests/bittorrent_holepunch.rs",
+      "lines": 133,
+      "sha256": "a2e9db046780cc7ada5b739c9597a9dbccfaebad577dd35548728c0b0fb49ef8"
+    },
+    {
+      "path": "tests/bittorrent_interop.rs",
+      "lines": 247,
+      "sha256": "089b2422641dee95a578548082b1ab80e32a4b13dcb7438b6dd1e39b1f84bf43"
+    },
+    {
+      "path": "tests/bittorrent_lsd.rs",
+      "lines": 222,
+      "sha256": "4ef58f5ac1182369c7665e9123a7077c570b5e1532f5ba3f9565df21107c85b7"
+    },
+    {
+      "path": "tests/bittorrent_swarm.rs",
+      "lines": 670,
+      "sha256": "7ed18d3b7e9e7bf4c6b724823da2bf26214e7935e9629846c6f5bdec949f7d22"
+    },
+    {
+      "path": "tests/bittorrent_transports.rs",
+      "lines": 133,
+      "sha256": "8ecf7fda3bf576dc13c173e4500b22c674c626332571c3c19d457dd3e52cf41c"
+    },
+    {
+      "path": "tests/bittorrent_v2.rs",
+      "lines": 165,
+      "sha256": "37ec8bc8a1ab0b20f532315f14381f4ab7b57d0c2b051899f4887bcfcd75b563"
+    },
+    {
+      "path": "tests/dht_network.rs",
+      "lines": 141,
+      "sha256": "3db8d4861fa34cb4f0b2e327f16f94cb7df3a15ee938de3a547059dd4c92e7ab"
+    },
+    {
+      "path": "tests/direct_protocols.rs",
+      "lines": 546,
+      "sha256": "1e02c5274a5988062a5294039d12b26f42bde56ab0d3351687cbc3ea6ff63241"
+    },
+    {
+      "path": "tests/ed2k_upload.rs",
+      "lines": 418,
+      "sha256": "52fb97bb9f0e5754fc0fd35a507e7fd367defc66e4b4451e07c193582549d4a3"
+    },
+    {
+      "path": "tests/http3_transfer.rs",
+      "lines": 127,
+      "sha256": "3a74b1f78d9214021a92cdd43e029bcdd27056847a0de93ffbc9e647ca69c5c6"
+    },
+    {
+      "path": "tests/http_identity.rs",
+      "lines": 599,
+      "sha256": "8d25de97fcb9981e73aac855035464267ff2b4af3e9ae6dc635e491cd262f8dd"
+    },
+    {
+      "path": "tests/http_resume.rs",
+      "lines": 375,
+      "sha256": "4751d28ce676463e9975b7047f9574105b3dcff1f1c5408b2c55299f1283791c"
+    },
+    {
+      "path": "tests/http_segmented.rs",
+      "lines": 388,
+      "sha256": "459f70a3621f0e5b0fed52d38e9a94fff1a2443fa889081ce4f6bd00f5adfb39"
+    },
+    {
+      "path": "tests/https_trust.rs",
+      "lines": 116,
+      "sha256": "56c3957461621e259b2a07fa954ae0acef855489a7119ad7277528ce2a2aa43a"
+    },
+    {
+      "path": "tests/interop_amule.py",
+      "lines": 189,
+      "sha256": "42919e8e85e8a68543be1f08990a4bbad1d673aaab6818610c9f0e56e607202b"
+    },
+    {
+      "path": "tests/interop_ed2k_crypto.py",
+      "lines": 38,
+      "sha256": "56a1fa7c62a5c5162edef2ba43abf8006220cd73837699c2449e691fc338e932"
+    },
+    {
+      "path": "tests/interop_ed2k_hash.py",
+      "lines": 40,
+      "sha256": "150b432a350478a60cc47fe95d362922211e9a19e82d4c58244f80a979ee945b"
+    },
+    {
+      "path": "tests/interop_kad_crypto.py",
+      "lines": 36,
+      "sha256": "911ec3cbb11f67d355d7be63e93d51bc166a2c5487f724c42e21f1039e72b89d"
+    },
+    {
+      "path": "tests/interop_libtorrent.py",
+      "lines": 341,
+      "sha256": "df160e616f5792ed6fd0e3771094bda1c379080892a72aa9f23ece9f76bdb42d"
+    },
+    {
+      "path": "tests/interop_raw_peer.py",
+      "lines": 80,
+      "sha256": "82fe1d0e19e1ad10796bc09ca27e6e795d25c1423f1890412610a3b55783bab4"
+    },
+    {
+      "path": "tests/kad_amule.rs",
+      "lines": 155,
+      "sha256": "318b00cf596d224ac913506434af1bf02abc7cae2bacbdae6e81b1ed8ae12d63"
+    },
+    {
+      "path": "tests/native_contract.rs",
+      "lines": 40,
+      "sha256": "450eda5891b1a138228c00e6525995d88c75020e59d30c7fa094e842da69e39c"
+    },
+    {
+      "path": "tests/rpc_bittorrent.rs",
+      "lines": 495,
+      "sha256": "5490e499aa166ca3cf6cbde1050730cc677d3c582f606de834f3df3ed17316b4"
+    },
+    {
+      "path": "tests/rpc_contract.rs",
+      "lines": 8,
+      "sha256": "aa780ceb76fb03c06795542a4dd88941ad1dfb44358386f31964d2c020495a9d"
+    },
+    {
+      "path": "tests/rpc_ed2k.rs",
+      "lines": 197,
+      "sha256": "17e7ebf8f19a1a783ceef129016f443fd7dc4635bc5dce4191bb2540a2508321"
+    },
+    {
+      "path": "tests/rpc_http_options.rs",
+      "lines": 453,
+      "sha256": "3759b3df304b02ca26405d6d5036bbdaaac06775a63aae1e3d133346896ce023"
+    },
+    {
+      "path": "tests/rpc_session.rs",
+      "lines": 621,
+      "sha256": "0f6619ecc7172aff512a13cee669922169c3b0c72352c6c885874d5f38b2b588"
+    },
+    {
+      "path": "tests/sftp_transfer.rs",
+      "lines": 494,
+      "sha256": "5f3f8b07622256497c0c08c0ee96e51109688989e42ebb20c2225561b5e0e040"
+    },
+    {
+      "path": "tests/upnp.rs",
+      "lines": 402,
+      "sha256": "bf712eaf3181ff2f0b1326772dfd8aec1d75c0bb9826095b161f6a3922768df7"
+    }
+  ]
+}

@@ -31,6 +31,7 @@ struct Origin {
     address: std::net::SocketAddr,
     /// Bytes of body served since the last reset (HEAD and 1-byte probes are negligible).
     served: Arc<AtomicU64>,
+    hold_tail: Arc<AtomicBool>,
     data: Arc<Mutex<(Arc<Vec<u8>>, String)>>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -40,12 +41,15 @@ impl Origin {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let address = listener.local_addr().unwrap();
         let served = Arc::new(AtomicU64::new(0));
+        let hold_tail = Arc::new(AtomicBool::new(false));
+        let gate_in = hold_tail.clone();
         let current = Arc::new(Mutex::new((data, etag.to_owned())));
         let (served_in, current_in) = (served.clone(), current.clone());
         let task = tokio::spawn(async move {
             loop {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let (served, current) = (served_in.clone(), current_in.clone());
+                let hold_tail = gate_in.clone();
                 tokio::spawn(async move {
                     let mut request = vec![0u8; 16 * 1024];
                     let used = stream.read(&mut request).await.unwrap_or(0);
@@ -85,7 +89,16 @@ impl Origin {
                     if stream.write_all(head.as_bytes()).await.is_err() {
                         return;
                     }
-                    for piece in body.chunks(256 * 1024) {
+                    for (chunk_index, piece) in body.chunks(256 * 1024).enumerate() {
+                        // A pause test gates the fixture before EOF, so even a
+                        // fast/loaded runner must observe progress before completion.
+                        while hold_tail.load(Ordering::Acquire)
+                            && end + 1 == data.len()
+                            && body.len() > 1
+                            && chunk_index + 1 == body.len().div_ceil(256 * 1024)
+                        {
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
                         if stream.write_all(piece).await.is_err() {
                             return;
                         }
@@ -100,6 +113,7 @@ impl Origin {
         Self {
             address,
             served,
+            hold_tail,
             data: current,
             task,
         }
@@ -151,6 +165,24 @@ async fn run(
         .await
 }
 
+async fn pause_at(
+    engine: &Engine,
+    origin: &Origin,
+    url: String,
+    destination: PathBuf,
+    limit: u64,
+) -> anyhow::Result<()> {
+    struct ReleaseGate(Arc<AtomicBool>);
+    impl Drop for ReleaseGate {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Release);
+        }
+    }
+    origin.hold_tail.store(true, Ordering::Release);
+    let _release = ReleaseGate(origin.hold_tail.clone());
+    run(engine, url, destination, Some(limit)).await
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_paused_download_continues_without_fetching_finished_blocks_again() {
     let data = payload(1);
@@ -159,11 +191,12 @@ async fn a_paused_download_continues_without_fetching_finished_blocks_again() {
     let destination = root.join("payload.bin");
     let (part, state) = partial(&destination);
 
-    let paused = run(
+    let paused = pause_at(
         &engine(),
+        &origin,
         origin.url(""),
         destination.clone(),
-        Some(10 << 20),
+        10 << 20,
     )
     .await;
     assert!(paused.unwrap_err().to_string().contains("cancelled"));
@@ -210,11 +243,12 @@ async fn a_refreshed_signed_link_still_resumes_the_same_file() {
     let root = root();
     let destination = root.join("payload.bin");
 
-    let paused = run(
+    let paused = pause_at(
         &engine(),
+        &origin,
         origin.url("?t=old"),
         destination.clone(),
-        Some(10 << 20),
+        10 << 20,
     )
     .await;
     assert!(paused.is_err());
@@ -241,11 +275,12 @@ async fn a_changed_file_on_the_server_restarts_instead_of_mixing_versions() {
     let root = root();
     let destination = root.join("payload.bin");
 
-    let paused = run(
+    let paused = pause_at(
         &engine(),
+        &origin,
         origin.url(""),
         destination.clone(),
-        Some(10 << 20),
+        10 << 20,
     )
     .await;
     assert!(paused.is_err());
@@ -270,11 +305,12 @@ async fn a_corrupt_record_is_discarded_and_the_download_still_completes() {
     let destination = root.join("payload.bin");
     let (_, state) = partial(&destination);
 
-    let paused = run(
+    let paused = pause_at(
         &engine(),
+        &origin,
         origin.url(""),
         destination.clone(),
-        Some(10 << 20),
+        10 << 20,
     )
     .await;
     assert!(paused.is_err());

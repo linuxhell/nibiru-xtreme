@@ -14,4 +14,5 @@ pub mod upnp;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+mod file_names;
 mod lifetime;

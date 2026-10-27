@@ -12,7 +12,11 @@ use super::{
 };
 use anyhow::{Context, Result, bail};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, OnceLock, Weak},
+    time::Duration,
+};
 
 const WORKERS_PER_SEED: usize = 2;
 const MAX_FAILURES: u32 = 8;
@@ -38,27 +42,114 @@ pub(crate) fn spawn_workers(shared: &Arc<Shared>) {
     }
 }
 
-/// URL of `file` on a web seed whose base is `base` (BEP 19 naming rules).
-pub fn file_url(base: &str, torrent: &Torrent, file: usize) -> String {
-    let entry = &torrent.files[file];
-    let encode = |part: &str| utf8_percent_encode(part, PATH_SET).to_string();
-    if !torrent.is_multi_file() {
-        return if base.ends_with('/') {
-            format!("{base}{}", encode(&torrent.name))
-        } else {
-            base.to_owned()
+struct WireNames {
+    name: String,
+    files: Vec<Vec<String>>,
+}
+impl WireNames {
+    fn new(torrent: &Torrent) -> Self {
+        let mut result = Self {
+            name: torrent.name.clone(),
+            files: torrent.files.iter().map(|f| f.path.clone()).collect(),
         };
+        let Ok(decoded) = super::bencode::decode(&torrent.info_bytes) else {
+            return result;
+        };
+        let info = &decoded.value;
+        if let Some(name) = info
+            .get("name.utf-8")
+            .or_else(|| info.get("name"))
+            .and_then(super::bencode::Value::str)
+        {
+            result.name = name.into();
+        }
+        if let Some(files) = info.get("files").and_then(super::bencode::Value::list) {
+            for (index, file) in files.iter().enumerate() {
+                if let (Some(target), Some(parts)) = (
+                    result.files.get_mut(index),
+                    file.get("path.utf-8")
+                        .or_else(|| file.get("path"))
+                        .and_then(super::bencode::Value::list),
+                ) {
+                    *target = parts
+                        .iter()
+                        .filter_map(super::bencode::Value::str)
+                        .map(str::to_owned)
+                        .collect();
+                }
+            }
+        } else if let Some(tree) = info.get("file tree") {
+            fn walk(
+                node: &super::bencode::Value,
+                path: &mut Vec<String>,
+                out: &mut HashMap<Vec<String>, Vec<String>>,
+            ) {
+                let Some(map) = node.dict() else { return };
+                if map.contains_key(&Vec::new()) {
+                    out.insert(
+                        path.iter()
+                            .map(|p| super::metainfo::sanitize_component(p))
+                            .collect(),
+                        path.clone(),
+                    );
+                } else {
+                    for (key, child) in map {
+                        path.push(String::from_utf8_lossy(key).into_owned());
+                        walk(child, path, out);
+                        path.pop();
+                    }
+                }
+            }
+            let mut originals = HashMap::new();
+            walk(tree, &mut Vec::new(), &mut originals);
+            for (file, target) in torrent.files.iter().zip(&mut result.files) {
+                if let Some(path) = originals.get(&file.path) {
+                    *target = path.clone();
+                }
+            }
+        } else if let Some(file) = result.files.first_mut() {
+            *file = vec![result.name.clone()];
+        }
+        result
     }
-    let mut url = base.to_owned();
-    if !url.ends_with('/') {
+    fn shared(torrent: &Torrent) -> Arc<Self> {
+        // One mapping per active torrent, shared by all web-seed workers. Weak
+        // entries do not retain metadata after the download is removed.
+        static CACHE: OnceLock<Mutex<HashMap<[u8; 20], Weak<WireNames>>>> = OnceLock::new();
+        let mut cache = CACHE
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(names) = cache.get(&torrent.info_hash).and_then(Weak::upgrade) {
+            return names;
+        }
+        cache.retain(|_, names| names.strong_count() > 0);
+        let names = Arc::new(Self::new(torrent));
+        cache.insert(torrent.info_hash, Arc::downgrade(&names));
+        names
+    }
+    fn url(&self, base: &str, torrent: &Torrent, file: usize) -> String {
+        let encode = |part: &str| utf8_percent_encode(part, PATH_SET).to_string();
+        if !torrent.is_multi_file() {
+            return if base.ends_with('/') {
+                format!("{base}{}", encode(&self.name))
+            } else {
+                base.into()
+            };
+        }
+        let mut url = base.trim_end_matches('/').to_owned();
         url.push('/');
+        url.push_str(&encode(&self.name));
+        for component in &self.files[file] {
+            url.push('/');
+            url.push_str(&encode(component));
+        }
+        url
     }
-    url.push_str(&encode(&torrent.name));
-    for component in &entry.path {
-        url.push('/');
-        url.push_str(&encode(component));
-    }
-    url
+}
+/// Remote servers keep the original torrent names, not the names sanitized for local disk.
+pub fn file_url(base: &str, torrent: &Torrent, file: usize) -> String {
+    WireNames::shared(torrent).url(base, torrent, file)
 }
 
 async fn fetch_range(shared: &Shared, url: &str, from: u64, len: u64) -> Result<Vec<u8>> {
@@ -126,6 +217,7 @@ async fn fetch_piece(
     shared: &Shared,
     base: &str,
     torrent: &Torrent,
+    names: &WireNames,
     piece: usize,
 ) -> Result<Vec<u8>> {
     let start = piece as u64 * torrent.piece_length;
@@ -140,7 +232,7 @@ async fn fetch_piece(
         }
         let data = fetch_range(
             shared,
-            &file_url(base, torrent, index),
+            &names.url(base, torrent, index),
             from - file.offset,
             to - from,
         )
@@ -154,6 +246,7 @@ async fn fetch_piece(
 async fn worker(shared: Arc<Shared>, seed: usize) {
     let key = shared.next_key();
     let mut backoff = Duration::from_secs(1);
+    let mut names = None;
     loop {
         if shared.is_stopped() {
             return;
@@ -183,7 +276,8 @@ async fn worker(shared: Arc<Shared>, seed: usize) {
             continue;
         };
         shared.lock().web_seeds[seed].active += 1;
-        let result = fetch_piece(&shared, &base, &torrent, piece).await;
+        let names = names.get_or_insert_with(|| WireNames::shared(&torrent));
+        let result = fetch_piece(&shared, &base, &torrent, names, piece).await;
         match record(&shared, seed, key, result) {
             Some(data) => {
                 backoff = Duration::from_secs(1);
@@ -242,6 +336,28 @@ fn record(shared: &Shared, seed: usize, key: u64, result: Result<Vec<u8>>) -> Op
 mod tests {
     use super::*;
     use crate::bittorrent::metainfo::{Extras, build_info};
+
+    #[test]
+    fn web_seeds_use_wire_names_even_when_local_names_were_sanitized() {
+        let info = build_info(
+            "Film: original ",
+            16384,
+            &[(&["a:b.mkv"], &[1u8; 100]), (&["a?b.mkv"], &[2u8; 10])],
+        );
+        let torrent = Torrent::from_info(&info, Extras::default()).unwrap();
+        assert_ne!(torrent.name, "Film: original ");
+        assert_eq!(
+            file_url("http://host/files/", &torrent, 0),
+            "http://host/files/Film%3A%20original%20/a%3Ab.mkv"
+        );
+        assert_eq!(
+            file_url("http://host/files/", &torrent, 1),
+            "http://host/files/Film%3A%20original%20/a%3Fb.mkv"
+        );
+        let one = WireNames::shared(&torrent);
+        let two = WireNames::shared(&torrent);
+        assert!(Arc::ptr_eq(&one, &two));
+    }
 
     #[test]
     fn urls_follow_bep19_naming() {

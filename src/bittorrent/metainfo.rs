@@ -56,7 +56,7 @@ pub fn info_hash(info_bytes: &[u8]) -> [u8; 20] {
 
 /// Makes one path component safe on every platform; never returns an empty string, "." or "..".
 pub fn sanitize_component(raw: &str) -> String {
-    let mut out: String = raw
+    let mapped: String = raw
         .chars()
         .map(|c| {
             if c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
@@ -66,21 +66,55 @@ pub fn sanitize_component(raw: &str) -> String {
             }
         })
         .collect();
-    // Windows silently drops trailing dots and spaces, which would alias other names.
-    while out.ends_with('.') || out.ends_with(' ') {
-        out.pop();
+    let mut name = mapped.trim_start().to_owned();
+    if crate::file_names::reserved(&name) {
+        name.insert(0, '_');
     }
-    let out = out.trim_start().to_owned();
-    let stem = out.split('.').next().unwrap_or("").to_ascii_uppercase();
-    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || (stem.len() == 4
-            && (stem.starts_with("COM") || stem.starts_with("LPT"))
-            && stem.as_bytes()[3].is_ascii_digit());
-    if out.is_empty() || reserved {
-        format!("_{out}")
+    // Bound UTF-8 bytes as well as UTF-16 units: long CJK/emoji names must fit
+    // Unix components too. Trim again after truncation, which can expose a dot/space.
+    let name = if name.len() > 200 {
+        match name.rsplit_once('.') {
+            Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() && ext.len() < 25 => {
+                let stem = crate::file_names::bounded(stem, 199 - ext.len());
+                format!("{}.{ext}", crate::file_names::trim_tail(&stem))
+            }
+            _ => crate::file_names::bounded(&name, 200),
+        }
     } else {
-        out.chars().take(200).collect()
+        name
+    };
+    let name = crate::file_names::trim_tail(&name);
+    if name.is_empty() {
+        "_".into()
+    } else {
+        name.into()
     }
+}
+
+fn collision_component(base: &str, index: usize) -> String {
+    let (stem, ext) = base
+        .rsplit_once('.')
+        .filter(|(stem, ext)| !stem.is_empty() && ext.encode_utf16().count() < 32)
+        .map_or((base, String::new()), |(stem, ext)| {
+            (stem, format!(".{ext}"))
+        });
+    let suffix = format!("_{index}{ext}");
+    let prefix = crate::file_names::bounded(stem, 200 - suffix.len());
+    format!("{}{suffix}", crate::file_names::trim_tail(&prefix))
+}
+
+/// File/directory aliases must be rejected before any storage is created.
+pub(crate) fn validate_file_layout(files: &[FileEntry]) -> Result<()> {
+    let mut keys: Vec<Vec<String>> = files
+        .iter()
+        .filter(|file| !file.pad)
+        .map(|file| file.path.iter().map(|part| part.to_lowercase()).collect())
+        .collect();
+    keys.sort_unstable();
+    if keys.windows(2).any(|pair| pair[1].starts_with(&pair[0])) {
+        bail!("torrent paths collide after portable normalization");
+    }
+    Ok(())
 }
 
 fn text(value: &Value) -> Option<String> {
@@ -204,6 +238,7 @@ impl Torrent {
         };
         if info.get("pieces").is_none() {
             let v2 = v2.context("torrent has no pieces")?;
+            validate_file_layout(&v2.layout)?;
             let (trackers, web_seeds) = filtered_extras(extras);
             return Ok(Self {
                 info_hash: v2.info_hash[..20].try_into()?,
@@ -262,14 +297,12 @@ impl Torrent {
                     .iter()
                     .map(|p| p.str().map(sanitize_component).context("non-text path"))
                     .collect::<Result<_>>()?;
-                // Two entries can sanitise to the same name; keep them distinct.
+                // Windows aliases names that differ only in case. Reserve a
+                // portable key and keep collision suffixes inside the bound.
+                let base = path.last().expect("non-empty path").clone();
                 let mut n = 1;
-                while !pad && !used.insert(path.clone()) {
-                    let last = path.last_mut().expect("non-empty path");
-                    *last = format!(
-                        "{}_{n}",
-                        last.trim_end_matches(|c: char| c == '_' || c.is_ascii_digit())
-                    );
+                while !pad && !used.insert(path.iter().map(|part| part.to_lowercase()).collect()) {
+                    *path.last_mut().expect("non-empty path") = collision_component(&base, n);
                     n += 1;
                     if n > 1000 {
                         bail!("too many files share a name");
@@ -300,6 +333,7 @@ impl Torrent {
             });
             offset = length;
         }
+        validate_file_layout(&files)?;
         let total_length = offset;
         if total_length == 0 || total_length > MAX_TOTAL {
             bail!("torrent has no data or is too large");
@@ -544,6 +578,65 @@ mod tests {
         let info = build_info("p", 16384, &[(&["a:b"], &a), (&["a?b"], &b)]);
         let t = Torrent::from_info(&info, Extras::default()).unwrap();
         assert_ne!(t.files[0].path, t.files[1].path);
+    }
+
+    #[test]
+    fn truncation_never_reintroduces_a_windows_unsafe_ending() {
+        for ending in [" ", ".", "\u{a0}", "\u{2009}"] {
+            let name = format!("{}{ending}the rest of the film title", "a".repeat(199));
+            let safe = sanitize_component(&name);
+            assert_eq!(safe, "a".repeat(199));
+            assert!(!safe.ends_with(|c: char| c == '.' || c.is_whitespace()));
+        }
+        let emoji = sanitize_component(&"🍿".repeat(200));
+        assert!(emoji.encode_utf16().count() <= 200);
+        assert!(emoji.len() <= 200);
+        assert!(sanitize_component(&format!("{}.mkv", "🍿".repeat(200))).ends_with(".mkv"));
+        assert_eq!(sanitize_component("$ O'Brien's Movie"), "$ O'Brien's Movie");
+        for name in ["COM¹.mkv", "LPT²", "CON .mp4", "CONOUT$.txt"] {
+            assert!(sanitize_component(name).starts_with('_'), "{name}");
+        }
+    }
+
+    #[test]
+    fn case_aliases_keep_distinct_files_and_preserve_extensions() {
+        let (a, b) = (vec![1u8; 10_000], vec![2u8; 10_000]);
+        let info = build_info("film", 16384, &[(&["Movie.MKV"], &a), (&["movie.mkv"], &b)]);
+        let t = Torrent::from_info(&info, Extras::default()).unwrap();
+        assert_ne!(
+            t.files[0].path[0].to_lowercase(),
+            t.files[1].path[0].to_lowercase()
+        );
+        assert!(t.files[1].path[0].ends_with(".mkv"));
+        let prefix = "x".repeat(196);
+        let one = format!("{prefix}:abc");
+        let two = format!("{prefix}?abc");
+        let info = build_info("long", 16384, &[(&[&one], &a), (&[&two], &b)]);
+        let t = Torrent::from_info(&info, Extras::default()).unwrap();
+        assert!(
+            t.files
+                .iter()
+                .all(|f| f.path[0].encode_utf16().count() <= 200)
+        );
+        assert_ne!(t.files[0].path, t.files[1].path);
+    }
+
+    #[test]
+    fn file_directory_aliases_are_rejected_before_opening_storage() {
+        let (a, b) = (vec![1u8; 10_000], vec![2u8; 10_000]);
+        for entries in [
+            vec![
+                (&["Movie"][..], a.as_slice()),
+                (&["movie", "clip.mkv"][..], b.as_slice()),
+            ],
+            vec![
+                (&["movie", "clip.mkv"][..], b.as_slice()),
+                (&["Movie"][..], a.as_slice()),
+            ],
+        ] {
+            let info = build_info("pack", 16384, &entries);
+            assert!(Torrent::from_info(&info, Extras::default()).is_err());
+        }
     }
 
     #[test]

@@ -1,4 +1,11 @@
-# Nibiru Xtreme 0.2.1
+# Nibiru Xtreme 0.2.2
+
+- Re-sanitize names after truncation; bound UTF-8 and UTF-16 lengths and preserve normal extensions. Keep legitimate dollar signs and apostrophes.
+- Handle case-insensitive torrent filename aliases and reject file/directory collisions before storage is opened.
+- Apply common portable component rules to HTTP RPC and ED2K, including Windows device aliases and trailing Unicode whitespace.
+- Web seeds retain original network names, sharing a weakly cached mapping across workers.
+- Make pause/resume and private Kad handshake fixtures deterministic without changing production timing.
+
 
 - HTTPS now includes the operating system trust store alongside public roots, retaining certificate and hostname validation. This fixes downloads when the required CA is trusted by the OS.
 - RPC errors report TLS certificate trust failures instead of only a generic HTTP request failure; nested secrets remain hidden.
