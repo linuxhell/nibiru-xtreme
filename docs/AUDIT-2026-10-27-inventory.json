@@ -228,8 +228,8 @@
     },
     {
       "path": "src/ed2k/transfer.rs",
-      "lines": 2503,
-      "sha256": "ea22affd199fdb76788b28e35ef870e9a5a62b7b38f15eaaf4e4553c7b0c7f3a"
+      "lines": 2521,
+      "sha256": "87e9981add47ee1e1d5496aa371f2e3ba95d07ebb56f48843709d8a9cfd41b8b"
     },
     {
       "path": "src/ed2k/upload.rs",

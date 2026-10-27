@@ -1765,6 +1765,8 @@ pub(crate) mod tests {
         block_delay: Duration,
         /// Closes the connection after serving this many blocks.
         drop_after_blocks: Option<usize>,
+        /// Successful block responses by accepted connection (test observation).
+        served_by_connection: Option<Arc<Mutex<Vec<usize>>>>,
     }
 
     /// A peer that accepts any number of connections; the n-th one follows plan n (the last repeats).
@@ -1861,6 +1863,12 @@ pub(crate) mod tests {
                                     sent = peer::send(&mut stream, 0xe3, 0x46, &a).await;
                                     if sent.is_err() {
                                         break;
+                                    }
+                                    if let Some(counts) = plan.served_by_connection.as_ref() {
+                                        let mut counts = counts.lock().unwrap();
+                                        let length = counts.len().max(number + 1);
+                                        counts.resize(length, 0);
+                                        counts[number] += 1;
                                     }
                                 }
                                 sent
@@ -2022,7 +2030,9 @@ pub(crate) mod tests {
         let data: Vec<u8> = (0..PART_SIZE as usize - 1000)
             .map(|i| (i % 241) as u8)
             .collect();
+        let served = Arc::new(Mutex::new(Vec::new()));
         let slow = Plan {
+            served_by_connection: Some(served.clone()),
             block_delay: Duration::from_millis(80),
             ..Plan::default()
         };
@@ -2033,24 +2043,32 @@ pub(crate) mod tests {
         let seen = events.clone();
         let mut opts = options();
         opts.events = Some(Arc::new(move |event| seen.lock().unwrap().push(event)));
-        let started = std::time::Instant::now();
-        let path = download_with_tuning(
-            &file,
-            dir.path(),
-            &vec![source; 4],
-            opts,
-            quick(),
-            Arc::new(AtomicBool::new(false)),
-            |_| {},
+        let path = tokio::time::timeout(
+            Duration::from_secs(30),
+            download_with_tuning(
+                &file,
+                dir.path(),
+                &vec![source; 4],
+                opts,
+                quick(),
+                Arc::new(AtomicBool::new(false)),
+                |_| {},
+            ),
         )
         .await
+        .expect("the cooperative transfer must finish")
         .unwrap();
         assert_eq!(std::fs::read(path).unwrap(), data);
+        // Verify actual cooperation instead of a wall-clock performance threshold
+        // that includes hashing, disk I/O and unrelated load on hosted runners.
+        let counts = served.lock().unwrap().clone();
+        let blocks = data.len().div_ceil(super::BLOCK_SIZE as usize);
+        assert_eq!(counts.len(), 4, "{counts:?}");
         assert!(
-            started.elapsed() < Duration::from_millis(2500),
-            "took {:?}: four peers should split the blocks",
-            started.elapsed()
+            counts.iter().all(|count| *count > 0 && *count < blocks),
+            "{counts:?}"
         );
+        assert!(counts.iter().sum::<usize>() >= blocks, "{counts:?}");
         assert_eq!(*connections.lock().unwrap(), 4);
         server.abort();
     }
