@@ -2077,7 +2077,7 @@ pub(crate) mod tests {
     async fn the_download_ends_as_soon_as_everything_is_verified() {
         let data = two_part_data();
         let (good, _, good_server) = scripted_peer(data.clone(), vec![Plan::default()]).await;
-        let (silent, _, silent_server) = scripted_peer(
+        let (silent, silent_connections, silent_server) = scripted_peer(
             data.clone(),
             vec![Plan {
                 silent_metadata: true,
@@ -2089,41 +2089,35 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut sources = vec![good];
         sources.extend(std::iter::repeat_n(silent, 12));
-        let verified_at = Arc::new(Mutex::new(None));
-        let record = verified_at.clone();
+        let verified = Arc::new(AtomicBool::new(false));
+        let record = verified.clone();
         let mut tuning = quick();
-        tuning.metadata_timeout = Duration::from_secs(10);
-        let path = download_with_tuning(
-            &file,
-            dir.path(),
-            &sources,
-            options(),
-            tuning,
-            Arc::new(AtomicBool::new(false)),
-            move |progress| {
-                if progress.verified == progress.total {
-                    record
-                        .lock()
-                        .unwrap()
-                        .get_or_insert_with(std::time::Instant::now);
-                }
-            },
+        tuning.metadata_timeout = Duration::from_secs(3600);
+        let path = tokio::time::timeout(
+            Duration::from_secs(30),
+            download_with_tuning(
+                &file,
+                dir.path(),
+                &sources,
+                options(),
+                tuning,
+                Arc::new(AtomicBool::new(false)),
+                move |progress| {
+                    if progress.verified == progress.total {
+                        record.store(true, Ordering::SeqCst);
+                    }
+                },
+            ),
         )
         .await
+        .expect("completed payload must not wait for silent peers' one-hour metadata timeout")
         .unwrap();
         assert_eq!(std::fs::read(path).unwrap(), data);
-        // Measure only the time after the payload was verified. Comparing two entire
-        // downloads made CPU/disk contention on shared runners look like a shutdown bug.
-        // Silent metadata requests are still pending for 10 seconds at this point.
-        let cleanup = verified_at
-            .lock()
-            .unwrap()
-            .expect("no verified progress")
-            .elapsed();
-        assert!(
-            cleanup < Duration::from_millis(450),
-            "completion cleanup took {cleanup:?}"
-        );
+        // Confirm the condition being tested: payload verified while real silent
+        // connections remain pending. The transfer must return without waiting
+        // for their one-hour timeout; runner disk speed is not a performance gate.
+        assert!(verified.load(Ordering::SeqCst));
+        assert!(*silent_connections.lock().unwrap() > 0);
         good_server.abort();
         silent_server.abort();
     }
