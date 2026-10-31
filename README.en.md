@@ -2,6 +2,8 @@
 
 # Nibiru Xtreme
 
+Version 0.2.3 supports an exact torrent payload filename or content-root basename over RPC (`dir` + `out`). This prevents duplicated root folders in ADM and honors reserved names used to avoid destination conflicts. The output is restricted to a portable basename; the default layout without `out` is unchanged.
+
 Version 0.2.2 fixes torrent names after truncation, bounds Unicode names in both bytes and UTF-16 units, separates case-insensitive file aliases and rejects file/directory collisions. ED2K and HTTP RPC reject nonportable names. Legitimate `$` and apostrophes are preserved. Web seeds keep the original on-wire names. See the [October 27 audit](docs/AUDIT-2026-10-27.md).
 
 Rust download engine with a native JSON-RPC contract and an aria2 compatibility subset.
@@ -10,7 +12,7 @@ HTTPS uses public roots together with the operating system trust store while kee
 
 ## Status
 
-**Stable version 0.2.2.** The native engine for Apocalipse Download Manager, packaged for Windows, Linux and macOS with SHA-256 files.
+**Stable version 0.2.3.** The native engine for Apocalipse Download Manager, packaged for Windows, Linux and macOS with SHA-256 files.
 
 ED2K preview does not require a fixed 30–40 MB total: ADM enables it once the first MD4-authenticated part is available (up to 9,728,000 bytes). Other peers help finish the header and tail before middle parts so a slow source cannot monopolize preview data. MP4/AVI may also need their tail index; missing ranges wait for data rather than exposing disk holes.
 

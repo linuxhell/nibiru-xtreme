@@ -138,6 +138,30 @@ impl Storage {
         }
     }
 
+    /// Explicit basename for the content root (multi-file) or payload (single-file).
+    /// Torrent metadata and its info hash remain unchanged.
+    pub fn with_output_name(torrent: &Torrent, directory: &Path, name: &str) -> Result<Self> {
+        anyhow::ensure!(
+            crate::file_names::portable_component(name),
+            "invalid torrent output name"
+        );
+        let mut storage = Self::new(torrent, directory);
+        if torrent.is_multi_file() {
+            storage.root = directory.join(name);
+            for (slot, file) in storage.slots.iter_mut().zip(&torrent.files) {
+                slot.path = file
+                    .path
+                    .iter()
+                    .fold(storage.root.clone(), |path, part| path.join(part));
+            }
+        } else {
+            for slot in &mut storage.slots {
+                slot.path = directory.join(name);
+            }
+        }
+        Ok(storage)
+    }
+
     /// Empty files carry no blocks and would otherwise never be created.
     pub fn create_empty_files(&self, selected: Option<&[usize]>) -> Result<()> {
         for (i, slot) in self.slots.iter().enumerate() {
@@ -635,6 +659,44 @@ mod tests {
 
     fn whole(parts: &[Vec<u8>]) -> Vec<u8> {
         parts.concat()
+    }
+
+    #[test]
+    fn explicit_output_preserves_nested_tree_and_resume_without_an_extra_root() {
+        let (torrent, parts) = fixture();
+        let directory = tempfile::tempdir().unwrap();
+        let storage =
+            Storage::with_output_name(&torrent, directory.path(), "O Resgate (1)").unwrap();
+        storage.write(0, &whole(&parts)).unwrap();
+        assert_eq!(
+            std::fs::read(directory.path().join("O Resgate (1)/sub/b.bin")).unwrap(),
+            parts[1]
+        );
+        assert!(!directory.path().join("O Resgate (1)/pack").exists());
+        let resumed =
+            Storage::with_output_name(&torrent, directory.path(), "O Resgate (1)").unwrap();
+        let checked = resumed.check_all(|_, _| {}, &AtomicBool::new(false));
+        assert_eq!(checked.count(), torrent.piece_count());
+        for name in ["../escape", "a/b", "a\\b", "NUL", "bad."] {
+            assert!(Storage::with_output_name(&torrent, directory.path(), name).is_err());
+        }
+    }
+
+    #[test]
+    fn explicit_single_file_destination_is_a_file_without_an_extra_directory() {
+        let data = data(20000, 3);
+        let info = build_info("movie.mkv", 16384, &[(&["movie.mkv"], &data)]);
+        let torrent = Torrent::from_info(&info, Extras::default()).unwrap();
+        assert!(!torrent.is_multi_file());
+        let directory = tempfile::tempdir().unwrap();
+        let storage =
+            Storage::with_output_name(&torrent, directory.path(), "O Resgate.mkv").unwrap();
+        storage.write(0, &data).unwrap();
+        assert_eq!(
+            std::fs::read(directory.path().join("O Resgate.mkv")).unwrap(),
+            data
+        );
+        assert!(!directory.path().join("movie.mkv").exists());
     }
 
     #[test]

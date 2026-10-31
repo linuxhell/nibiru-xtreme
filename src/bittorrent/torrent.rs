@@ -37,6 +37,8 @@ pub type PeerKey = u64;
 #[derive(Clone, Debug)]
 pub struct Settings {
     pub directory: PathBuf,
+    /// Optional validated basename for the payload file or multi-file root.
+    pub output_name: Option<String>,
     /// File indexes to download; `None` selects everything.
     pub selected: Option<Vec<usize>>,
     pub sequential: bool,
@@ -58,6 +60,7 @@ impl Settings {
     pub fn new(directory: impl Into<PathBuf>) -> Self {
         Self {
             directory: directory.into(),
+            output_name: None,
             selected: None,
             sequential: false,
             max_peers: 60,
@@ -990,7 +993,7 @@ pub(crate) async fn install_metadata(shared: &Arc<Shared>, mut torrent: Torrent)
         return fail(shared, error.to_string());
     }
     let torrent = Arc::new(torrent);
-    let (directory, selected) = {
+    let (directory, selected, output_name) = {
         let mut core = shared.lock();
         core.name = Some(torrent.name.clone());
         core.private = torrent.private;
@@ -1002,10 +1005,18 @@ pub(crate) async fn install_metadata(shared: &Arc<Shared>, mut torrent: Torrent)
         (
             core.settings.directory.clone(),
             core.settings.selected.clone(),
+            core.settings.output_name.clone(),
         )
     };
     shared.progress.notify_waiters();
-    let storage = Arc::new(Storage::new(&torrent, &directory));
+    let storage = match output_name.as_deref() {
+        Some(name) => match Storage::with_output_name(&torrent, &directory, name) {
+            Ok(storage) => storage,
+            Err(error) => return fail(shared, format!("invalid output: {error}")),
+        },
+        None => Storage::new(&torrent, &directory),
+    };
+    let storage = Arc::new(storage);
     let check = {
         let storage = storage.clone();
         let shared = shared.clone();

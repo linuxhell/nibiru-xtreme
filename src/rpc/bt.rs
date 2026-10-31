@@ -247,6 +247,13 @@ impl BtService {
             .map(PathBuf::from)
             .unwrap_or_else(|| self.config.default_dir.clone());
         let mut settings = Settings::new(dir);
+        if let Some(name) = text(options, "out") {
+            anyhow::ensure!(
+                crate::file_names::portable_component(name),
+                "invalid torrent output name"
+            );
+            settings.output_name = Some(name.to_owned());
+        }
         settings.max_peers = self.config.max_peers;
         settings.allow_loopback_peers = self.config.allow_loopback_peers;
         settings.seed_time = self.config.seed_time;
@@ -538,6 +545,10 @@ impl BtService {
     }
 
     pub fn change_option(&self, gid: &str, options: &Map<String, Value>) -> Result<()> {
+        anyhow::ensure!(
+            !options.contains_key("out"),
+            "torrent output cannot change after creation"
+        );
         self.with_task(gid, |task| -> Result<()> {
             // Validate fallible changes before mutating either the live task or its
             // persisted options, so an invalid request is atomic.
@@ -820,6 +831,28 @@ fn status_json(gid: &str, task: &BtTask, saved: Option<&Path>) -> Value {
 #[cfg(test)]
 mod audit_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn torrent_output_rejects_traversal_before_registering_a_task() {
+        let service = BtService::start(BtConfig {
+            dht: false,
+            dht6: false,
+            ..BtConfig::default()
+        })
+        .await
+        .unwrap();
+        let uri = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567";
+        for name in ["../bad", "a/b", "NUL", "trailing "] {
+            assert!(
+                service
+                    .add_magnet(uri, json!({"out": name}).as_object())
+                    .await
+                    .is_err()
+            );
+        }
+        assert!(service.list_ids().is_empty());
+        service.shutdown();
+    }
 
     #[test]
     fn ipv4_and_ipv6_dht_checkpoints_never_share_a_temporary_path() {

@@ -493,3 +493,41 @@ async fn rpc_rejects_bad_tokens_bad_torrents_and_bad_selections() {
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
+
+#[tokio::test]
+async fn adm_exact_destination_has_one_root_and_keeps_the_reserved_folder_name() {
+    let w = world().await;
+    let dir = tempfile::tempdir().unwrap();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(w.torrent.to_torrent_file());
+    let features = w.call("nibiru.getVersion", vec![]).await.unwrap();
+    assert!(
+        features["enabledFeatures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f == "BitTorrent-Out")
+    );
+    let gid = w
+        .call(
+            "nibiru.addTorrent",
+            vec![
+                json!(encoded),
+                json!([]),
+                json!({"dir":dir.path(), "out":"Show (1)", "seed-time":"0"}),
+            ],
+        )
+        .await
+        .unwrap();
+    let status = w.wait_status(gid.as_str().unwrap(), "complete").await;
+    for (path, bytes) in &w.files {
+        let file = path
+            .iter()
+            .fold(dir.path().join("Show (1)"), |p, c| p.join(c));
+        assert_eq!(std::fs::read(&file).unwrap(), *bytes);
+    }
+    assert!(!dir.path().join("Show").exists());
+    assert!(!dir.path().join("Show (1)/Show").exists());
+    assert!(status["files"].as_array().unwrap().iter().all(|f| {
+        std::path::Path::new(f["path"].as_str().unwrap()).starts_with(dir.path().join("Show (1)"))
+    }));
+}

@@ -385,6 +385,7 @@ impl RpcServer {
                     features.extend([
                         "BitTorrent",
                         "BitTorrent-v2",
+                        "BitTorrent-Out",
                         "Magnet",
                         "uTP",
                         "MSE",
