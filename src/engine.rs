@@ -694,7 +694,10 @@ impl Engine {
             .unwrap_or(0);
 
         if existing == 0
-            && let Ok((Some(total), ranges)) = self.probe(&request.url).await
+            // A requested single connection cannot use segmentation. Start its GET
+            // directly instead of waiting for HEAD and a one-byte range probe.
+            && self.request_options.max_connections.is_none_or(|n| n > 1)
+            && let Ok((Some(total), ranges)) = self.probe_http(&request.url, true).await
             && ranges
             && total >= MIN_SEGMENTED_SIZE
             && self.connection_count(total) > 1
@@ -1576,6 +1579,12 @@ impl Engine {
     }
 
     pub async fn probe(&self, url: &str) -> Result<(Option<u64>, bool)> {
+        self.probe_http(url, false).await
+    }
+
+    /// Download startup only tests ranges when the length and settings allow splitting.
+    /// The public probe still checks range support for files of every size.
+    async fn probe_http(&self, url: &str, for_segmentation: bool) -> Result<(Option<u64>, bool)> {
         let parsed = Url::parse(url)?;
         if !matches!(parsed.scheme(), "http" | "https") {
             bail!("unsupported protocol");
@@ -1602,7 +1611,10 @@ impl Engine {
             return Ok((None, false));
         }
 
-        if advertised_ranges {
+        if advertised_ranges
+            && (!for_segmentation
+                || total.is_some_and(|n| n >= MIN_SEGMENTED_SIZE && self.connection_count(n) > 1))
+        {
             let mut probe = self
                 .client
                 .get(parsed)

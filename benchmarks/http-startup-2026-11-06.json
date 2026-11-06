@@ -1,0 +1,2186 @@
+{
+  "fixture": "synthetic loopback; global rate pacing without catch-up credit",
+  "latency_ms": 40,
+  "rate_mib": 100,
+  "rounds": 5,
+  "profiles": {
+    "baseline": {
+      "sha256": "1da05f44324d80a9984a8f308841ae0fa0e42ac3c8122154be12236c3bd3a163",
+      "version": "nibiru-xtreme 0.2.3"
+    },
+    "candidate": {
+      "sha256": "f8a78beb545bc2fb0cda91080ed8cde4574eb2aa1e41e97519dad23aaf0ce45c",
+      "version": "nibiru-xtreme 0.2.3"
+    }
+  },
+  "samples": [
+    {
+      "label": "baseline",
+      "round": 1,
+      "bytes": 131072,
+      "connections": 1,
+      "seconds": 0.12896019899994826,
+      "mib_per_second": 0.9692913082434849,
+      "payload_request_ms": 82.65947800009599,
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-0"
+        },
+        {
+          "method": "GET",
+          "range": null
+        }
+      ],
+      "sha256": "59f410ae5e17962412e2aed4f815918f634932f2abf084f00bb638c4db017850"
+    },
+    {
+      "label": "baseline",
+      "round": 1,
+      "bytes": 131072,
+      "connections": 8,
+      "seconds": 0.12464759299996331,
+      "mib_per_second": 1.0028272266760643,
+      "payload_request_ms": 82.04288299998552,
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-0"
+        },
+        {
+          "method": "GET",
+          "range": null
+        }
+      ],
+      "sha256": "59f410ae5e17962412e2aed4f815918f634932f2abf084f00bb638c4db017850"
+    },
+    {
+      "label": "baseline",
+      "round": 1,
+      "bytes": 134217728,
+      "connections": 1,
+      "seconds": 1.6250131230001443,
+      "mib_per_second": 78.7685946582898,
+      "payload_request_ms": 82.84105500001715,
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-0"
+        },
+        {
+          "method": "GET",
+          "range": null
+        }
+      ],
+      "sha256": "a626d17da2e502f5b4b8e3ebd23f0bf9daef6255688d8e0bb482b3ae3794a682"
+    },
+    {
+      "label": "baseline",
+      "round": 1,
+      "bytes": 134217728,
+      "connections": 8,
+      "seconds": 1.6259300419999363,
+      "mib_per_second": 78.72417428400342,
+      "payload_request_ms": 83.54600500001652,
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-0"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=4194304-8388607"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-12582911"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12582912-16777215"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-4194303"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16777216-20971519"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=20971520-25165823"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=25165824-29360127"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-33554431"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=33554432-37748735"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=37748736-41943039"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-46137343"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=46137344-50331647"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-54525951"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=54525952-58720255"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-62914559"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=62914560-67108863"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=67108864-71303167"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=71303168-75497471"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=75497472-79691775"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=79691776-83886079"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=83886080-88080383"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=88080384-92274687"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=92274688-96468991"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=96468992-100663295"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=100663296-104857599"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=104857600-109051903"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=109051904-113246207"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=113246208-117440511"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=117440512-121634815"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=121634816-125829119"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=125829120-130023423"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=130023424-134217727"
+        }
+      ],
+      "sha256": "a626d17da2e502f5b4b8e3ebd23f0bf9daef6255688d8e0bb482b3ae3794a682"
+    },
+    {
+      "label": "candidate",
+      "round": 1,
+      "bytes": 131072,
+      "connections": 1,
+      "seconds": 0.04646792199991978,
+      "mib_per_second": 2.6900277572174582,
+      "payload_request_ms": 1.8647980000423559,
+      "requests": [
+        {
+          "method": "GET",
+          "range": null
+        }
+      ],
+      "sha256": "59f410ae5e17962412e2aed4f815918f634932f2abf084f00bb638c4db017850"
+    },
+    {
+      "label": "candidate",
+      "round": 1,
+      "bytes": 131072,
+      "connections": 8,
+      "seconds": 0.08455225700004121,
+      "mib_per_second": 1.4783756748201184,
+      "payload_request_ms": 41.553803999931915,
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null
+        },
+        {
+          "method": "GET",
+          "range": null
+        }
+      ],
+      "sha256": "59f410ae5e17962412e2aed4f815918f634932f2abf084f00bb638c4db017850"
+    },
+    {
+      "label": "candidate",
+      "round": 1,
+      "bytes": 134217728,
+      "connections": 1,
+      "seconds": 1.5608871410001939,
+      "mib_per_second": 82.00464763773981,
+      "payload_request_ms": 1.7724690001159615,
+      "requests": [
+        {
+          "method": "GET",
+          "range": null
+        }
+      ],
+      "sha256": "a626d17da2e502f5b4b8e3ebd23f0bf9daef6255688d8e0bb482b3ae3794a682"
+    },
+    {
+      "label": "candidate",
+      "round": 1,
+      "bytes": 134217728,
+      "connections": 8,
+      "seconds": 1.6100777310000467,
+      "mib_per_second": 79.4992673555562,
+      "payload_request_ms": 83.31009799985623,
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-0"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-4194303"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=4194304-8388607"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-12582911"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12582912-16777215"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16777216-20971519"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=20971520-25165823"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=25165824-29360127"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-33554431"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=33554432-37748735"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=37748736-41943039"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-46137343"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=46137344-50331647"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-54525951"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=54525952-58720255"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-62914559"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=62914560-67108863"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=67108864-71303167"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=71303168-75497471"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=75497472-79691775"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=79691776-83886079"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=83886080-88080383"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=88080384-92274687"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=92274688-96468991"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=96468992-100663295"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=100663296-104857599"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=104857600-109051903"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=109051904-113246207"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=113246208-117440511"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=117440512-121634815"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=121634816-125829119"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=125829120-130023423"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=130023424-134217727"
+        }
+      ],
+      "sha256": "a626d17da2e502f5b4b8e3ebd23f0bf9daef6255688d8e0bb482b3ae3794a682"
+    },
+    {
+      "label": "candidate",
+      "round": 2,
+      "bytes": 131072,
+      "connections": 1,
+      "seconds": 0.04578342099989641,
+      "mib_per_second": 2.7302459551959393,
+      "payload_request_ms": 1.3281239998832461,
+      "requests": [
+        {
+          "method": "GET",
+          "range": null
+        }
+      ],
+      "sha256": "59f410ae5e17962412e2aed4f815918f634932f2abf084f00bb638c4db017850"
+    },
+    {
+      "label": "candidate",
+      "round": 2,
+      "bytes": 131072,
+      "connections": 8,
+      "seconds": 0.08396860599987122,
+      "mib_per_second": 1.4886516039124398,
+      "payload_request_ms": 41.28569499994228,
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null
+        },
+        {
+          "method": "GET",
+          "range": null
+        }
+      ],
+      "sha256": "59f410ae5e17962412e2aed4f815918f634932f2abf084f00bb638c4db017850"
+    },
+    {
+      "label": "candidate",
+      "round": 2,
+      "bytes": 134217728,
+      "connections": 1,
+      "seconds": 1.5626223090000622,
+      "mib_per_second": 81.91358798781549,
+      "payload_request_ms": 1.459807000173896,
+      "requests": [
+        {
+          "method": "GET",
+          "range": null
+        }
+      ],
+      "sha256": "a626d17da2e502f5b4b8e3ebd23f0bf9daef6255688d8e0bb482b3ae3794a682"
+    },
+    {
+      "label": "candidate",
+      "round": 2,
+      "bytes": 134217728,
+      "connections": 8,
+      "seconds": 1.6332274100000177,
+      "mib_per_second": 78.37242947079771,
+      "payload_request_ms": 82.64378800004124,
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-0"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-4194303"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=4194304-8388607"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-12582911"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12582912-16777215"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16777216-20971519"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=20971520-25165823"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=25165824-29360127"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-33554431"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=33554432-37748735"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=37748736-41943039"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-46137343"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=46137344-50331647"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-54525951"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=54525952-58720255"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-62914559"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=62914560-67108863"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=67108864-71303167"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=71303168-75497471"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=75497472-79691775"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=79691776-83886079"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=83886080-88080383"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=88080384-92274687"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=92274688-96468991"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=96468992-100663295"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=100663296-104857599"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=104857600-109051903"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=109051904-113246207"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=113246208-117440511"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=117440512-121634815"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=121634816-125829119"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=125829120-130023423"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=130023424-134217727"
+        }
+      ],
+      "sha256": "a626d17da2e502f5b4b8e3ebd23f0bf9daef6255688d8e0bb482b3ae3794a682"
+    },
+    {
+      "label": "baseline",
+      "round": 2,
+      "bytes": 131072,
+      "connections": 1,
+      "seconds": 0.12503974700007348,
+      "mib_per_second": 0.9996821250760092,
+      "payload_request_ms": 82.38746600000013,
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-0"
+        },
+        {
+          "method": "GET",
+          "range": null
+        }
+      ],
+      "sha256": "59f410ae5e17962412e2aed4f815918f634932f2abf084f00bb638c4db017850"
+    },
+    {
+      "label": "baseline",
+      "round": 2,
+      "bytes": 131072,
+      "connections": 8,
+      "seconds": 0.12842715800002225,
+      "mib_per_second": 0.9733143826166296,
+      "payload_request_ms": 82.1953869999561,
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-0"
+        },
+        {
+          "method": "GET",
+          "range": null
+        }
+      ],
+      "sha256": "59f410ae5e17962412e2aed4f815918f634932f2abf084f00bb638c4db017850"
+    },
+    {
+      "label": "baseline",
+      "round": 2,
+      "bytes": 134217728,
+      "connections": 1,
+      "seconds": 1.6940001739999389,
+      "mib_per_second": 75.56079507227054,
+      "payload_request_ms": 82.5142329999835,
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-0"
+        },
+        {
+          "method": "GET",
+          "range": null
+        }
+      ],
+      "sha256": "a626d17da2e502f5b4b8e3ebd23f0bf9daef6255688d8e0bb482b3ae3794a682"
+    },
+    {
+      "label": "baseline",
+      "round": 2,
+      "bytes": 134217728,
+      "connections": 8,
+      "seconds": 1.628506507000111,
+      "mib_per_second": 78.5996245331498,
+      "payload_request_ms": 84.42823100017449,
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-0"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-4194303"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-12582911"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=4194304-8388607"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12582912-16777215"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16777216-20971519"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=20971520-25165823"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=25165824-29360127"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-33554431"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=33554432-37748735"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=37748736-41943039"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-46137343"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=46137344-50331647"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-54525951"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=54525952-58720255"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-62914559"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=62914560-67108863"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=67108864-71303167"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=71303168-75497471"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=75497472-79691775"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=79691776-83886079"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=83886080-88080383"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=88080384-92274687"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=92274688-96468991"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=96468992-100663295"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=100663296-104857599"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=104857600-109051903"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=109051904-113246207"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=113246208-117440511"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=117440512-121634815"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=121634816-125829119"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=125829120-130023423"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=130023424-134217727"
+        }
+      ],
+      "sha256": "a626d17da2e502f5b4b8e3ebd23f0bf9daef6255688d8e0bb482b3ae3794a682"
+    },
+    {
+      "label": "baseline",
+      "round": 3,
+      "bytes": 131072,
+      "connections": 1,
+      "seconds": 0.12428216199987219,
+      "mib_per_second": 1.00577587313076,
+      "payload_request_ms": 82.10915299991939,
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-0"
+        },
+        {
+          "method": "GET",
+          "range": null
+        }
+      ],
+      "sha256": "59f410ae5e17962412e2aed4f815918f634932f2abf084f00bb638c4db017850"
+    },
+    {
+      "label": "baseline",
+      "round": 3,
+      "bytes": 131072,
+      "connections": 8,
+      "seconds": 0.12468613199985157,
+      "mib_per_second": 1.0025172647119152,
+      "payload_request_ms": 81.70245499991324,
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-0"
+        },
+        {
+          "method": "GET",
+          "range": null
+        }
+      ],
+      "sha256": "59f410ae5e17962412e2aed4f815918f634932f2abf084f00bb638c4db017850"
+    },
+    {
+      "label": "baseline",
+      "round": 3,
+      "bytes": 134217728,
+      "connections": 1,
+      "seconds": 1.6506475799999407,
+      "mib_per_second": 77.54532315129593,
+      "payload_request_ms": 82.71671000011338,
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-0"
+        },
+        {
+          "method": "GET",
+          "range": null
+        }
+      ],
+      "sha256": "a626d17da2e502f5b4b8e3ebd23f0bf9daef6255688d8e0bb482b3ae3794a682"
+    },
+    {
+      "label": "baseline",
+      "round": 3,
+      "bytes": 134217728,
+      "connections": 8,
+      "seconds": 1.6148146509999606,
+      "mib_per_second": 79.26606308701562,
+      "payload_request_ms": 83.27308499997343,
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-0"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-4194303"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=4194304-8388607"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-12582911"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12582912-16777215"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16777216-20971519"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=20971520-25165823"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=25165824-29360127"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-33554431"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=33554432-37748735"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=37748736-41943039"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-46137343"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=46137344-50331647"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-54525951"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=54525952-58720255"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-62914559"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=62914560-67108863"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=67108864-71303167"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=71303168-75497471"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=75497472-79691775"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=79691776-83886079"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=83886080-88080383"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=88080384-92274687"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=92274688-96468991"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=96468992-100663295"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=100663296-104857599"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=104857600-109051903"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=109051904-113246207"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=113246208-117440511"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=117440512-121634815"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=121634816-125829119"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=125829120-130023423"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=130023424-134217727"
+        }
+      ],
+      "sha256": "a626d17da2e502f5b4b8e3ebd23f0bf9daef6255688d8e0bb482b3ae3794a682"
+    },
+    {
+      "label": "candidate",
+      "round": 3,
+      "bytes": 131072,
+      "connections": 1,
+      "seconds": 0.04552303699983895,
+      "mib_per_second": 2.745862495958743,
+      "payload_request_ms": 1.3084629999866593,
+      "requests": [
+        {
+          "method": "GET",
+          "range": null
+        }
+      ],
+      "sha256": "59f410ae5e17962412e2aed4f815918f634932f2abf084f00bb638c4db017850"
+    },
+    {
+      "label": "candidate",
+      "round": 3,
+      "bytes": 131072,
+      "connections": 8,
+      "seconds": 0.08507931400004054,
+      "mib_per_second": 1.469217299988343,
+      "payload_request_ms": 41.81927500007987,
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null
+        },
+        {
+          "method": "GET",
+          "range": null
+        }
+      ],
+      "sha256": "59f410ae5e17962412e2aed4f815918f634932f2abf084f00bb638c4db017850"
+    },
+    {
+      "label": "candidate",
+      "round": 3,
+      "bytes": 134217728,
+      "connections": 1,
+      "seconds": 1.5512808920000225,
+      "mib_per_second": 82.51245835625116,
+      "payload_request_ms": 1.9440080000094895,
+      "requests": [
+        {
+          "method": "GET",
+          "range": null
+        }
+      ],
+      "sha256": "a626d17da2e502f5b4b8e3ebd23f0bf9daef6255688d8e0bb482b3ae3794a682"
+    },
+    {
+      "label": "candidate",
+      "round": 3,
+      "bytes": 134217728,
+      "connections": 8,
+      "seconds": 1.628121586999896,
+      "mib_per_second": 78.6182070319839,
+      "payload_request_ms": 83.2554880000771,
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-0"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=4194304-8388607"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-12582911"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-4194303"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12582912-16777215"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16777216-20971519"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=20971520-25165823"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=25165824-29360127"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-33554431"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=33554432-37748735"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=37748736-41943039"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-46137343"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=46137344-50331647"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-54525951"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=54525952-58720255"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-62914559"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=62914560-67108863"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=67108864-71303167"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=71303168-75497471"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=75497472-79691775"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=79691776-83886079"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=83886080-88080383"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=88080384-92274687"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=92274688-96468991"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=96468992-100663295"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=100663296-104857599"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=104857600-109051903"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=109051904-113246207"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=113246208-117440511"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=117440512-121634815"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=121634816-125829119"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=125829120-130023423"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=130023424-134217727"
+        }
+      ],
+      "sha256": "a626d17da2e502f5b4b8e3ebd23f0bf9daef6255688d8e0bb482b3ae3794a682"
+    },
+    {
+      "label": "candidate",
+      "round": 4,
+      "bytes": 131072,
+      "connections": 1,
+      "seconds": 0.047300355000061245,
+      "mib_per_second": 2.6426862969598885,
+      "payload_request_ms": 1.709740000023885,
+      "requests": [
+        {
+          "method": "GET",
+          "range": null
+        }
+      ],
+      "sha256": "59f410ae5e17962412e2aed4f815918f634932f2abf084f00bb638c4db017850"
+    },
+    {
+      "label": "candidate",
+      "round": 4,
+      "bytes": 131072,
+      "connections": 8,
+      "seconds": 0.08651809399998456,
+      "mib_per_second": 1.4447844863529045,
+      "payload_request_ms": 41.689544000064416,
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null
+        },
+        {
+          "method": "GET",
+          "range": null
+        }
+      ],
+      "sha256": "59f410ae5e17962412e2aed4f815918f634932f2abf084f00bb638c4db017850"
+    },
+    {
+      "label": "candidate",
+      "round": 4,
+      "bytes": 134217728,
+      "connections": 1,
+      "seconds": 1.5820999870002197,
+      "mib_per_second": 80.90512676300415,
+      "payload_request_ms": 1.9222060000174679,
+      "requests": [
+        {
+          "method": "GET",
+          "range": null
+        }
+      ],
+      "sha256": "a626d17da2e502f5b4b8e3ebd23f0bf9daef6255688d8e0bb482b3ae3794a682"
+    },
+    {
+      "label": "candidate",
+      "round": 4,
+      "bytes": 134217728,
+      "connections": 8,
+      "seconds": 1.584705877000033,
+      "mib_per_second": 80.77208639013416,
+      "payload_request_ms": 82.97690499989585,
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-0"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-4194303"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-12582911"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=4194304-8388607"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12582912-16777215"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16777216-20971519"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=25165824-29360127"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=20971520-25165823"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-33554431"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=33554432-37748735"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=37748736-41943039"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-46137343"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=46137344-50331647"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-54525951"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=54525952-58720255"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-62914559"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=62914560-67108863"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=67108864-71303167"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=71303168-75497471"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=75497472-79691775"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=79691776-83886079"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=83886080-88080383"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=88080384-92274687"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=92274688-96468991"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=96468992-100663295"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=100663296-104857599"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=104857600-109051903"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=109051904-113246207"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=113246208-117440511"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=117440512-121634815"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=121634816-125829119"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=125829120-130023423"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=130023424-134217727"
+        }
+      ],
+      "sha256": "a626d17da2e502f5b4b8e3ebd23f0bf9daef6255688d8e0bb482b3ae3794a682"
+    },
+    {
+      "label": "baseline",
+      "round": 4,
+      "bytes": 131072,
+      "connections": 1,
+      "seconds": 0.13076164900007825,
+      "mib_per_second": 0.9559377765259384,
+      "payload_request_ms": 81.9592800000919,
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-0"
+        },
+        {
+          "method": "GET",
+          "range": null
+        }
+      ],
+      "sha256": "59f410ae5e17962412e2aed4f815918f634932f2abf084f00bb638c4db017850"
+    },
+    {
+      "label": "baseline",
+      "round": 4,
+      "bytes": 131072,
+      "connections": 8,
+      "seconds": 0.12493120400017688,
+      "mib_per_second": 1.0005506710703198,
+      "payload_request_ms": 82.38819300004252,
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-0"
+        },
+        {
+          "method": "GET",
+          "range": null
+        }
+      ],
+      "sha256": "59f410ae5e17962412e2aed4f815918f634932f2abf084f00bb638c4db017850"
+    },
+    {
+      "label": "baseline",
+      "round": 4,
+      "bytes": 134217728,
+      "connections": 1,
+      "seconds": 1.6707777980000174,
+      "mib_per_second": 76.6110252082717,
+      "payload_request_ms": 82.32882299989797,
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-0"
+        },
+        {
+          "method": "GET",
+          "range": null
+        }
+      ],
+      "sha256": "a626d17da2e502f5b4b8e3ebd23f0bf9daef6255688d8e0bb482b3ae3794a682"
+    },
+    {
+      "label": "baseline",
+      "round": 4,
+      "bytes": 134217728,
+      "connections": 8,
+      "seconds": 1.6593578590000106,
+      "mib_per_second": 77.13827328189319,
+      "payload_request_ms": 82.81526099995062,
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-0"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-4194303"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=4194304-8388607"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12582912-16777215"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-12582911"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16777216-20971519"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=20971520-25165823"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=25165824-29360127"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-33554431"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=33554432-37748735"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=37748736-41943039"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-46137343"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=46137344-50331647"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-54525951"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=54525952-58720255"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-62914559"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=62914560-67108863"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=67108864-71303167"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=71303168-75497471"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=75497472-79691775"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=79691776-83886079"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=83886080-88080383"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=88080384-92274687"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=92274688-96468991"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=96468992-100663295"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=100663296-104857599"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=104857600-109051903"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=109051904-113246207"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=113246208-117440511"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=117440512-121634815"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=121634816-125829119"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=125829120-130023423"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=130023424-134217727"
+        }
+      ],
+      "sha256": "a626d17da2e502f5b4b8e3ebd23f0bf9daef6255688d8e0bb482b3ae3794a682"
+    },
+    {
+      "label": "baseline",
+      "round": 5,
+      "bytes": 131072,
+      "connections": 1,
+      "seconds": 0.12862384000004567,
+      "mib_per_second": 0.9718260627264402,
+      "payload_request_ms": 83.16263100005017,
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-0"
+        },
+        {
+          "method": "GET",
+          "range": null
+        }
+      ],
+      "sha256": "59f410ae5e17962412e2aed4f815918f634932f2abf084f00bb638c4db017850"
+    },
+    {
+      "label": "baseline",
+      "round": 5,
+      "bytes": 131072,
+      "connections": 8,
+      "seconds": 0.12887494799997512,
+      "mib_per_second": 0.9699324961126202,
+      "payload_request_ms": 82.45149799995488,
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-0"
+        },
+        {
+          "method": "GET",
+          "range": null
+        }
+      ],
+      "sha256": "59f410ae5e17962412e2aed4f815918f634932f2abf084f00bb638c4db017850"
+    },
+    {
+      "label": "baseline",
+      "round": 5,
+      "bytes": 134217728,
+      "connections": 1,
+      "seconds": 1.6646467030000167,
+      "mib_per_second": 76.89319287349029,
+      "payload_request_ms": 82.460982999919,
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-0"
+        },
+        {
+          "method": "GET",
+          "range": null
+        }
+      ],
+      "sha256": "a626d17da2e502f5b4b8e3ebd23f0bf9daef6255688d8e0bb482b3ae3794a682"
+    },
+    {
+      "label": "baseline",
+      "round": 5,
+      "bytes": 134217728,
+      "connections": 8,
+      "seconds": 1.6232307459999902,
+      "mib_per_second": 78.85508595461312,
+      "payload_request_ms": 82.8778400000374,
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-0"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=4194304-8388607"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-4194303"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-12582911"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12582912-16777215"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16777216-20971519"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=20971520-25165823"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=25165824-29360127"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-33554431"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=33554432-37748735"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=37748736-41943039"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-46137343"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=46137344-50331647"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-54525951"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=54525952-58720255"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-62914559"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=62914560-67108863"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=67108864-71303167"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=71303168-75497471"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=75497472-79691775"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=79691776-83886079"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=83886080-88080383"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=88080384-92274687"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=92274688-96468991"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=96468992-100663295"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=100663296-104857599"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=104857600-109051903"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=109051904-113246207"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=113246208-117440511"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=117440512-121634815"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=121634816-125829119"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=125829120-130023423"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=130023424-134217727"
+        }
+      ],
+      "sha256": "a626d17da2e502f5b4b8e3ebd23f0bf9daef6255688d8e0bb482b3ae3794a682"
+    },
+    {
+      "label": "candidate",
+      "round": 5,
+      "bytes": 131072,
+      "connections": 1,
+      "seconds": 0.047023600000102306,
+      "mib_per_second": 2.6582396924039853,
+      "payload_request_ms": 1.5364920000138227,
+      "requests": [
+        {
+          "method": "GET",
+          "range": null
+        }
+      ],
+      "sha256": "59f410ae5e17962412e2aed4f815918f634932f2abf084f00bb638c4db017850"
+    },
+    {
+      "label": "candidate",
+      "round": 5,
+      "bytes": 131072,
+      "connections": 8,
+      "seconds": 0.08797329300000456,
+      "mib_per_second": 1.4208857681386726,
+      "payload_request_ms": 44.26462300011735,
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null
+        },
+        {
+          "method": "GET",
+          "range": null
+        }
+      ],
+      "sha256": "59f410ae5e17962412e2aed4f815918f634932f2abf084f00bb638c4db017850"
+    },
+    {
+      "label": "candidate",
+      "round": 5,
+      "bytes": 134217728,
+      "connections": 1,
+      "seconds": 1.5988983390000158,
+      "mib_per_second": 80.0551210029112,
+      "payload_request_ms": 1.4981409999563766,
+      "requests": [
+        {
+          "method": "GET",
+          "range": null
+        }
+      ],
+      "sha256": "a626d17da2e502f5b4b8e3ebd23f0bf9daef6255688d8e0bb482b3ae3794a682"
+    },
+    {
+      "label": "candidate",
+      "round": 5,
+      "bytes": 134217728,
+      "connections": 8,
+      "seconds": 1.6239759490001688,
+      "mib_per_second": 78.81890127671262,
+      "payload_request_ms": 82.98347499999181,
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-0"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-4194303"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=4194304-8388607"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-12582911"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12582912-16777215"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16777216-20971519"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=20971520-25165823"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=25165824-29360127"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-33554431"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=33554432-37748735"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=37748736-41943039"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-46137343"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=46137344-50331647"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-54525951"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=54525952-58720255"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-62914559"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=62914560-67108863"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=67108864-71303167"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=71303168-75497471"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=75497472-79691775"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=79691776-83886079"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=83886080-88080383"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=88080384-92274687"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=92274688-96468991"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=96468992-100663295"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=100663296-104857599"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=104857600-109051903"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=109051904-113246207"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=113246208-117440511"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=117440512-121634815"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=121634816-125829119"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=125829120-130023423"
+        },
+        {
+          "method": "GET",
+          "range": "bytes=130023424-134217727"
+        }
+      ],
+      "sha256": "a626d17da2e502f5b4b8e3ebd23f0bf9daef6255688d8e0bb482b3ae3794a682"
+    }
+  ],
+  "medians": [
+    {
+      "label": "baseline",
+      "size_mib": 0.125,
+      "connections": 1,
+      "seconds": 0.12862384000004567,
+      "payload_request_ms": 82.38746600000013
+    },
+    {
+      "label": "baseline",
+      "size_mib": 0.125,
+      "connections": 8,
+      "seconds": 0.12493120400017688,
+      "payload_request_ms": 82.1953869999561
+    },
+    {
+      "label": "baseline",
+      "size_mib": 128,
+      "connections": 1,
+      "seconds": 1.6646467030000167,
+      "payload_request_ms": 82.5142329999835
+    },
+    {
+      "label": "baseline",
+      "size_mib": 128,
+      "connections": 8,
+      "seconds": 1.6259300419999363,
+      "payload_request_ms": 83.27308499997343
+    },
+    {
+      "label": "candidate",
+      "size_mib": 0.125,
+      "connections": 1,
+      "seconds": 0.04646792199991978,
+      "payload_request_ms": 1.5364920000138227
+    },
+    {
+      "label": "candidate",
+      "size_mib": 0.125,
+      "connections": 8,
+      "seconds": 0.08507931400004054,
+      "payload_request_ms": 41.689544000064416
+    },
+    {
+      "label": "candidate",
+      "size_mib": 128,
+      "connections": 1,
+      "seconds": 1.5626223090000622,
+      "payload_request_ms": 1.7724690001159615
+    },
+    {
+      "label": "candidate",
+      "size_mib": 128,
+      "connections": 8,
+      "seconds": 1.6239759490001688,
+      "payload_request_ms": 82.98347499999181
+    }
+  ],
+  "base_commit": "d44d1d5cd6d8556938d2722ad02bbd417993a86f",
+  "candidate": "base commit plus HTTP startup probe changes; measured before the 0.2.4 version bump",
+  "environment": {
+    "system": "Linux",
+    "machine": "x86_64",
+    "python": "3.12.14",
+    "rust": "1.97.0",
+    "build": "release --locked --no-default-features",
+    "concurrent_compilation": false
+  }
+}

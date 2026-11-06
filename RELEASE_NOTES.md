@@ -1,6 +1,6 @@
-# Nibiru Xtreme 0.2.3
+# Nibiru Xtreme 0.2.4
 
-- Support a validated RPC `out` basename for multi-file torrent roots and single-file payloads; keep torrent metadata and info hashes unchanged.
-- Advertise `BitTorrent-Out` so ADM can require exact destination support instead of silently creating nested folders.
-- Preserve nested content paths, selected files, default layouts and resume verification. Reject traversal and changes to `out` after creation.
-- Includes storage and real loopback RPC download regressions for reserved destinations, single-file output and resume.
+- Start single-connection HTTP/HTTPS downloads with GET instead of waiting for HEAD and an unused one-byte range test.
+- Skip the one-byte test when the file length or minimum split size rules out segmentation. Keep the public diagnostic probe and segmented range validation intact.
+- Preserve connection caps, validated resume, destination protection, headers, proxies and rate limits.
+- Include RPC request-count regressions and a reproducible local comparison with 40 SHA-256-verified transfers. The measured gain is startup latency; sustained multi-connection throughput was unchanged within measurement noise.
