@@ -2,6 +2,8 @@
 
 # Nibiru Xtreme
 
+Version 0.2.5 fixes automatic peer-port selection: reserve UDP/uTP before binding TCP to the same port. If TCP cannot use that port, retry within a fixed bound and release the abandoned reservation. Explicit ports remain explicit, and uTP stays enabled. This addresses the startup failure reported as error 10013 in Windows CI.
+
 Version 0.2.4 reduces HTTP/HTTPS startup overhead: a single connection starts with GET, and files too small to split skip the unused range test. Resume validation and connection caps are preserved. Measurements show startup and total-time improvements in a [local fixture](benchmarks/http-startup-2026-11-06.md), without claiming higher sustained Internet throughput.
 
 Version 0.2.3 supports an exact torrent payload filename or content-root basename over RPC (`dir` + `out`). This prevents duplicated root folders in ADM and honors reserved names used to avoid destination conflicts. The output is restricted to a portable basename; the default layout without `out` is unchanged.
@@ -14,7 +16,7 @@ HTTPS uses public roots together with the operating system trust store while kee
 
 ## Status
 
-**Stable version 0.2.4.** The native engine for Apocalipse Download Manager, packaged for Windows, Linux and macOS with SHA-256 files.
+**Stable version 0.2.5.** The native engine for Apocalipse Download Manager, packaged for Windows, Linux and macOS with SHA-256 files.
 
 ED2K preview does not require a fixed 30–40 MB total: ADM enables it once the first MD4-authenticated part is available (up to 9,728,000 bytes). Other peers help finish the header and tail before middle parts so a slow source cannot monopolize preview data. MP4/AVI may also need their tail index; missing ranges wait for data rather than exposing disk holes.
 

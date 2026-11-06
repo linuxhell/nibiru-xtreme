@@ -453,19 +453,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_bytes_on_the_wire_carry_no_protocol_marker_or_plaintext() {
+    async fn the_wire_uses_a_non_protocol_handshake_marker_and_encrypts_the_payload() {
+        const PLAINTEXT: [u8; 6] = [0xe3, 1, 0, 0, 0, 1];
         let hash = [0x42u8; 16];
         let (a, mut b) = tokio::io::duplex(65536);
         let initiator = tokio::spawn(async move {
             let mut stream = initiate(a, &hash).await.unwrap();
-            stream.write_all(&[0xe3, 1, 0, 0, 0, 1]).await.unwrap();
+            stream.write_all(&PLAINTEXT).await.unwrap();
             stream
         });
         let mut wire = vec![0u8; 5];
         b.read_exact(&mut wire).await.unwrap();
         assert!(!is_protocol_byte(wire[0]));
         // Complete the responder side by hand so the initiator can finish.
-        let marker = wire[0];
         let mut random = [0u8; 4];
         random.copy_from_slice(&wire[1..5]);
         let (mut send, mut receive) = ciphers(&hash, random, false);
@@ -486,11 +486,17 @@ mod tests {
         let _stream = initiator.await.unwrap();
         let mut payload = [0u8; 6];
         b.read_exact(&mut payload).await.unwrap();
-        assert_ne!(payload[0], 0xe3, "the first payload byte must be encrypted");
-        let _ = marker;
         receive.apply(&mut skip);
+        // A zero keystream byte can leave a plaintext byte unchanged. Check the
+        // exact ciphertext after handshake/padding instead of a random inequality.
+        let mut expected_payload = PLAINTEXT;
+        receive.clone().apply(&mut expected_payload);
+        assert_eq!(
+            payload, expected_payload,
+            "the whole payload must be encrypted"
+        );
         receive.apply(&mut payload);
-        assert_eq!(payload, [0xe3, 1, 0, 0, 0, 1]);
+        assert_eq!(payload, PLAINTEXT);
     }
 
     #[tokio::test]

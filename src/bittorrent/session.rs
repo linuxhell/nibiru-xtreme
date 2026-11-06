@@ -82,44 +82,88 @@ fn new_peer_id() -> [u8; 20] {
     id
 }
 
+fn bind_tcp_peer(address: SocketAddr) -> librqbit_dualstack_sockets::Result<TcpListener> {
+    TcpListener::bind_tcp(address, Default::default()).or_else(|error| {
+        if address.ip() == IpAddr::V6(Ipv6Addr::UNSPECIFIED) {
+            TcpListener::bind_tcp(
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), address.port()),
+                Default::default(),
+            )
+        } else {
+            Err(error)
+        }
+    })
+}
+
 impl Session {
     pub async fn start(config: SessionConfig) -> Result<Arc<Self>> {
-        let listener = TcpListener::bind_tcp(
-            SocketAddr::new(config.bind, config.listen_port),
-            Default::default(),
-        )
-        .or_else(|error| {
-            if config.bind == IpAddr::V6(Ipv6Addr::UNSPECIFIED) {
-                TcpListener::bind_tcp(
-                    SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.listen_port),
-                    Default::default(),
-                )
-            } else {
-                Err(error)
-            }
-        })
-        .with_context(|| format!("cannot listen on port {}", config.listen_port))?;
-        let port = listener.bind_addr().port();
-        let mut utp_cancel = None;
-        let utp = if config.enable_utp {
-            let options = librqbit_utp::SocketOpts {
-                max_live_vsocks: std::num::NonZeroUsize::new(256),
-                remote_inactivity_timeout: Some(Duration::from_secs(180)),
-                ..Default::default()
-            };
-            utp_cancel = Some(options.cancellation_token.clone());
-            Some(
-                librqbit_utp::UtpSocketUdp::new_udp_with_opts(
-                    SocketAddr::new(listener.bind_addr().ip(), port),
-                    options,
+        Self::start_with_tcp_bind(config, bind_tcp_peer).await
+    }
+
+    async fn start_with_tcp_bind(
+        config: SessionConfig,
+        mut bind_tcp: impl FnMut(SocketAddr) -> librqbit_dualstack_sockets::Result<TcpListener> + Send,
+    ) -> Result<Arc<Self>> {
+        let (listener, utp, utp_cancel) = if config.enable_utp {
+            let mut attempts = 0;
+            loop {
+                attempts += 1;
+                let options = librqbit_utp::SocketOpts {
+                    max_live_vsocks: std::num::NonZeroUsize::new(256),
+                    remote_inactivity_timeout: Some(Duration::from_secs(180)),
+                    ..Default::default()
+                };
+                let cancel_on_drop = options.cancellation_token.clone().drop_guard();
+                // A TCP-selected ephemeral port can be reserved or busy for UDP on
+                // Windows. Hold a real uTP socket first, then bind TCP to its port.
+                let utp = match librqbit_utp::UtpSocketUdp::new_udp_with_opts(
+                    SocketAddr::new(config.bind, config.listen_port),
+                    options.clone(),
                     Default::default(),
                 )
                 .await
-                .context("cannot bind uTP peer port")?,
-            )
+                {
+                    Ok(socket) => Ok(socket),
+                    Err(_) if config.bind == IpAddr::V6(Ipv6Addr::UNSPECIFIED) => {
+                        librqbit_utp::UtpSocketUdp::new_udp_with_opts(
+                            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.listen_port),
+                            options,
+                            Default::default(),
+                        )
+                        .await
+                    }
+                    Err(error) => Err(error),
+                }
+                .context("cannot bind uTP peer port")?;
+                let address = utp.bind_addr();
+                match bind_tcp(address) {
+                    Ok(listener) => break (listener, Some(utp), Some(cancel_on_drop)),
+                    Err(error) => {
+                        // Cancel the dispatcher's reference too; dropping our Arc
+                        // alone would leave the abandoned UDP socket listening.
+                        drop(utp);
+                        drop(cancel_on_drop);
+                        let unavailable = matches!(
+                            &error,
+                            librqbit_dualstack_sockets::Error::Bind(source)
+                                if matches!(source.kind(), std::io::ErrorKind::AddrInUse
+                                    | std::io::ErrorKind::PermissionDenied)
+                        );
+                        if config.listen_port != 0 || !unavailable || attempts >= 32 {
+                            return Err(error).with_context(|| {
+                                format!("cannot listen on TCP port {}", address.port())
+                            });
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                }
+            }
         } else {
-            None
+            let listener = bind_tcp(SocketAddr::new(config.bind, config.listen_port))
+                .with_context(|| format!("cannot listen on port {}", config.listen_port))?;
+            (listener, None, None)
         };
+        let port = listener.bind_addr().port();
         let dht = match config.dht.clone() {
             Some(mut dht_config) => {
                 if dht_config.port == 0 {
@@ -205,11 +249,11 @@ impl Session {
                 });
             }
         });
-        if let Some(token) = utp_cancel {
+        if let Some(cancel_on_drop) = utp_cancel {
             let mut stopped = session.stop.subscribe();
             tokio::spawn(async move {
                 let _ = stopped.changed().await;
-                token.cancel();
+                drop(cancel_on_drop);
             });
         }
         if let Some(utp) = utp {
@@ -487,6 +531,121 @@ impl Session {
 mod audit_tests {
     use super::*;
     use crate::bittorrent::metainfo::build_info;
+
+    async fn assert_udp_released(address: SocketAddr) {
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if std::net::UdpSocket::bind(address).is_ok() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("an abandoned peer listener retained its UDP port");
+    }
+
+    #[tokio::test]
+    async fn automatic_peer_port_holds_tcp_and_utp_on_the_same_port() {
+        let session = Session::start(SessionConfig {
+            bind: "127.0.0.1".parse().unwrap(),
+            ..SessionConfig::default()
+        })
+        .await
+        .unwrap();
+        let address = session
+            .utp
+            .as_ref()
+            .expect("uTP must remain enabled")
+            .bind_addr();
+        assert_ne!(address.port(), 0);
+        assert_eq!(address.port(), session.port());
+        assert!(std::net::TcpListener::bind(address).is_err());
+        assert!(std::net::UdpSocket::bind(address).is_err());
+        drop(session);
+        assert_udp_released(address).await;
+    }
+
+    #[tokio::test]
+    async fn automatic_peer_port_retries_tcp_conflicts_and_releases_failed_utp_sockets() {
+        for kind in [
+            std::io::ErrorKind::AddrInUse,
+            std::io::ErrorKind::PermissionDenied,
+        ] {
+            let mut attempts = 0;
+            let mut abandoned = None;
+            let session = Session::start_with_tcp_bind(
+                SessionConfig {
+                    bind: "127.0.0.1".parse().unwrap(),
+                    ..SessionConfig::default()
+                },
+                |address| {
+                    attempts += 1;
+                    if attempts == 1 {
+                        abandoned = Some(address);
+                        return Err(librqbit_dualstack_sockets::Error::Bind(
+                            std::io::Error::new(kind, "fixture TCP port unavailable"),
+                        ));
+                    }
+                    bind_tcp_peer(address)
+                },
+            )
+            .await
+            .unwrap();
+            assert!(attempts >= 2);
+            assert!(session.utp_enabled());
+            assert_eq!(
+                session.utp.as_ref().unwrap().bind_addr().port(),
+                session.port()
+            );
+            drop(session);
+            assert_udp_released(abandoned.unwrap()).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn automatic_peer_port_gives_up_and_releases_all_failed_attempts() {
+        let mut addresses = Vec::new();
+        let error = Session::start_with_tcp_bind(
+            SessionConfig {
+                bind: "127.0.0.1".parse().unwrap(),
+                ..SessionConfig::default()
+            },
+            |address| {
+                addresses.push(address);
+                Err(librqbit_dualstack_sockets::Error::Bind(
+                    std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "fixture TCP binding denied",
+                    ),
+                ))
+            },
+        )
+        .await
+        .err()
+        .expect("binding failure must remain an error");
+        assert!(error.to_string().contains("cannot listen on TCP port"));
+        assert_eq!(addresses.len(), 32);
+        for address in addresses {
+            assert_udp_released(address).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn an_explicit_unavailable_utp_port_is_not_changed_or_disabled() {
+        let foreign = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let address = foreign.local_addr().unwrap();
+        let error = Session::start(SessionConfig {
+            bind: address.ip(),
+            listen_port: address.port(),
+            ..SessionConfig::default()
+        })
+        .await
+        .err()
+        .expect("the requested UDP port is already owned");
+        assert!(error.to_string().contains("cannot bind uTP peer port"));
+        assert_eq!(foreign.local_addr().unwrap(), address);
+    }
 
     #[tokio::test]
     async fn dropping_an_idle_session_releases_its_tcp_listener() {

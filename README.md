@@ -2,6 +2,8 @@
 
 # Nibiru Xtreme
 
+A versão 0.2.5 corrige a escolha automática da porta de peers: reserva UDP/uTP antes de abrir TCP no mesmo número. Se essa porta não puder ser usada por TCP, tenta outra com limite de tentativas e libera a reserva anterior. Portas explícitas continuam sendo respeitadas; uTP permanece habilitado. Isso corrige a inicialização que falhou com erro 10013 no CI Windows.
+
 A versão 0.2.4 reduz a espera antes de baixar por HTTP/HTTPS: com uma conexão, começa pelo GET; em arquivos pequenos ou abaixo do tamanho mínimo de divisão, dispensa o teste de faixa que não seria usado. Mantém a verificação de retomada e o limite de threads. A melhora medida é de início e tempo total em uma [fixture local](benchmarks/http-startup-2026-11-06.md), sem promessa de maior velocidade contínua da Internet.
 
 A versão 0.2.3 permite informar o nome exato do arquivo ou da pasta de conteúdo de um torrent por RPC (`dir` + `out`). Isso evita uma segunda pasta com o mesmo nome no ADM e mantém nomes reservados para evitar conflitos. O caminho continua limitado a um nome portável; sem `out`, o layout padrão permanece igual.
@@ -14,7 +16,7 @@ O HTTPS usa as raízes públicas e os certificados confiáveis do sistema, mante
 
 ## Estado
 
-**Versão estável 0.2.4.** Motor nativo do Apocalipse Download Manager, distribuído para Windows, Linux e macOS com arquivos SHA-256.
+**Versão estável 0.2.5.** Motor nativo do Apocalipse Download Manager, distribuído para Windows, Linux e macOS com arquivos SHA-256.
 
 A prévia ED2K não depende de chegar a 30 ou 40 MB no total: o ADM libera o botão quando a primeira parte está autenticada por MD4 (até 9.728.000 bytes). Outros peers ajudam a terminar o início e o fim do arquivo antes das partes do meio, evitando que um peer lento retenha a prévia. MP4/AVI podem precisar também do índice no fim; trechos ainda ausentes aguardam dados, sem fornecer buracos do arquivo ao player.
 
