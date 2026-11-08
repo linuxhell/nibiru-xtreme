@@ -142,10 +142,14 @@ fn number(data: &mut Vec<u8>, id: u8, value: u32) {
     data.extend(value.to_le_bytes());
 }
 pub(crate) fn hello(hash: [u8; 16], client_id: u32) -> Vec<u8> {
+    hello_with_port(hash, client_id, 0)
+}
+
+pub(crate) fn hello_with_port(hash: [u8; 16], client_id: u32, tcp_port: u16) -> Vec<u8> {
     let mut data = vec![16];
     data.extend(hash);
     data.extend(client_id.to_le_bytes());
-    data.extend(0u16.to_le_bytes());
+    data.extend(tcp_port.to_le_bytes());
     data.extend(4u32.to_le_bytes());
     let name = b"Apocalipse Nibiru";
     data.extend([2, 1, 0, 1]);

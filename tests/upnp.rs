@@ -33,6 +33,7 @@ struct Router {
     adds: Arc<Mutex<Vec<Entry>>>,
     deletes: Arc<Mutex<Vec<(String, u16)>>>,
     permanent_only: Arc<AtomicBool>,
+    drop_first_search: Arc<AtomicBool>,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -226,12 +227,20 @@ async fn router(location_host: Option<&str>) -> Router {
     let socket = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
     let ssdp = socket.local_addr().unwrap();
     let host = location_host.unwrap_or("127.0.0.1").to_owned();
+    let drop_first_search = Arc::new(AtomicBool::new(false));
+    let drop_first = drop_first_search.clone();
     let responder = tokio::spawn(async move {
         let mut buffer = [0u8; 2048];
+        let mut dropped_source = None;
         loop {
             let Ok((_, from)) = socket.recv_from(&mut buffer).await else {
                 return;
             };
+            // igd-next sends several search targets from one socket. Drop the whole
+            // first search batch, not just its first datagram.
+            if drop_first.load(Ordering::Acquire) && *dropped_source.get_or_insert(from) == from {
+                continue;
+            }
             let reply = format!(
                 "HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=120\r\nLOCATION: http://{host}:{http_port}/rootDesc.xml\r\nST: urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\nUSN: uuid:fake::urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n\r\n"
             );
@@ -244,6 +253,7 @@ async fn router(location_host: Option<&str>) -> Router {
         adds,
         deletes,
         permanent_only,
+        drop_first_search,
         tasks: vec![server, responder],
     }
 }
@@ -399,4 +409,21 @@ async fn a_router_that_points_elsewhere_is_not_trusted() {
     assert_eq!(upnp.status().state, "failed");
     assert!(router.adds.lock().unwrap().is_empty());
     upnp.release().await;
+}
+
+#[tokio::test]
+async fn discovery_recovers_when_the_first_ssdp_search_batch_is_lost() {
+    let router = router(None).await;
+    router.drop_first_search.store(true, Ordering::Release);
+    let client = client(router.ssdp, Duration::from_secs(3600));
+    tokio::time::timeout(Duration::from_secs(4), client.apply(vec![tcp(4662)]))
+        .await
+        .unwrap();
+    assert_eq!(
+        client.status().state,
+        "mapped",
+        "a lost UDP discovery batch must not hide a reachable router"
+    );
+    assert_eq!(router.entries.lock().unwrap().len(), 1);
+    client.release().await;
 }

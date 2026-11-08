@@ -5,6 +5,7 @@
 //! A mapping is only ever created for a port the caller listed, and every one is removed again when
 //! the caller stops wanting it. Discovery only trusts a router whose service URLs point at the
 //! address that answered (igd-next's default), so a rogue SSDP reply cannot redirect requests.
+use futures_util::{StreamExt, stream::FuturesUnordered};
 use igd_next::{
     AddPortError, PortMappingProtocol, SearchOptions,
     aio::{
@@ -93,11 +94,44 @@ struct Inner {
 }
 
 pub struct Upnp {
-    search: Box<dyn Fn() -> SearchOptions + Send + Sync>,
+    search: Box<dyn Fn() -> Vec<SearchOptions> + Send + Sync>,
     timing: Timing,
     description: String,
     state: AsyncMutex<Inner>,
     status: Mutex<Status>,
+}
+
+fn discovery_options(addresses: impl IntoIterator<Item = Ipv4Addr>) -> Vec<SearchOptions> {
+    let mut addresses: Vec<_> = addresses
+        .into_iter()
+        .filter(|ip| {
+            !ip.is_unspecified() && !ip.is_loopback() && !ip.is_multicast() && !ip.is_broadcast()
+        })
+        .collect();
+    addresses.sort_unstable();
+    addresses.dedup();
+    // Retain the OS default route and bound the work on hosts with many virtual adapters.
+    let mut options = vec![SearchOptions::default()];
+    options.extend(addresses.into_iter().take(16).map(|ip| {
+        let mut options = SearchOptions::default();
+        options.bind_addr = SocketAddr::from((ip, 0));
+        options
+    }));
+    options
+}
+
+fn local_discovery_options() -> Vec<SearchOptions> {
+    use network_interface::{Addr, NetworkInterface, NetworkInterfaceConfig};
+    let addresses = NetworkInterface::show()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|interface| !interface.internal)
+        .flat_map(|interface| interface.addr)
+        .filter_map(|address| match address {
+            Addr::V4(address) => Some(address.ip),
+            _ => None,
+        });
+    discovery_options(addresses)
 }
 
 fn local_ipv4_toward(gateway: SocketAddr) -> Result<Ipv4Addr, String> {
@@ -112,10 +146,10 @@ fn local_ipv4_toward(gateway: SocketAddr) -> Result<Ipv4Addr, String> {
 
 impl Upnp {
     pub fn new(description: &str) -> Arc<Self> {
-        Self::with(
+        Self::with_searches(
             description,
             Timing::default(),
-            Box::new(SearchOptions::default),
+            Box::new(local_discovery_options),
         )
     }
 
@@ -124,6 +158,14 @@ impl Upnp {
         description: &str,
         timing: Timing,
         search: Box<dyn Fn() -> SearchOptions + Send + Sync>,
+    ) -> Arc<Self> {
+        Self::with_searches(description, timing, Box::new(move || vec![search()]))
+    }
+
+    fn with_searches(
+        description: &str,
+        timing: Timing,
+        search: Box<dyn Fn() -> Vec<SearchOptions> + Send + Sync>,
     ) -> Arc<Self> {
         Arc::new(Self {
             search,
@@ -212,8 +254,30 @@ impl Upnp {
                 state: "searching",
                 ..Status::idle()
             });
-            let found =
-                tokio::time::timeout(self.timing.search, search_gateway((self.search)())).await;
+            // igd-next sends one batch of M-SEARCH requests per search future. Retry lost batches
+            // within one shared deadline, on each selected interface. Returning or timing out
+            // drops every remaining future/socket; do not detach discovery tasks.
+            let found = tokio::time::timeout(self.timing.search, async {
+                let mut searches = FuturesUnordered::new();
+                for round in 0..3 {
+                    let delay = self.timing.search * round / 3;
+                    for options in (self.search)() {
+                        searches.push(async move {
+                            tokio::time::sleep(delay).await;
+                            search_gateway(options).await
+                        });
+                    }
+                }
+                let mut last = None;
+                while let Some(result) = searches.next().await {
+                    match result {
+                        Ok(gateway) => return Ok(gateway),
+                        Err(error) => last = Some(error.to_string()),
+                    }
+                }
+                Err(last.unwrap_or_else(|| "no discovery interface".into()))
+            })
+            .await;
             match found {
                 Ok(Ok(gateway)) => inner.gateway = Some(gateway),
                 Ok(Err(error)) => return self.fail(format!("upnp_no_gateway: {error}")),
@@ -306,5 +370,41 @@ impl Upnp {
             error: Some(error),
             ..Status::idle()
         });
+    }
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+
+    #[test]
+    fn discovery_uses_each_distinct_ipv4_and_keeps_default_gateway_validation() {
+        let options = discovery_options([
+            Ipv4Addr::UNSPECIFIED,
+            Ipv4Addr::LOCALHOST,
+            Ipv4Addr::BROADCAST,
+            Ipv4Addr::new(239, 255, 255, 250),
+            Ipv4Addr::new(10, 0, 0, 2),
+            Ipv4Addr::new(192, 168, 1, 10),
+            Ipv4Addr::new(10, 0, 0, 2),
+        ]);
+        assert_eq!(
+            options.iter().map(|o| o.bind_addr.ip()).collect::<Vec<_>>(),
+            vec![
+                IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)),
+            ]
+        );
+        assert!(options.iter().all(|o| o.allowed_gateway_ips.is_empty()));
+        assert!(
+            options
+                .iter()
+                .all(|o| o.broadcast_address == "239.255.255.250:1900".parse().unwrap())
+        );
+        assert_eq!(
+            discovery_options((1..=100).map(|n| Ipv4Addr::new(10, 0, 0, n))).len(),
+            17
+        );
     }
 }

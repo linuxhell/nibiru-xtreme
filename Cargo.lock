@@ -1681,7 +1681,7 @@ dependencies = [
 
 [[package]]
 name = "nibiru-xtreme"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1699,6 +1699,7 @@ dependencies = [
  "librqbit-utp",
  "md4",
  "md5",
+ "network-interface",
  "num-bigint 0.5.1",
  "percent-encoding",
  "quinn",

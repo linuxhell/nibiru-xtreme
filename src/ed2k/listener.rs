@@ -238,6 +238,8 @@ pub struct IncomingStatus {
     pub running: bool,
     pub active_connections: usize,
     pub completed_handshakes: u64,
+    /// All accepted TCP connections, including probes that never complete an ED2K hello.
+    pub accepted_connections: u64,
     /// Of those, how many arrived obfuscated.
     pub obfuscated_handshakes: u64,
 }
@@ -249,6 +251,7 @@ pub struct IncomingListener {
     client_id: Arc<AtomicU32>,
     active: Arc<AtomicUsize>,
     handshakes: Arc<AtomicU64>,
+    accepted: Arc<AtomicU64>,
     obfuscated: Arc<AtomicU64>,
     callbacks: CallbackRegistry,
     uploads: UploadManager,
@@ -301,6 +304,8 @@ impl IncomingListener {
         let peers = active.clone();
         let handshakes = Arc::new(AtomicU64::new(0));
         let completed = handshakes.clone();
+        let accepted = Arc::new(AtomicU64::new(0));
+        let accepted_count = accepted.clone();
         let obfuscated = Arc::new(AtomicU64::new(0));
         let obfuscated_count = obfuscated.clone();
         let callbacks = CallbackRegistry::default();
@@ -323,6 +328,7 @@ impl IncomingListener {
                 tokio::select! {
                     accepted=listener.accept()=>{
                         let Ok((stream,remote))=accepted else {break;};
+                        accepted_count.fetch_add(1, Ordering::AcqRel);
                         if sessions.len()>=MAX_SESSIONS {drop(stream);continue;}
                         let ip = remote.ip();
                         {
@@ -338,7 +344,7 @@ impl IncomingListener {
                             impl Drop for PerIp {fn drop(&mut self){if let Ok(mut c)=self.0.lock()&&let Some(n)=c.get_mut(&self.1){*n=n.saturating_sub(1);if *n==0{c.remove(&self.1);}}}}
                             active.fetch_add(1,Ordering::AcqRel);let _active=Active(active);let _ip=PerIp(per_ip,ip);
                             let mode = Obfuscation::from_code(mode.load(Ordering::Acquire));
-                            let _=session(stream,ip,identity,mode,obfuscated,id,completed,registry,shared,uploads).await;
+                            let _=session(stream,ip,identity,port,mode,obfuscated,id,completed,registry,shared,uploads).await;
                         });
                     },
                     _=sessions.join_next(), if !sessions.is_empty()=>{},
@@ -351,6 +357,7 @@ impl IncomingListener {
             client_id,
             active,
             handshakes,
+            accepted,
             obfuscated,
             callbacks,
             uploads,
@@ -378,6 +385,7 @@ impl IncomingListener {
             running: self.alive.load(Ordering::Acquire),
             active_connections: self.active.load(Ordering::Acquire),
             completed_handshakes: self.handshakes.load(Ordering::Acquire),
+            accepted_connections: self.accepted.load(Ordering::Acquire),
             obfuscated_handshakes: self.obfuscated.load(Ordering::Acquire),
         }
     }
@@ -390,6 +398,7 @@ async fn session(
     stream: TcpStream,
     ip: std::net::IpAddr,
     identity: [u8; 16],
+    tcp_port: u16,
     mode: Obfuscation,
     obfuscated: Arc<AtomicU64>,
     client_id: Arc<AtomicU32>,
@@ -415,7 +424,7 @@ async fn session(
             bail!("incoming peer must begin with an ED2K hello");
         }
         let info = peer::parse_hello(&data[1..])?;
-        let answer = peer::hello(identity, client_id.load(Ordering::Acquire));
+        let answer = peer::hello_with_port(identity, client_id.load(Ordering::Acquire), tcp_port);
         peer::send(&mut stream, 0xe3, 0x4c, &answer[1..]).await?;
         Ok::<_, anyhow::Error>(info)
     })
@@ -453,6 +462,11 @@ mod tests {
         assert_eq!((protocol, op), (0xe3, 0x4c));
         assert_eq!(&answer[..16], &[3; 16]);
         assert_eq!(&answer[16..20], &0x04030201u32.to_le_bytes());
+        assert_eq!(
+            u16::from_le_bytes(answer[20..22].try_into().unwrap()),
+            listener.status().tcp_port,
+            "the server probe must see the same listening port advertised in the login"
+        );
         peer::send(&mut client, 0xe3, 0x58, &[9; 16]).await.unwrap();
         let (_, op, data) = peer::frame(&mut client).await.unwrap();
         assert_eq!(op, 0x48);
@@ -460,6 +474,7 @@ mod tests {
         peer::send(&mut client, 0xe3, 0x4a, &[]).await.unwrap();
         assert_eq!(peer::frame(&mut client).await.unwrap().2, vec![0; 4]);
         assert_eq!(listener.status().completed_handshakes, 1);
+        assert_eq!(listener.status().accepted_connections, 1);
         assert!(listener.status().running);
     }
     #[test]

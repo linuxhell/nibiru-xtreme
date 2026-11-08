@@ -1,8 +1,9 @@
-# Nibiru Xtreme 0.2.5
+# Nibiru Xtreme 0.2.6
 
-- Fix automatic peer-port allocation on Windows: reserve UDP/uTP first, then bind TCP to that same port. A TCP-only ephemeral allocation can be unavailable to UDP.
-- Retry automatic allocations on TCP address conflicts or access denial, with a bound of 32 attempts. Keep explicitly requested ports and uTP enabled.
-- Cancel and release abandoned uTP dispatchers on failed attempts or cancelled startup. Preserve IPv4 fallback for an unspecified IPv6 bind.
-- Add regressions for shared TCP/uTP ports, bind conflicts, retry exhaustion, cleanup and explicit UDP reservations. Existing torrent, magnet and forced uTP interoperability tests remain enabled.
-- Correct a flaky ED2K wire test by checking the exact full ciphertext rather than assuming an encrypted byte can never match its plaintext value. ED2K encryption is unchanged.
-- Retain the HTTP startup improvements from 0.2.4.
+- Announce the actual incoming TCP listener port in ED2K HELLOANSWER packets, including ephemeral fallback ports; previously this field was always zero.
+- Discover UPnP gateways across distinct local IPv4 addresses, retaining the default route and existing gateway URL trust checks. Retry lost SSDP requests within the same bounded discovery deadline and cancel remaining searches when one succeeds.
+- Expose accepted TCP connections separately from completed ED2K handshakes for diagnostics.
+- Add wire-level regression assertions for the announced port, a dropped first SSDP search batch, interface filtering and discovery bounds. Preserve callback, upload, obfuscation and torrent behavior.
+- Retain the shared UDP/TCP peer-port and HTTP startup fixes from 0.2.5.
+
+UPnP mapping and a TCP port check alone do not guarantee High ID. The real ED2K server response remains authoritative; the user must retest their network.
