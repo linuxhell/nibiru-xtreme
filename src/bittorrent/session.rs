@@ -672,18 +672,25 @@ mod audit_tests {
 
     #[tokio::test]
     async fn dropping_an_idle_session_releases_its_utp_socket() {
-        // Choose an actual UDP port first; Windows may reserve TCP-only ephemeral ports.
-        let probe = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        let address = probe.local_addr().unwrap();
-        drop(probe);
+        // A UDP-only reservation can be unavailable to TCP on Windows. Let the session
+        // reserve a usable TCP/uTP pair and test the port it actually owns.
         let session = Session::start(SessionConfig {
-            bind: address.ip(),
-            listen_port: address.port(),
+            bind: "127.0.0.1".parse().unwrap(),
+            listen_port: 0,
             enable_utp: true,
             ..SessionConfig::default()
         })
         .await
         .unwrap();
+        let address = SocketAddr::from(([127, 0, 0, 1], session.port()));
+        assert!(
+            session.utp.is_some(),
+            "the fixture must really own a uTP socket"
+        );
+        assert!(
+            std::net::UdpSocket::bind(address).is_err(),
+            "uTP must hold its port before drop"
+        );
         drop(session);
         timeout(Duration::from_secs(2), async {
             loop {
