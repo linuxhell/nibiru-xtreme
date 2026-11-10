@@ -1,0 +1,275 @@
+{
+  "size_bytes": 268435456,
+  "rate_mib": 100.0,
+  "latency_ms": 80.0,
+  "rounds": 5,
+  "checkpoint_bytes": {},
+  "native_sync_mib": {},
+  "adaptive_labels": [],
+  "connection_rate_mib": 10.0,
+  "overload_above": 0,
+  "overload_delay_ms": 0,
+  "pacing": "future slots without catch-up credit",
+  "profiles": {
+    "baseline": {
+      "binary_sha256": "202f807c594966f8cbbd8436c7e5fa6813b0f109944b2499a0908eb72df4f321",
+      "version": "nibiru-xtreme 0.2.6"
+    },
+    "candidate": {
+      "binary_sha256": "a8739479d25a2fd9b9c235d92203c64de3ff4b03a090761abb9f5b432b81fcc2",
+      "version": "nibiru-xtreme 0.2.6"
+    }
+  },
+  "samples": [
+    {
+      "label": "baseline",
+      "run": 1,
+      "seconds": 4.62226514699978,
+      "mib_per_second": 55.38410105403938,
+      "cpu_seconds": 0.23246,
+      "requests": 65,
+      "sha256": "486cc817b95d853d3c357ff283b204c0144bd255e73fe2deb1389493b257e3c0",
+      "log_bytes": 2483,
+      "peak_active_requests": 8,
+      "engine_timings_ms": {
+        "elapsed_ms": 4391,
+        "transfer_ms": 4391,
+        "finalize_ms": 0,
+        "sync_ms": 0,
+        "close_ms": 0,
+        "destination_cleanup_ms": 0,
+        "rename_ms": 0,
+        "checkpoint_wait_ms": 0
+      },
+      "checkpoint_count": 0,
+      "checkpoint_sync_ms_sum": 0,
+      "adaptive_decisions": []
+    },
+    {
+      "label": "candidate",
+      "run": 1,
+      "seconds": 3.920967881999786,
+      "mib_per_second": 65.29000178125253,
+      "cpu_seconds": 0.22580599999999998,
+      "requests": 21,
+      "sha256": "486cc817b95d853d3c357ff283b204c0144bd255e73fe2deb1389493b257e3c0",
+      "log_bytes": 2317,
+      "peak_active_requests": 8,
+      "engine_timings_ms": {
+        "elapsed_ms": 3787,
+        "transfer_ms": 3787,
+        "finalize_ms": 0,
+        "sync_ms": 0,
+        "close_ms": 0,
+        "destination_cleanup_ms": 0,
+        "rename_ms": 0,
+        "checkpoint_wait_ms": 0
+      },
+      "checkpoint_count": 0,
+      "checkpoint_sync_ms_sum": 0,
+      "adaptive_decisions": []
+    },
+    {
+      "label": "candidate",
+      "run": 2,
+      "seconds": 3.7259148960001767,
+      "mib_per_second": 68.70795687652976,
+      "cpu_seconds": 0.274776,
+      "requests": 21,
+      "sha256": "486cc817b95d853d3c357ff283b204c0144bd255e73fe2deb1389493b257e3c0",
+      "log_bytes": 2320,
+      "peak_active_requests": 8,
+      "engine_timings_ms": {
+        "elapsed_ms": 3584,
+        "transfer_ms": 3584,
+        "finalize_ms": 0,
+        "sync_ms": 0,
+        "close_ms": 0,
+        "destination_cleanup_ms": 0,
+        "rename_ms": 0,
+        "checkpoint_wait_ms": 0
+      },
+      "checkpoint_count": 0,
+      "checkpoint_sync_ms_sum": 0,
+      "adaptive_decisions": []
+    },
+    {
+      "label": "baseline",
+      "run": 2,
+      "seconds": 4.17139890999988,
+      "mib_per_second": 61.370299394360096,
+      "cpu_seconds": 0.26322999999999996,
+      "requests": 65,
+      "sha256": "486cc817b95d853d3c357ff283b204c0144bd255e73fe2deb1389493b257e3c0",
+      "log_bytes": 2228,
+      "peak_active_requests": 8,
+      "engine_timings_ms": {
+        "elapsed_ms": 3928,
+        "transfer_ms": 3927,
+        "finalize_ms": 0,
+        "sync_ms": 0,
+        "close_ms": 0,
+        "destination_cleanup_ms": 0,
+        "rename_ms": 0,
+        "checkpoint_wait_ms": 0
+      },
+      "checkpoint_count": 0,
+      "checkpoint_sync_ms_sum": 0,
+      "adaptive_decisions": []
+    },
+    {
+      "label": "baseline",
+      "run": 3,
+      "seconds": 4.172268859999804,
+      "mib_per_second": 61.35750321708943,
+      "cpu_seconds": 0.20510300000000026,
+      "requests": 65,
+      "sha256": "486cc817b95d853d3c357ff283b204c0144bd255e73fe2deb1389493b257e3c0",
+      "log_bytes": 2228,
+      "peak_active_requests": 8,
+      "engine_timings_ms": {
+        "elapsed_ms": 3923,
+        "transfer_ms": 3923,
+        "finalize_ms": 0,
+        "sync_ms": 0,
+        "close_ms": 0,
+        "destination_cleanup_ms": 0,
+        "rename_ms": 0,
+        "checkpoint_wait_ms": 0
+      },
+      "checkpoint_count": 0,
+      "checkpoint_sync_ms_sum": 0,
+      "adaptive_decisions": []
+    },
+    {
+      "label": "candidate",
+      "run": 3,
+      "seconds": 4.021193698999923,
+      "mib_per_second": 63.6626880380489,
+      "cpu_seconds": 0.2083649999999999,
+      "requests": 21,
+      "sha256": "486cc817b95d853d3c357ff283b204c0144bd255e73fe2deb1389493b257e3c0",
+      "log_bytes": 2318,
+      "peak_active_requests": 8,
+      "engine_timings_ms": {
+        "elapsed_ms": 3897,
+        "transfer_ms": 3897,
+        "finalize_ms": 0,
+        "sync_ms": 0,
+        "close_ms": 0,
+        "destination_cleanup_ms": 0,
+        "rename_ms": 0,
+        "checkpoint_wait_ms": 0
+      },
+      "checkpoint_count": 0,
+      "checkpoint_sync_ms_sum": 0,
+      "adaptive_decisions": []
+    },
+    {
+      "label": "candidate",
+      "run": 4,
+      "seconds": 3.6718253119997826,
+      "mib_per_second": 69.72009239202477,
+      "cpu_seconds": 0.23179899999999987,
+      "requests": 21,
+      "sha256": "486cc817b95d853d3c357ff283b204c0144bd255e73fe2deb1389493b257e3c0",
+      "log_bytes": 2318,
+      "peak_active_requests": 8,
+      "engine_timings_ms": {
+        "elapsed_ms": 3582,
+        "transfer_ms": 3582,
+        "finalize_ms": 0,
+        "sync_ms": 0,
+        "close_ms": 0,
+        "destination_cleanup_ms": 0,
+        "rename_ms": 0,
+        "checkpoint_wait_ms": 0
+      },
+      "checkpoint_count": 0,
+      "checkpoint_sync_ms_sum": 0,
+      "adaptive_decisions": []
+    },
+    {
+      "label": "baseline",
+      "run": 4,
+      "seconds": 4.17156378000027,
+      "mib_per_second": 61.367873895957416,
+      "cpu_seconds": 0.233614,
+      "requests": 65,
+      "sha256": "486cc817b95d853d3c357ff283b204c0144bd255e73fe2deb1389493b257e3c0",
+      "log_bytes": 2229,
+      "peak_active_requests": 8,
+      "engine_timings_ms": {
+        "elapsed_ms": 3920,
+        "transfer_ms": 3920,
+        "finalize_ms": 0,
+        "sync_ms": 0,
+        "close_ms": 0,
+        "destination_cleanup_ms": 0,
+        "rename_ms": 0,
+        "checkpoint_wait_ms": 0
+      },
+      "checkpoint_count": 0,
+      "checkpoint_sync_ms_sum": 0,
+      "adaptive_decisions": []
+    },
+    {
+      "label": "baseline",
+      "run": 5,
+      "seconds": 4.622381829999995,
+      "mib_per_second": 55.38270299059225,
+      "cpu_seconds": 0.233973,
+      "requests": 65,
+      "sha256": "486cc817b95d853d3c357ff283b204c0144bd255e73fe2deb1389493b257e3c0",
+      "log_bytes": 2481,
+      "peak_active_requests": 8,
+      "engine_timings_ms": {
+        "elapsed_ms": 4393,
+        "transfer_ms": 4393,
+        "finalize_ms": 0,
+        "sync_ms": 0,
+        "close_ms": 0,
+        "destination_cleanup_ms": 0,
+        "rename_ms": 0,
+        "checkpoint_wait_ms": 0
+      },
+      "checkpoint_count": 0,
+      "checkpoint_sync_ms_sum": 0,
+      "adaptive_decisions": []
+    },
+    {
+      "label": "candidate",
+      "run": 5,
+      "seconds": 4.02176416400016,
+      "mib_per_second": 63.653657837901456,
+      "cpu_seconds": 0.22338199999999997,
+      "requests": 21,
+      "sha256": "486cc817b95d853d3c357ff283b204c0144bd255e73fe2deb1389493b257e3c0",
+      "log_bytes": 2318,
+      "peak_active_requests": 8,
+      "engine_timings_ms": {
+        "elapsed_ms": 3907,
+        "transfer_ms": 3907,
+        "finalize_ms": 0,
+        "sync_ms": 0,
+        "close_ms": 0,
+        "destination_cleanup_ms": 0,
+        "rename_ms": 0,
+        "checkpoint_wait_ms": 0
+      },
+      "checkpoint_count": 0,
+      "checkpoint_sync_ms_sum": 0,
+      "adaptive_decisions": []
+    }
+  ],
+  "medians": {
+    "baseline": {
+      "seconds": 4.172268859999804,
+      "cpu_seconds": 0.233614
+    },
+    "candidate": {
+      "seconds": 3.920967881999786,
+      "cpu_seconds": 0.22580599999999998
+    }
+  }
+}

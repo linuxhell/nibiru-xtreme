@@ -27,6 +27,7 @@ use url::Url;
 use crate::{bittorrent::limiter::RateLimiter, logging::LogSink, storage};
 
 mod adaptive;
+mod ranges;
 
 /// Useful transport diagnostics without copying nested URLs, proxy credentials or headers.
 pub(crate) fn download_error_message(error: &anyhow::Error) -> String {
@@ -193,11 +194,14 @@ fn claim_range(
             continue;
         }
         let remaining = total - start;
-        let size = if remaining > MAX_HTTP_RANGE_SIZE * workers as u64 {
-            MAX_HTTP_RANGE_SIZE
-        } else {
-            RANGE_CHUNK_SIZE
-        };
+        // Keep requests large enough to amortize latency, while leaving queued
+        // work for the other workers. Busy tails can be split later at a block
+        // boundary, instead of issuing a new request for every 4 MiB at the tail.
+        let size = remaining
+            .div_ceil(workers.max(1) as u64)
+            .min(MAX_HTTP_RANGE_SIZE)
+            .div_ceil(RANGE_CHUNK_SIZE)
+            * RANGE_CHUNK_SIZE;
         let mut end_exclusive = start + remaining.min(size);
         let mut probe = start + RANGE_CHUNK_SIZE;
         while probe < end_exclusive {
@@ -1135,7 +1139,7 @@ impl Engine {
         };
 
         let identity = Arc::new(std::sync::Mutex::new(identity_seed));
-        let next_offset = Arc::new(AtomicU64::new(0));
+        let scheduler = Arc::new(ranges::Scheduler::new(workers));
         let completed = Arc::new(AtomicU64::new(resumed_bytes));
         let metrics = Arc::new(RangeMetrics::default());
         let mut set = JoinSet::new();
@@ -1167,7 +1171,7 @@ impl Engine {
             let identity = identity.clone();
             let url = parsed.clone();
             let file = file.clone();
-            let next_offset = next_offset.clone();
+            let scheduler = scheduler.clone();
             let completed = completed.clone();
             let done_blocks = done_blocks.clone();
             let cancelled = cancelled.clone();
@@ -1186,9 +1190,6 @@ impl Engine {
                     if cancelled.load(Ordering::Acquire) {
                         return Err(anyhow!("cancelled"));
                     }
-                    if next_offset.load(Ordering::Acquire) >= total {
-                        break;
-                    }
                     let range_workers = if let Some(gate) = gate.as_mut() {
                         let Some(limit) = gate.enter().await else {
                             break;
@@ -1198,7 +1199,7 @@ impl Engine {
                         workers
                     };
                     let Some((start, end)) =
-                        claim_range(&next_offset, total, range_workers, &done_blocks)
+                        scheduler.claim(worker_id, total, range_workers, &done_blocks)?
                     else {
                         break;
                     };
@@ -1295,8 +1296,9 @@ impl Engine {
                     let mut written = 0_u64;
                     let mut body_wait_us = 0_u64;
                     let mut storage_wait_us = 0_u64;
+                    let mut handed_off = false;
                     let mut buffer = Vec::with_capacity(RANGE_CHUNK_SIZE as usize);
-                    loop {
+                    'body: loop {
                         let receiving = Instant::now();
                         let chunk = body.next().await;
                         body_wait_us += receiving.elapsed().as_micros() as u64;
@@ -1333,10 +1335,19 @@ impl Engine {
                                 .await?;
                                 written += RANGE_CHUNK_SIZE;
                                 buffer = Vec::with_capacity(RANGE_CHUNK_SIZE as usize);
+                                if !scheduler.advance(worker_id, start + written)?
+                                    && written < expected
+                                {
+                                    // A helper owns the remaining bytes. Dropping this
+                                    // response stops the old request before any of
+                                    // those bytes can reach disk or the resume bitmap.
+                                    handed_off = true;
+                                    break 'body;
+                                }
                             }
                         }
                     }
-                    if received != expected {
+                    if !handed_off && received != expected {
                         bail!(
                             "range worker {worker_id} length mismatch expected={expected} got={}",
                             received
@@ -1404,7 +1415,7 @@ impl Engine {
                     });
                     telemetry.record(&self.log, done, Some(total), set.len(), false);
                     if let Some(controller) = controller.as_mut() {
-                        let unclaimed = total.saturating_sub(next_offset.load(Ordering::Acquire));
+                        let unclaimed = total.saturating_sub(scheduler.next_offset());
                         if let Some(decision) = controller.observe(
                             started.elapsed().as_millis() as u64, done,
                             active_ranges.load(Ordering::Acquire), unclaimed,
@@ -1513,6 +1524,17 @@ impl Engine {
             &format!("mode=segmented downloaded={done} transfer_ms={transfer_ms}"),
         );
         let finalizing = Instant::now();
+        // All bytes are written, but publication still waits for synchronization
+        // and the atomic rename. RPC remains active until those steps succeed.
+        on_progress(Progress {
+            downloaded: done,
+            total: Some(total),
+            speed_bytes_per_second: 0,
+        });
+        self.log.info(
+            "http.range_handoffs",
+            &format!("count={}", scheduler.handoffs()),
+        );
         let checkpoint_stats = match storage::checkpoints::finish(checkpoints.take()).await {
             Ok(stats) => stats,
             Err(error) => {
@@ -1615,6 +1637,12 @@ impl Engine {
             && (!for_segmentation
                 || total.is_some_and(|n| n >= MIN_SEGMENTED_SIZE && self.connection_count(n) > 1))
         {
+            // A real payload range verifies 206, Content-Range, length and
+            // resource identity before publication. Do not spend another RTT
+            // on a one-byte GET that would be thrown away at download startup.
+            if for_segmentation {
+                return Ok((total, true));
+            }
             let mut probe = self
                 .client
                 .get(parsed)
@@ -1704,8 +1732,8 @@ pub fn safe_output_name(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_HTTP_RANGE_SIZE, RANGE_CHUNK_SIZE, claim_range, safe_output_name,
-        suggested_worker_count, url_identity, validate_content_range,
+        MAX_HTTP_RANGE_SIZE, claim_range, safe_output_name, suggested_worker_count, url_identity,
+        validate_content_range,
     };
     use reqwest::header::HeaderValue;
     use std::sync::{Arc, atomic::AtomicU64};
@@ -1752,9 +1780,6 @@ mod tests {
             assert!(end >= start && end < total);
             let len = end - start + 1;
             assert!(len <= MAX_HTTP_RANGE_SIZE);
-            if total - start <= MAX_HTTP_RANGE_SIZE * workers as u64 {
-                assert!(len <= RANGE_CHUNK_SIZE);
-            }
             large |= len == MAX_HTTP_RANGE_SIZE;
             position = end + 1;
         }

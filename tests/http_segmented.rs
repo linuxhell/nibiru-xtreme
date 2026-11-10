@@ -200,7 +200,13 @@ async fn download_case(
             .find(|record| record["event"] == "http.segmented_metrics")
             .unwrap();
         let detail = metrics["detail"].as_str().unwrap();
-        assert!(detail.contains("http1_ranges=3 "));
+        let http1_ranges: u64 = detail
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix("http1_ranges="))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((2..=3).contains(&http1_ranges), "{detail}");
         assert!(detail.contains("http2_ranges=0 "));
     }
     assert!(

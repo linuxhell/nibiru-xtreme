@@ -54,7 +54,9 @@ async fn origin_with_destination(
                         .filter(|(k, _)| k.eq_ignore_ascii_case("range"))
                         .map(|(_, v)| v.trim().to_owned())
                 });
-                if drift && range.is_some() && ranges.fetch_add(1, Ordering::Relaxed) >= 2 {
+                // Startup now validates real payload ranges, without a discarded
+                // one-byte probe. Change identity on the second actual range.
+                if drift && range.is_some() && ranges.fetch_add(1, Ordering::Relaxed) >= 1 {
                     changed.store(true, Ordering::Relaxed);
                 }
                 let second = changed.load(Ordering::Relaxed);
