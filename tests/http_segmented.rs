@@ -55,11 +55,14 @@ async fn download_case(
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let address = listener.local_addr().unwrap();
     let server_data = data.clone();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let server_cancelled = cancelled.clone();
 
     let server = tokio::spawn(async move {
         loop {
             let (mut stream, _) = listener.accept().await.unwrap();
             let data = server_data.clone();
+            let cancelled = server_cancelled.clone();
             tokio::spawn(async move {
                 let mut request = vec![0u8; 16 * 1024];
                 let used = stream.read(&mut request).await.unwrap();
@@ -99,6 +102,13 @@ async fn download_case(
                     if body.len() > 1 {
                         tokio::time::sleep(Duration::from_millis(1400)).await;
                     }
+                    // Keep the final range pending until the progress callback
+                    // actually requests cancellation, even on a very fast runner.
+                    if cancel_on_progress && end + 1 == data.len() {
+                        while !cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                    }
                     let _ = stream.write_all(body).await;
                 } else {
                     let response = format!(
@@ -123,11 +133,11 @@ async fn download_case(
         .unwrap()
         .with_sync_interval_mib(sync_interval_mib)
         .with_adaptive(adaptive);
-    let cancelled = Arc::new(AtomicBool::new(false));
     let cancel_signal = cancelled.clone();
     let data_len = data.len() as u64;
-    let result = engine
-        .download(
+    let result = tokio::time::timeout(
+        Duration::from_secs(60),
+        engine.download(
             DownloadRequest {
                 url: format!("http://{address}/payload.bin"),
                 destination: destination.clone(),
@@ -138,13 +148,16 @@ async fn download_case(
                     cancel_signal.store(true, std::sync::atomic::Ordering::Release);
                 }
             },
-        )
-        .await;
+        ),
+    )
+    .await
+    .expect("HTTP fixture timed out");
 
     if cancel_on_progress {
         assert!(result.unwrap_err().to_string().contains("cancelled"));
         assert!(!destination.exists());
-        assert!(!root.join(".payload.bin.nibiru.part").exists());
+        assert!(!root.join("payload.bin.nibiru-http.part").exists());
+        assert!(!root.join("payload.bin.nibiru-http.part.json").exists());
         let log = tokio::fs::read_to_string(&log_path).await.unwrap();
         assert!(!log.contains("http.download_completed"));
         server.abort();
