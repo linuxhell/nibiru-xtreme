@@ -28,6 +28,7 @@ use crate::{bittorrent::limiter::RateLimiter, logging::LogSink, storage};
 
 mod adaptive;
 mod ranges;
+mod retry;
 
 /// Useful transport diagnostics without copying nested URLs, proxy credentials or headers.
 pub(crate) fn download_error_message(error: &anyhow::Error) -> String {
@@ -717,7 +718,10 @@ impl Engine {
                 .await
             {
                 Ok(()) => return Ok(()),
-                Err(error) if error.is::<storage::checkpoints::BackgroundSyncError>() => {
+                Err(error)
+                    if error.is::<storage::checkpoints::BackgroundSyncError>()
+                        || error.is::<retry::Throttled>() =>
+                {
                     return Err(error);
                 }
                 Err(error) if !cancelled.load(Ordering::Acquire) => {
@@ -1225,11 +1229,21 @@ impl Engine {
                     if let Some(validator) = validator {
                         request = request.header(IF_RANGE, validator);
                     }
-                    let response = request
-                        .send()
-                        .await
-                        .map_err(reqwest::Error::without_url)
-                        .with_context(|| format!("range worker {worker_id} request failed"))?;
+                    let response = retry::range_response(request, &log, worker_id).await?;
+                    // An error page has no authority to establish or change the
+                    // file's identity. Throttling is handled before this check.
+                    if response.status() != StatusCode::PARTIAL_CONTENT {
+                        bail!(
+                            "range worker {worker_id} expected 206, got {}",
+                            response.status()
+                        );
+                    }
+                    validate_content_range(
+                        response.headers().get(CONTENT_RANGE),
+                        start,
+                        end,
+                        total,
+                    )?;
                     let value = |key| {
                         response
                             .headers()
@@ -1276,19 +1290,6 @@ impl Engine {
                             ),
                         );
                     }
-
-                    if response.status() != StatusCode::PARTIAL_CONTENT {
-                        bail!(
-                            "range worker {worker_id} expected 206, got {}",
-                            response.status()
-                        );
-                    }
-                    validate_content_range(
-                        response.headers().get(CONTENT_RANGE),
-                        start,
-                        end,
-                        total,
-                    )?;
 
                     let expected = end.saturating_sub(start).saturating_add(1);
                     let mut body = response.bytes_stream();
