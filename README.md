@@ -2,6 +2,8 @@
 
 # Nibiru Xtreme
 
+A versão 0.2.7 elimina o teste descartável de um byte no início dos downloads HTTP segmentados e permite que conexões livres ajudem trechos já atribuídos. Mantém retomada validada e gravação direta no arquivo parcial. A [análise do IDM e comparação local](docs/IDM-ANALYSIS-2026-11-10.md) documenta os ganhos medidos e seus limites; não comprova superioridade geral sobre o IDM ou aceleração de torrent/ed2k.
+
 A versão 0.2.6 corrige a resposta ao handshake ED2K de entrada: anuncia a porta TCP realmente aberta, inclusive quando foi escolhida uma porta alternativa, em vez de zero. A descoberta UPnP consulta os endereços IPv4 das interfaces locais e repete pacotes SSDP perdidos dentro de um único prazo. O status distingue conexões TCP aceitas de handshakes ED2K concluídos. Essas correções não garantem ID alto em qualquer rede; a confirmação continua sendo o ID retornado pelo servidor.
 
 A versão 0.2.5 corrige a escolha automática da porta de peers: reserva UDP/uTP antes de abrir TCP no mesmo número. Se essa porta não puder ser usada por TCP, tenta outra com limite de tentativas e libera a reserva anterior. Portas explícitas continuam sendo respeitadas; uTP permanece habilitado. Isso corrige a inicialização que falhou com erro 10013 no CI Windows.
@@ -18,7 +20,7 @@ O HTTPS usa as raízes públicas e os certificados confiáveis do sistema, mante
 
 ## Estado
 
-**Versão estável 0.2.6.** Motor nativo do Apocalipse Download Manager, distribuído para Windows, Linux e macOS com arquivos SHA-256.
+**Versão 0.2.7.** Motor nativo do Apocalipse Download Manager, distribuído para Windows, Linux e macOS com arquivos SHA-256.
 
 A prévia ED2K não depende de chegar a 30 ou 40 MB no total: o ADM libera o botão quando a primeira parte está autenticada por MD4 (até 9.728.000 bytes). Outros peers ajudam a terminar o início e o fim do arquivo antes das partes do meio, evitando que um peer lento retenha a prévia. MP4/AVI podem precisar também do índice no fim; trechos ainda ausentes aguardam dados, sem fornecer buracos do arquivo ao player.
 

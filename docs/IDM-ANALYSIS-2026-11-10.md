@@ -115,6 +115,8 @@ Esta alteração não comprova ganho de velocidade em torrent ou ed2k.
 
 Comparação da referência com a candidata, em Linux x64 e Rust 1.97.0, builds
 release `--locked --no-default-features`, mesma configuração e máquina.
+Os binários foram medidos com o algoritmo final, antes da atualização do número
+de versão para 0.2.7; os JSONs preservam a identificação e o hash exatos medidos.
 Fixture HTTP/1.1 em loopback: atraso de 40 ms por requisição e teto agregado
 de 100 MiB/s. Cinco repetições por perfil/tamanho/limite, com ordem alternada.
 Os limites são tetos de conexões enviados por RPC, não contagens obrigatórias.

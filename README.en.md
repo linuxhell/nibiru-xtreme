@@ -2,6 +2,8 @@
 
 # Nibiru Xtreme
 
+Version 0.2.7 removes the discarded one-byte probe at segmented HTTP startup and lets idle connections help assigned ranges. Validated resume and direct writes to the partial file are preserved. The [IDM analysis and local comparison](docs/IDM-ANALYSIS-2026-11-10.md) document the measured gains and limits; they do not establish general superiority over IDM or torrent/ed2k acceleration.
+
 Version 0.2.6 fixes incoming ED2K handshake replies: advertise the actual listening TCP port, including fallback ports, instead of zero. UPnP discovery searches local IPv4 interface addresses and retries lost SSDP packets within one shared deadline. Status separates accepted TCP connections from completed ED2K handshakes. These fixes do not guarantee High ID on every network; the server-assigned ID remains authoritative.
 
 Version 0.2.5 fixes automatic peer-port selection: reserve UDP/uTP before binding TCP to the same port. If TCP cannot use that port, retry within a fixed bound and release the abandoned reservation. Explicit ports remain explicit, and uTP stays enabled. This addresses the startup failure reported as error 10013 in Windows CI.
@@ -18,7 +20,7 @@ HTTPS uses public roots together with the operating system trust store while kee
 
 ## Status
 
-**Stable version 0.2.6.** The native engine for Apocalipse Download Manager, packaged for Windows, Linux and macOS with SHA-256 files.
+**Version 0.2.7.** The native engine for Apocalipse Download Manager, packaged for Windows, Linux and macOS with SHA-256 files.
 
 ED2K preview does not require a fixed 30–40 MB total: ADM enables it once the first MD4-authenticated part is available (up to 9,728,000 bytes). Other peers help finish the header and tail before middle parts so a slow source cannot monopolize preview data. MP4/AVI may also need their tail index; missing ranges wait for data rather than exposing disk holes.
 
