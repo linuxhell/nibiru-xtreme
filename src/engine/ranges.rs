@@ -5,6 +5,7 @@
 //! resumable block. At most one mutex operation is needed per completed 4 MiB.
 use super::{RANGE_CHUNK_SIZE, claim_range};
 use anyhow::{Result, anyhow};
+use std::collections::VecDeque;
 use std::sync::{
     Mutex,
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -18,19 +19,53 @@ struct Lease {
 
 pub(super) struct Scheduler {
     next: AtomicU64,
-    active: Mutex<Vec<Option<Lease>>>,
+    state: Mutex<State>,
     handoffs: AtomicU64,
+}
+
+struct State {
+    active: Vec<Option<Lease>>,
+    pending: VecDeque<(u64, u64)>,
 }
 
 impl Scheduler {
     pub fn new(workers: usize) -> Self {
         Self {
             next: AtomicU64::new(0),
-            active: Mutex::new(vec![None; workers]),
+            state: Mutex::new(State {
+                active: vec![None; workers],
+                pending: VecDeque::new(),
+            }),
             handoffs: AtomicU64::new(0),
         }
     }
 
+    pub fn with_prefix(workers: usize, bytes: u64) -> Self {
+        let scheduler = Self::new(workers);
+        scheduler.next.store(bytes, Ordering::Release);
+        scheduler.state.lock().unwrap().active[0] = Some(Lease {
+            cursor: bytes,
+            end: bytes,
+        });
+        scheduler
+    }
+    pub fn requeue(&self, worker: usize, committed: u64) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow!("HTTP range scheduler lock poisoned"))?;
+        let lease = state.active[worker]
+            .take()
+            .ok_or_else(|| anyhow!("HTTP worker has no range lease"))?;
+        anyhow::ensure!(
+            committed <= lease.end && committed.is_multiple_of(RANGE_CHUNK_SIZE),
+            "invalid HTTP retry boundary"
+        );
+        if committed < lease.end {
+            state.pending.push_back((committed, lease.end - 1));
+        }
+        Ok(())
+    }
     pub fn next_offset(&self) -> u64 {
         self.next.load(Ordering::Acquire)
     }
@@ -46,17 +81,22 @@ impl Scheduler {
         workers: usize,
         done: &[AtomicBool],
     ) -> Result<Option<(u64, u64)>> {
-        let mut active = self
-            .active
+        let mut state = self
+            .state
             .lock()
             .map_err(|_| anyhow!("HTTP range scheduler lock poisoned"))?;
-        active[worker] = None;
-        let range = if let Some(range) = claim_range(&self.next, total, workers, done) {
+        state.active[worker] = None;
+        let range = if let Some(range) = state
+            .pending
+            .pop_front()
+            .or_else(|| claim_range(&self.next, total, workers, done))
+        {
             Some(range)
         } else {
             // All queued bytes have an owner. Take half of the largest unreserved
             // tail, leaving the owner's current block entirely untouched.
-            let donor = active
+            let donor = state
+                .active
                 .iter()
                 .enumerate()
                 .filter_map(|(id, lease)| lease.map(|lease| (id, lease)))
@@ -65,13 +105,13 @@ impl Scheduler {
             donor.map(|(id, lease)| {
                 let remaining = lease.end - lease.cursor;
                 let split = lease.cursor + remaining / 2 / RANGE_CHUNK_SIZE * RANGE_CHUNK_SIZE;
-                active[id].as_mut().unwrap().end = split;
+                state.active[id].as_mut().unwrap().end = split;
                 self.handoffs.fetch_add(1, Ordering::Relaxed);
                 (split, lease.end - 1)
             })
         };
         if let Some((start, end)) = range {
-            active[worker] = Some(Lease {
+            state.active[worker] = Some(Lease {
                 cursor: start.saturating_add(RANGE_CHUNK_SIZE).min(end + 1),
                 end: end + 1,
             });
@@ -82,11 +122,11 @@ impl Scheduler {
     /// Reserve the next block before the worker receives or writes it. False
     /// means this worker reached its current end (possibly shortened by a helper).
     pub fn advance(&self, worker: usize, offset: u64) -> Result<bool> {
-        let mut active = self
-            .active
+        let mut state = self
+            .state
             .lock()
             .map_err(|_| anyhow!("HTTP range scheduler lock poisoned"))?;
-        let lease = active[worker]
+        let lease = state.active[worker]
             .as_mut()
             .ok_or_else(|| anyhow!("HTTP worker has no range lease"))?;
         anyhow::ensure!(offset <= lease.end, "HTTP write crossed a range handoff");

@@ -1196,6 +1196,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
+name = "httpdate"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
+
+[[package]]
 name = "hybrid-array"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1680,8 +1686,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nibiru-platform"
+version = "0.1.0"
+dependencies = [
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "nibiru-xtreme"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1694,12 +1707,14 @@ dependencies = [
  "h3",
  "h3-quinn",
  "http",
+ "httpdate",
  "igd-next",
  "librqbit-dualstack-sockets",
  "librqbit-utp",
  "md4",
  "md5",
  "network-interface",
+ "nibiru-platform",
  "num-bigint 0.5.1",
  "percent-encoding",
  "quinn",

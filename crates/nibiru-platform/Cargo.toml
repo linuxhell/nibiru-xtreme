@@ -1,0 +1,9 @@
+[package]
+name = "nibiru-platform"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Safe platform boundary for Nibiru temporary download files"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_IO", "Win32_System_Ioctl", "Win32_Storage_FileSystem"] }

@@ -40,6 +40,9 @@ enum Command {
         log: Option<PathBuf>,
         #[arg(long)]
         http1_only: bool,
+        /// Maximum HTTP connections, overriding size defaults like the ADM slider.
+        #[arg(long, value_parser = clap::value_parser!(u16).range(1..=16))]
+        connections: Option<u16>,
         /// Require HTTP/3 over QUIC; never silently falls back to TCP.
         #[arg(long, conflicts_with = "http1_only")]
         http3_only: bool,
@@ -253,6 +256,7 @@ async fn main() -> Result<()> {
             out,
             log,
             http1_only,
+            connections,
             http3_only,
             sync_interval_mib,
             adaptive,
@@ -274,6 +278,14 @@ async fn main() -> Result<()> {
                 ssh_host_key,
                 ssh_identity,
             });
+            let engine = if let Some(connections) = connections {
+                engine.with_request_options(nibiru_xtreme::engine::RequestOptions {
+                    max_connections: Some(usize::from(connections)),
+                    ..Default::default()
+                })?
+            } else {
+                engine
+            };
             let cancelled = Arc::new(AtomicBool::new(false));
             // Ctrl+C pauses: the download stops at a block boundary and keeps what it has, so the
             // same command continues from there. A second Ctrl+C exits at once.

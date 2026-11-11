@@ -364,8 +364,8 @@ async fn split_and_server_caps_bound_actual_concurrent_http_requests() {
     let dir = tempfile::tempdir().unwrap();
     for (split, cap, min_size, expected, startup_requests, name) in [
         ("1", "4", "1M", 1, (0, 0), "one.bin"),
-        ("4", "2", "1M", 2, (1, 0), "two.bin"),
-        ("4", "4", "20M", 1, (1, 0), "large-min.bin"),
+        ("4", "2", "1M", 2, (0, 0), "two.bin"),
+        ("4", "4", "20M", 1, (0, 0), "large-min.bin"),
     ] {
         peak.store(0, Ordering::SeqCst);
         heads.store(0, Ordering::SeqCst);

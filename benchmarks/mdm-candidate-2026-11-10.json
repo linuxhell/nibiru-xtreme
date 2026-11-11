@@ -1,0 +1,4001 @@
+{
+  "platform": "Linux-6.18.57-x86_64-with-glibc2.41",
+  "python": "3.12.14",
+  "protocol": "HTTP/1.1 loopback",
+  "completion": "successful CLI exit; offline size and SHA-256 check",
+  "settings": "client defaults; Nibiru chooses workers by file size, MDM ceiling 8; cold processes",
+  "profiles": {
+    "nibiru": {
+      "binary_sha256": "d1c6a781ae1ca30fbcb46e77feaae8e493770cae40ee088a7bc3d01d1653a694",
+      "version": "nibiru-xtreme 0.2.7"
+    },
+    "mdm": {
+      "binary_sha256": "ff50a1404a6b2108cf7d2317738df1d08ea42ac02854bc51cf1f946aa92e7990",
+      "version": "mdm-cli 0.5.2"
+    }
+  },
+  "scenarios": {
+    "quota": {
+      "size": 67108864,
+      "latency_ms": 40,
+      "rate_mib": 128,
+      "per_connection": 8,
+      "max_active": 2
+    },
+    "changed_validator": {
+      "size": 16777216,
+      "latency_ms": 20,
+      "rate_mib": 128,
+      "change_etag": true
+    }
+  },
+  "rows": [
+    {
+      "engine": "nibiru",
+      "scenario": "quota",
+      "run": 1,
+      "seconds": 4.767269945999942,
+      "final_name_size_seconds": 4.765782123999998,
+      "server_first_write_seconds": 0.09273899099980554,
+      "exit_code": 0,
+      "correct": true,
+      "output_bytes": 67108864,
+      "sha256": "281e519df3077b557c6b03f5da83c4e8d397219259615dd7c3308f89cae8f2a6",
+      "expected_sha256": "281e519df3077b557c6b03f5da83c4e8d397219259615dd7c3308f89cae8f2a6",
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null,
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16777216-29360127",
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-16777215",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-41943039",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-16777215",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-41943039",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-54525951",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=54525952-58720255",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-62914559",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-16777215",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-41943039",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=62914560-67108863",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=37748736-41943039",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-16777215",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-41943039",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=33554432-37748735",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=4194304-8388607",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-16777215",
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-41943039",
+          "if_range": null,
+          "refused": false
+        }
+      ],
+      "peak_active_gets": 2,
+      "server_bytes": 67108864,
+      "error": null
+    },
+    {
+      "engine": "mdm",
+      "scenario": "quota",
+      "run": 1,
+      "seconds": 6.006083495999974,
+      "final_name_size_seconds": 5.741414922999866,
+      "server_first_write_seconds": 0.05187928599980296,
+      "exit_code": 0,
+      "correct": true,
+      "output_bytes": 67108864,
+      "sha256": "281e519df3077b557c6b03f5da83c4e8d397219259615dd7c3308f89cae8f2a6",
+      "expected_sha256": "281e519df3077b557c6b03f5da83c4e8d397219259615dd7c3308f89cae8f2a6",
+      "requests": [
+        {
+          "method": "GET",
+          "range": null,
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=33554432-67108863",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16777216-33554431",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-16777215",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=25165824-33554431",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-16777215",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16777216-25165823",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-58720255",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=25165824-33554431",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12582912-16777215",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=20971520-25165823",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=20971520-25165823",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-12582911",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12582912-16777215",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=25165824-33554431",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-58720255",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-33554431",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=25165824-29360127",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12582912-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-33554431",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-58720255",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=46137344-50331647",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=54525952-58720255",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=62914560-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=44040192-46137343",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-44040191",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=46137344-50331647",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-54525951",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=54525952-58720255",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-62914559",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=62914560-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=65011712-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=60948480-62914559",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=57147392-58720255",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=63963136-65011711",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=66060288-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=57147392-58720255",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=60948480-62914559",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=62914560-63963135",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=63963136-65011711",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=65011712-66060287",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=66060288-67108863",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=57147392-58720255",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=66584576-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=57933824-58720255",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=57540608-57933823",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58327040-58720255",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=66322432-66584575",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=57540608-57933823",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=57540608-57933823",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=57933824-58327039",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58327040-58720255",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=66322432-66584575",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=66584576-67108863",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=66912256-67108863",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=67010560-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=67059712-67108863",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=67010560-67059711",
+          "if_range": "\"version-a\"",
+          "refused": false
+        }
+      ],
+      "peak_active_gets": 2,
+      "server_bytes": 67731456,
+      "error": null
+    },
+    {
+      "engine": "mdm",
+      "scenario": "quota",
+      "run": 2,
+      "seconds": 6.007665598999665,
+      "final_name_size_seconds": 5.753145700000005,
+      "server_first_write_seconds": 0.052131835999716714,
+      "exit_code": 0,
+      "correct": true,
+      "output_bytes": 67108864,
+      "sha256": "281e519df3077b557c6b03f5da83c4e8d397219259615dd7c3308f89cae8f2a6",
+      "expected_sha256": "281e519df3077b557c6b03f5da83c4e8d397219259615dd7c3308f89cae8f2a6",
+      "requests": [
+        {
+          "method": "GET",
+          "range": null,
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=33554432-67108863",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16777216-33554431",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=25165824-33554431",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-16777215",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-16777215",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16777216-25165823",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=25165824-33554431",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-58720255",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12582912-16777215",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=20971520-25165823",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=20971520-25165823",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-12582911",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12582912-16777215",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=25165824-33554431",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-58720255",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-33554431",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=25165824-29360127",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12582912-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-33554431",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=46137344-50331647",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-58720255",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=54525952-58720255",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=62914560-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=44040192-46137343",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-44040191",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=46137344-50331647",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-54525951",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=54525952-58720255",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-62914559",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=62914560-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=65011712-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=60981248-62914559",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=63963136-65011711",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=57114624-58720255",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=66060288-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=57114624-58720255",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=60981248-62914559",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=62914560-63963135",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=63963136-65011711",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=65011712-66060287",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=66060288-67108863",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=57114624-58720255",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=57917440-58720255",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=57516032-57917439",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58318848-58720255",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=66584576-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=66322432-66584575",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=57516032-57917439",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=57516032-57917439",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=57917440-58318847",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58318848-58720255",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=66322432-66584575",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=66584576-67108863",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=66912256-67108863",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=67010560-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=67059712-67108863",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=67010560-67059711",
+          "if_range": "\"version-a\"",
+          "refused": false
+        }
+      ],
+      "peak_active_gets": 2,
+      "server_bytes": 67854336,
+      "error": null
+    },
+    {
+      "engine": "nibiru",
+      "scenario": "quota",
+      "run": 2,
+      "seconds": 4.769255790999978,
+      "final_name_size_seconds": 4.767220023999926,
+      "server_first_write_seconds": 0.09334290900005726,
+      "exit_code": 0,
+      "correct": true,
+      "output_bytes": 67108864,
+      "sha256": "281e519df3077b557c6b03f5da83c4e8d397219259615dd7c3308f89cae8f2a6",
+      "expected_sha256": "281e519df3077b557c6b03f5da83c4e8d397219259615dd7c3308f89cae8f2a6",
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null,
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-16777215",
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16777216-29360127",
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-41943039",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-41943039",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-54525951",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=54525952-58720255",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-41943039",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-62914559",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=62914560-67108863",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=37748736-41943039",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-41943039",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=46137344-50331647",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=33554432-37748735",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-41943039",
+          "if_range": null,
+          "refused": false
+        }
+      ],
+      "peak_active_gets": 2,
+      "server_bytes": 67108864,
+      "error": null
+    },
+    {
+      "engine": "nibiru",
+      "scenario": "quota",
+      "run": 3,
+      "seconds": 4.766285141000026,
+      "final_name_size_seconds": 4.764861737000047,
+      "server_first_write_seconds": 0.09283017500001733,
+      "exit_code": 0,
+      "correct": true,
+      "output_bytes": 67108864,
+      "sha256": "281e519df3077b557c6b03f5da83c4e8d397219259615dd7c3308f89cae8f2a6",
+      "expected_sha256": "281e519df3077b557c6b03f5da83c4e8d397219259615dd7c3308f89cae8f2a6",
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null,
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-16777215",
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16777216-29360127",
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-41943039",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-41943039",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-54525951",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-41943039",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=54525952-58720255",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-62914559",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=62914560-67108863",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=37748736-41943039",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-41943039",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=46137344-50331647",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=33554432-37748735",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-41943039",
+          "if_range": null,
+          "refused": false
+        }
+      ],
+      "peak_active_gets": 2,
+      "server_bytes": 67108864,
+      "error": null
+    },
+    {
+      "engine": "mdm",
+      "scenario": "quota",
+      "run": 3,
+      "seconds": 6.0058158459996775,
+      "final_name_size_seconds": 5.6587886719999005,
+      "server_first_write_seconds": 0.05178619899970727,
+      "exit_code": 0,
+      "correct": true,
+      "output_bytes": 67108864,
+      "sha256": "281e519df3077b557c6b03f5da83c4e8d397219259615dd7c3308f89cae8f2a6",
+      "expected_sha256": "281e519df3077b557c6b03f5da83c4e8d397219259615dd7c3308f89cae8f2a6",
+      "requests": [
+        {
+          "method": "GET",
+          "range": null,
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=33554432-67108863",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16777216-33554431",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=25165824-33554431",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-16777215",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-16777215",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16777216-25165823",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=25165824-33554431",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-58720255",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12582912-16777215",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-12582911",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12582912-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=25165824-33554431",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-58720255",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-33554431",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=46137344-50331647",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=54525952-58720255",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=25165824-29360127",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-54525951",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-33554431",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-46137343",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=54525952-58720255",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=44040192-46137343",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=62914560-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=56623104-58720255",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=54525952-56623103",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-44040191",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=56623104-58720255",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=44040192-46137343",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-62914559",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=62914560-67108863",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=65961984-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=62193664-62914559",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=66535424-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=65454080-65961983",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=61833216-62193663",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=62554112-62914559",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=61833216-62193663",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=65454080-65961983",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=61833216-62193663",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=62193664-62554111",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=62554112-62914559",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=65961984-66535423",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=65454080-65961983",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=66535424-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=62554112-62914559",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=65454080-65961983",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=65961984-66535423",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=66535424-67108863",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=62554112-62914559",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=65454080-65961983",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=65806336-65961983",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=65884160-65961983",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=65921024-65961983",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=65884160-65921023",
+          "if_range": "\"version-a\"",
+          "refused": false
+        }
+      ],
+      "peak_active_gets": 2,
+      "server_bytes": 67604480,
+      "error": null
+    },
+    {
+      "engine": "mdm",
+      "scenario": "quota",
+      "run": 4,
+      "seconds": 6.00550399299982,
+      "final_name_size_seconds": 5.752214860999629,
+      "server_first_write_seconds": 0.05235563699989143,
+      "exit_code": 0,
+      "correct": true,
+      "output_bytes": 67108864,
+      "sha256": "281e519df3077b557c6b03f5da83c4e8d397219259615dd7c3308f89cae8f2a6",
+      "expected_sha256": "281e519df3077b557c6b03f5da83c4e8d397219259615dd7c3308f89cae8f2a6",
+      "requests": [
+        {
+          "method": "GET",
+          "range": null,
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16777216-33554431",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=33554432-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-16777215",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=25165824-33554431",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-16777215",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=25165824-33554431",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-58720255",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=33554432-41943039",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12582912-16777215",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-33554431",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-33554431",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-12582911",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12582912-16777215",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-58720255",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=33554432-41943039",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=37748736-41943039",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=33554432-37748735",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12582912-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=37748736-41943039",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-58720255",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=54525952-58720255",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=46137344-50331647",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=62914560-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=44040192-46137343",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-44040191",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=46137344-50331647",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-54525951",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=54525952-58720255",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-62914559",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=62914560-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=65011712-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=60981248-62914559",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=57114624-58720255",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=63963136-65011711",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=66060288-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=57114624-58720255",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=60981248-62914559",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=62914560-63963135",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=63963136-65011711",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=65011712-66060287",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=66060288-67108863",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=57114624-58720255",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=57917440-58720255",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=66584576-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=57516032-57917439",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58318848-58720255",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=66322432-66584575",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=57516032-57917439",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=57516032-57917439",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=57917440-58318847",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58318848-58720255",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=66322432-66584575",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=66584576-67108863",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=66912256-67108863",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=67010560-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=67059712-67108863",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=67010560-67059711",
+          "if_range": "\"version-a\"",
+          "refused": false
+        }
+      ],
+      "peak_active_gets": 2,
+      "server_bytes": 67854336,
+      "error": null
+    },
+    {
+      "engine": "nibiru",
+      "scenario": "quota",
+      "run": 4,
+      "seconds": 4.767126604999703,
+      "final_name_size_seconds": 4.765104493999843,
+      "server_first_write_seconds": 0.0954854639999212,
+      "exit_code": 0,
+      "correct": true,
+      "output_bytes": 67108864,
+      "sha256": "281e519df3077b557c6b03f5da83c4e8d397219259615dd7c3308f89cae8f2a6",
+      "expected_sha256": "281e519df3077b557c6b03f5da83c4e8d397219259615dd7c3308f89cae8f2a6",
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null,
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-16777215",
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16777216-29360127",
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-41943039",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-41943039",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-54525951",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=54525952-58720255",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-41943039",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-62914559",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=62914560-67108863",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=37748736-41943039",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-41943039",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=46137344-50331647",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=33554432-37748735",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-41943039",
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": null,
+          "refused": false
+        }
+      ],
+      "peak_active_gets": 2,
+      "server_bytes": 67108864,
+      "error": null
+    },
+    {
+      "engine": "nibiru",
+      "scenario": "quota",
+      "run": 5,
+      "seconds": 4.769620275000307,
+      "final_name_size_seconds": 4.7687018650003665,
+      "server_first_write_seconds": 0.0930009900002915,
+      "exit_code": 0,
+      "correct": true,
+      "output_bytes": 67108864,
+      "sha256": "281e519df3077b557c6b03f5da83c4e8d397219259615dd7c3308f89cae8f2a6",
+      "expected_sha256": "281e519df3077b557c6b03f5da83c4e8d397219259615dd7c3308f89cae8f2a6",
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null,
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-16777215",
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16777216-29360127",
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-41943039",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-41943039",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-54525951",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=54525952-58720255",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-41943039",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-62914559",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=62914560-67108863",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=37748736-41943039",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-41943039",
+          "if_range": null,
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=46137344-50331647",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=33554432-37748735",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-41943039",
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": null,
+          "refused": false
+        }
+      ],
+      "peak_active_gets": 2,
+      "server_bytes": 67108864,
+      "error": null
+    },
+    {
+      "engine": "mdm",
+      "scenario": "quota",
+      "run": 5,
+      "seconds": 6.006725021999955,
+      "final_name_size_seconds": 5.957980707999923,
+      "server_first_write_seconds": 0.05277817200021673,
+      "exit_code": 0,
+      "correct": true,
+      "output_bytes": 67108864,
+      "sha256": "281e519df3077b557c6b03f5da83c4e8d397219259615dd7c3308f89cae8f2a6",
+      "expected_sha256": "281e519df3077b557c6b03f5da83c4e8d397219259615dd7c3308f89cae8f2a6",
+      "requests": [
+        {
+          "method": "GET",
+          "range": null,
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=33554432-67108863",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-16777215",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16777216-33554431",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=25165824-33554431",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-16777215",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16777216-25165823",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=25165824-33554431",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-58720255",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12582912-16777215",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-12582911",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-12582911",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12582912-16777215",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=25165824-33554431",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-50331647",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-58720255",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-33554431",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=46137344-50331647",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12582912-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=50331648-58720255",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-33554431",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=25165824-29360127",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-46137343",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=62914560-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=56262656-58720255",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=25165824-29360127",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=56262656-58720255",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=29360128-33554431",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=56262656-58720255",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=62914560-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-46137343",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-62914559",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=44040192-46137343",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=60817408-62914559",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=41943040-44040191",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=44040192-46137343",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=58720256-60817407",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=44040192-46137343",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=60817408-62914559",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=62914560-67108863",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=65732608-67108863",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=65503232-65732607",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=66715648-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=66519040-66715647",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=66912256-67108863",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=65617920-65732607",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=66617344-66715647",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=66813952-66912255",
+          "if_range": "\"version-a\"",
+          "refused": true
+        },
+        {
+          "method": "GET",
+          "range": "bytes=65503232-65617919",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=65617920-65732607",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=66519040-66617343",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=66617344-66715647",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=66715648-66813951",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=66813952-66912255",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=66912256-67108863",
+          "if_range": "\"version-a\"",
+          "refused": false
+        }
+      ],
+      "peak_active_gets": 2,
+      "server_bytes": 67502080,
+      "error": null
+    },
+    {
+      "engine": "nibiru",
+      "scenario": "changed_validator",
+      "run": 1,
+      "seconds": 0.22141265199979898,
+      "final_name_size_seconds": 0.22050302100024055,
+      "server_first_write_seconds": 0.04455111900006159,
+      "exit_code": 0,
+      "correct": true,
+      "output_bytes": 16777216,
+      "sha256": "341aacac661ccb210720bedaa9ead5d668fe5ea41a73532fc147c71e34040df1",
+      "expected_sha256": "341aacac661ccb210720bedaa9ead5d668fe5ea41a73532fc147c71e34040df1",
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null,
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-8388607",
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-12582911",
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": null,
+          "if_range": null,
+          "refused": false
+        }
+      ],
+      "peak_active_gets": 3,
+      "server_bytes": 16908288,
+      "error": null
+    },
+    {
+      "engine": "mdm",
+      "scenario": "changed_validator",
+      "run": 1,
+      "seconds": 0.505872454999917,
+      "final_name_size_seconds": 0.20867395999994187,
+      "server_first_write_seconds": 0.024749846000304387,
+      "exit_code": 0,
+      "correct": false,
+      "output_bytes": 16777216,
+      "sha256": "249cfe9161aba8f40499575beedadddd18d3f03b857575c812119a1ebf6ba288",
+      "expected_sha256": "341aacac661ccb210720bedaa9ead5d668fe5ea41a73532fc147c71e34040df1",
+      "requests": [
+        {
+          "method": "GET",
+          "range": null,
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=4194304-8388607",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=6291456-8388607",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=10485760-12582911",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12582912-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=2097152-4194303",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=14680064-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=15728640-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=7864320-8388607",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=14352384-14680063",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12288000-12582911",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=6127616-6291455",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=14516224-14680063",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12435456-12582911",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=6209536-6291455",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=14434304-14516223",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=14598144-14680063",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12509184-12582911",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=6168576-6209535",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=6250496-6291455",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=14475264-14516223",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=14639104-14680063",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12546048-12582911",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=6189056-6209535",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=6270976-6291455",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=14495744-14516223",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=14659584-14680063",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12562432-12582911",
+          "if_range": "\"version-a\"",
+          "refused": false
+        }
+      ],
+      "peak_active_gets": 11,
+      "server_bytes": 18104320,
+      "error": null
+    },
+    {
+      "engine": "mdm",
+      "scenario": "changed_validator",
+      "run": 2,
+      "seconds": 0.504853438000282,
+      "final_name_size_seconds": 0.21290408200002275,
+      "server_first_write_seconds": 0.024958862999937992,
+      "exit_code": 0,
+      "correct": false,
+      "output_bytes": 16777216,
+      "sha256": "249cfe9161aba8f40499575beedadddd18d3f03b857575c812119a1ebf6ba288",
+      "expected_sha256": "341aacac661ccb210720bedaa9ead5d668fe5ea41a73532fc147c71e34040df1",
+      "requests": [
+        {
+          "method": "GET",
+          "range": null,
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=4194304-8388607",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12582912-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=2097152-4194303",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=6291456-8388607",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=10485760-12582911",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=14680064-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=7340032-8388607",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12025856-12582911",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=14352384-14680063",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16482304-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=6127616-6291455",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=14516224-14680063",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16629760-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=10387456-10485759",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=6209536-6291455",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=14598144-14680063",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16556032-16629759",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16703488-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=10436608-10485759",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=6250496-6291455",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=14639104-14680063",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16592896-16629759",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16740352-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=10461184-10485759",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=6270976-6291455",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=14659584-14680063",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16609280-16629759",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16756736-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=10473472-10485759",
+          "if_range": "\"version-a\"",
+          "refused": false
+        }
+      ],
+      "peak_active_gets": 12,
+      "server_bytes": 18214912,
+      "error": null
+    },
+    {
+      "engine": "nibiru",
+      "scenario": "changed_validator",
+      "run": 2,
+      "seconds": 0.22115395499986334,
+      "final_name_size_seconds": 0.22057421199997407,
+      "server_first_write_seconds": 0.04523906900021757,
+      "exit_code": 0,
+      "correct": true,
+      "output_bytes": 16777216,
+      "sha256": "341aacac661ccb210720bedaa9ead5d668fe5ea41a73532fc147c71e34040df1",
+      "expected_sha256": "341aacac661ccb210720bedaa9ead5d668fe5ea41a73532fc147c71e34040df1",
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null,
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-12582911",
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-8388607",
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": null,
+          "if_range": null,
+          "refused": false
+        }
+      ],
+      "peak_active_gets": 3,
+      "server_bytes": 16908288,
+      "error": null
+    },
+    {
+      "engine": "nibiru",
+      "scenario": "changed_validator",
+      "run": 3,
+      "seconds": 0.22022665700023936,
+      "final_name_size_seconds": 0.21934799200016641,
+      "server_first_write_seconds": 0.044676857000013115,
+      "exit_code": 0,
+      "correct": true,
+      "output_bytes": 16777216,
+      "sha256": "341aacac661ccb210720bedaa9ead5d668fe5ea41a73532fc147c71e34040df1",
+      "expected_sha256": "341aacac661ccb210720bedaa9ead5d668fe5ea41a73532fc147c71e34040df1",
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null,
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-8388607",
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-12582911",
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": null,
+          "if_range": null,
+          "refused": false
+        }
+      ],
+      "peak_active_gets": 3,
+      "server_bytes": 16908288,
+      "error": null
+    },
+    {
+      "engine": "mdm",
+      "scenario": "changed_validator",
+      "run": 3,
+      "seconds": 0.5054450359998555,
+      "final_name_size_seconds": 0.2062262119998195,
+      "server_first_write_seconds": 0.025134643999990658,
+      "exit_code": 0,
+      "correct": false,
+      "output_bytes": 16777216,
+      "sha256": "249cfe9161aba8f40499575beedadddd18d3f03b857575c812119a1ebf6ba288",
+      "expected_sha256": "341aacac661ccb210720bedaa9ead5d668fe5ea41a73532fc147c71e34040df1",
+      "requests": [
+        {
+          "method": "GET",
+          "range": null,
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12582912-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=4194304-8388607",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=6291456-8388607",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=2097152-4194303",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=10485760-12582911",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=14680064-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=11534336-12582911",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16220160-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=5963776-6291455",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8126464-8388607",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=6127616-6291455",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8257536-8388607",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=10387456-10485759",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=6209536-6291455",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8192000-8257535",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8323072-8388607",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=10436608-10485759",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=6168576-6209535",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=6250496-6291455",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8224768-8257535",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8355840-8388607",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=10461184-10485759",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=6189056-6209535",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=6270976-6291455",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8241152-8257535",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8372224-8388607",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=10473472-10485759",
+          "if_range": "\"version-a\"",
+          "refused": false
+        }
+      ],
+      "peak_active_gets": 11,
+      "server_bytes": 17952768,
+      "error": null
+    },
+    {
+      "engine": "mdm",
+      "scenario": "changed_validator",
+      "run": 4,
+      "seconds": 0.505284066999593,
+      "final_name_size_seconds": 0.20828076499992676,
+      "server_first_write_seconds": 0.024663269999564363,
+      "exit_code": 0,
+      "correct": false,
+      "output_bytes": 16777216,
+      "sha256": "249cfe9161aba8f40499575beedadddd18d3f03b857575c812119a1ebf6ba288",
+      "expected_sha256": "341aacac661ccb210720bedaa9ead5d668fe5ea41a73532fc147c71e34040df1",
+      "requests": [
+        {
+          "method": "GET",
+          "range": null,
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=4194304-8388607",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=2097152-4194303",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=6291456-8388607",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12582912-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=10485760-12582911",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=14680064-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=7340032-8388607",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12025856-12582911",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=14352384-14680063",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16482304-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=6127616-6291455",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=14516224-14680063",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16629760-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=6209536-6291455",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=14598144-14680063",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16556032-16629759",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16703488-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=6168576-6209535",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=6250496-6291455",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=14639104-14680063",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16592896-16629759",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16740352-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=6189056-6209535",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=6270976-6291455",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=14659584-14680063",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16609280-16629759",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16756736-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        }
+      ],
+      "peak_active_gets": 11,
+      "server_bytes": 18124800,
+      "error": null
+    },
+    {
+      "engine": "nibiru",
+      "scenario": "changed_validator",
+      "run": 4,
+      "seconds": 0.2187318259998392,
+      "final_name_size_seconds": 0.2179623659999379,
+      "server_first_write_seconds": 0.04466603699984262,
+      "exit_code": 0,
+      "correct": true,
+      "output_bytes": 16777216,
+      "sha256": "341aacac661ccb210720bedaa9ead5d668fe5ea41a73532fc147c71e34040df1",
+      "expected_sha256": "341aacac661ccb210720bedaa9ead5d668fe5ea41a73532fc147c71e34040df1",
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null,
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-8388607",
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-12582911",
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": null,
+          "if_range": null,
+          "refused": false
+        }
+      ],
+      "peak_active_gets": 3,
+      "server_bytes": 16908288,
+      "error": null
+    },
+    {
+      "engine": "nibiru",
+      "scenario": "changed_validator",
+      "run": 5,
+      "seconds": 0.2206381189998865,
+      "final_name_size_seconds": 0.2199048440002116,
+      "server_first_write_seconds": 0.04476537600021402,
+      "exit_code": 0,
+      "correct": true,
+      "output_bytes": 16777216,
+      "sha256": "341aacac661ccb210720bedaa9ead5d668fe5ea41a73532fc147c71e34040df1",
+      "expected_sha256": "341aacac661ccb210720bedaa9ead5d668fe5ea41a73532fc147c71e34040df1",
+      "requests": [
+        {
+          "method": "HEAD",
+          "range": null,
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-12582911",
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=0-8388607",
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": null,
+          "if_range": null,
+          "refused": false
+        }
+      ],
+      "peak_active_gets": 3,
+      "server_bytes": 16908288,
+      "error": null
+    },
+    {
+      "engine": "mdm",
+      "scenario": "changed_validator",
+      "run": 5,
+      "seconds": 0.5059002479997616,
+      "final_name_size_seconds": 0.21117265699967902,
+      "server_first_write_seconds": 0.025343954999698326,
+      "exit_code": 0,
+      "correct": false,
+      "output_bytes": 16777216,
+      "sha256": "249cfe9161aba8f40499575beedadddd18d3f03b857575c812119a1ebf6ba288",
+      "expected_sha256": "341aacac661ccb210720bedaa9ead5d668fe5ea41a73532fc147c71e34040df1",
+      "requests": [
+        {
+          "method": "GET",
+          "range": null,
+          "if_range": null,
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=8388608-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=4194304-8388607",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12582912-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=6291456-8388607",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=14680064-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=10485760-12582911",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=2097152-4194303",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=13643776-14680063",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=7864320-8388607",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16449536-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12288000-12582911",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16613376-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12435456-12582911",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=6160384-6291455",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16531456-16613375",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16695296-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12361728-12435455",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12509184-12582911",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=6225920-6291455",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16572416-16613375",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16736256-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12398592-12435455",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12546048-12582911",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=6258688-6291455",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16592896-16613375",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=16756736-16777215",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12414976-12435455",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=12562432-12582911",
+          "if_range": "\"version-a\"",
+          "refused": false
+        },
+        {
+          "method": "GET",
+          "range": "bytes=6275072-6291455",
+          "if_range": "\"version-a\"",
+          "refused": false
+        }
+      ],
+      "peak_active_gets": 12,
+      "server_bytes": 18132992,
+      "error": null
+    }
+  ],
+  "summary": [
+    {
+      "scenario": "quota",
+      "engine": "nibiru",
+      "median_seconds": 4.767269945999942,
+      "correct": 5,
+      "runs": 5
+    },
+    {
+      "scenario": "quota",
+      "engine": "mdm",
+      "median_seconds": 6.006083495999974,
+      "correct": 5,
+      "runs": 5
+    },
+    {
+      "scenario": "changed_validator",
+      "engine": "nibiru",
+      "median_seconds": 0.2206381189998865,
+      "correct": 5,
+      "runs": 5
+    },
+    {
+      "scenario": "changed_validator",
+      "engine": "mdm",
+      "median_seconds": 0.5054450359998555,
+      "correct": 0,
+      "runs": 5
+    }
+  ],
+  "candidate_build": {
+    "status": "unreleased candidate, version string remains 0.2.7",
+    "base_commit": "58fe3b31e63e6b81ef075f09bb75037dfc6d8d84",
+    "rust": "1.97.0",
+    "command": "cargo build --locked --release --no-default-features",
+    "scope": "HTTP/1.1 loopback; not a before/after general throughput benchmark"
+  }
+}

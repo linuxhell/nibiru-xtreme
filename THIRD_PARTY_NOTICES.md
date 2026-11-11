@@ -30,6 +30,9 @@ Optional transports retain their feature gates. Transitive dependencies retain t
 
 | Crate | Locked version | License expression |
 | --- | --- | --- |
+| `httpdate` | 1.0.3 | MIT OR Apache-2.0 |
+| `nibiru-platform` (local Windows boundary) | 0.1.0 | MIT |
+| `windows-sys` (Windows boundary) | 0.61.2 | MIT OR Apache-2.0 |
 | `anyhow` | 1.0.104 | MIT OR Apache-2.0 |
 | `base64` | 0.22.1 | MIT OR Apache-2.0 |
 | `clap` | 4.6.7 | MIT OR Apache-2.0 |

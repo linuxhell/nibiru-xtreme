@@ -2,6 +2,8 @@
 
 # Nibiru Xtreme
 
+A versão 0.2.8 aproveita o primeiro GET, respeita Retry-After em 429/503, aprende temporariamente limites por origem e recupera ranges interrompidos mantendo blocos concluídos. Reutiliza buffers e prepara arquivos esparsos no Windows. O slider de threads prevalece sobre o padrão por tamanho. Veja a [implementação, testes e limites](docs/HTTP-0.2.8.md) e a [auditoria do MDM](docs/MDM-AUDIT-2026-11-10.md).
+
 A versão 0.2.7 elimina o teste descartável de um byte no início dos downloads HTTP segmentados e permite que conexões livres ajudem trechos já atribuídos. Mantém retomada validada e gravação direta no arquivo parcial. A [análise do IDM e comparação local](docs/IDM-ANALYSIS-2026-11-10.md) documenta os ganhos medidos e seus limites; não comprova superioridade geral sobre o IDM ou aceleração de torrent/ed2k.
 
 A versão 0.2.6 corrige a resposta ao handshake ED2K de entrada: anuncia a porta TCP realmente aberta, inclusive quando foi escolhida uma porta alternativa, em vez de zero. A descoberta UPnP consulta os endereços IPv4 das interfaces locais e repete pacotes SSDP perdidos dentro de um único prazo. O status distingue conexões TCP aceitas de handshakes ED2K concluídos. Essas correções não garantem ID alto em qualquer rede; a confirmação continua sendo o ID retornado pelo servidor.
@@ -20,7 +22,7 @@ O HTTPS usa as raízes públicas e os certificados confiáveis do sistema, mante
 
 ## Estado
 
-**Versão 0.2.7.** Motor nativo do Apocalipse Download Manager, distribuído para Windows, Linux e macOS com arquivos SHA-256.
+**Versão 0.2.8.** Motor nativo do Apocalipse Download Manager, distribuído para Windows, Linux e macOS com arquivos SHA-256.
 
 A prévia ED2K não depende de chegar a 30 ou 40 MB no total: o ADM libera o botão quando a primeira parte está autenticada por MD4 (até 9.728.000 bytes). Outros peers ajudam a terminar o início e o fim do arquivo antes das partes do meio, evitando que um peer lento retenha a prévia. MP4/AVI podem precisar também do índice no fim; trechos ainda ausentes aguardam dados, sem fornecer buracos do arquivo ao player.
 
@@ -81,7 +83,7 @@ Os testes independentes usam libtorrent 2.1.1 e aMule como outros clientes; não
 
 ## Segurança, CI e licença
 
-O código Rust próprio proíbe `unsafe`. TLS valida certificados; SFTP exige chave conhecida. JSON-RPC tem token opcional e limites de conexão, leitura e tamanho. Configure um segredo para o gerenciador. Logs usam JSON Lines; URLs HTTP de diagnóstico removem credenciais, query e fragmento, incluindo erros de requisição.
+O núcleo Rust proíbe `unsafe`. A pequena dependência local MIT `nibiru-platform` isola as chamadas Win32 de arquivo esparso em uma API segura para arquivos síncronos abertos por ela; veja a [fronteira de plataforma](docs/HTTP-0.2.8.md). TLS valida certificados; SFTP exige chave conhecida. JSON-RPC tem token opcional e limites de conexão, leitura e tamanho. Configure um segredo para o gerenciador. Logs usam JSON Lines; URLs HTTP de diagnóstico removem credenciais, query e fragmento, incluindo erros de requisição.
 
 `ci.yml` testa os três sistemas, verifica interoperabilidade no Linux e gera um artefato contendo somente o executável de cada plataforma. No Windows, o artefato de teste contém apenas o EXE. `release.yml` reutiliza esses binários e publica Windows x64, Linux x64 (musl estático) e macOS x64 com SHA-256 e licenças. Após esta versão, a manutenção acompanha os bugs encontrados no uso diário. Os listeners TCP, uTP, DHT e de prévia são encerrados com seus proprietários.
 
