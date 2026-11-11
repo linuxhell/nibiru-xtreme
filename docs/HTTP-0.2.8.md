@@ -53,6 +53,6 @@ Medianas em segundos, incluindo início e término da CLI. O MDM espera seu poll
 
 No cenário por conexão, escolher oito permite usar mais conexões úteis; isso é uma diferença explícita de configuração. O padrão da CLI permanece por tamanho. Servidores limitados a duas conexões podem ficar mais lentos com uma tentativa inicial de oito, apesar da recuperação correta. Em um enlace já saturado, não há multiplicação de capacidade.
 
-Na amostragem RSS do cenário de 256 MiB, o pico mediano foi nibiru_baseline: 71.9 MiB / nibiru: 45.9 MiB / mdm: 22.2 MiB. A reutilização reduziu a RSS observada do Nibiru nesse caso; o MDM usou menos memória que ambos. A amostragem de 1 ms não garante o pico exato.
+Na amostragem RSS do cenário de 256 MiB, o pico mediano foi nibiru_baseline: 71.9 MiB / nibiru: 45.9 MiB / mdm: 22.2 MiB. A versão nova reduziu a RSS observada do Nibiru nesse caso; o MDM usou menos memória que ambos. A amostragem de 1 ms não garante o pico exato.
 
 A versão 0.2.7 falhou nos cinco testes de quota; os candidatos 0.2.8 concluíram todos com hashes corretos. O cenário adversarial de ETag reproduziu cinco saídas de sucesso com conteúdo incorreto no MDM; os Nibirus recusaram a mistura e concluíram com conteúdo correto. Isso testa uma defesa diante de servidor deliberadamente incompatível, não representa todo download normal.
