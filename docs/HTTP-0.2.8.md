@@ -35,3 +35,24 @@ Regressões reais contra servidores TCP locais cobrem primeiro GET sem HEAD, pre
 O CI exige formatação, Clippy estrito, todos os targets/features e interoperabilidade independente libtorrent/aMule. A publicação só ocorre depois das validações. O ADM exige separadamente testes desktop completos, transport lab e extensão nos três sistemas x64.
 
 Os ensaios verificam tamanho e SHA-256 independentemente. Tempo de CLI inclui a espera de polling de conclusão do MDM; o instante de nome/tamanho final é registrado separadamente e não substitui a verificação final. RSS é amostrada em Linux, sem representar uma medição exata de pico. Resultados sintéticos não estabelecem superioridade geral nem aceleração da conexão residencial, torrent ou ED2K.
+
+## Comparação final em Linux
+
+120 execuções: cinco rodadas alternadas por cenário e cliente. Os dois Nibirus foram compilados com Rust 1.97.0, `--release --no-default-features`, para o mesmo alvo GNU. Fonte de referência `58fe3b3` (0.2.7); candidato `c47d9e6` (0.2.8). O MDM é o binário publicado 0.5.2 já identificado na auditoria. Todos os resultados exigem saída bem-sucedida, tamanho e SHA-256 corretos. [Dados brutos e hashes dos executáveis](../benchmarks/mdm-028-2026-11-10.json).
+
+Medianas em segundos, incluindo início e término da CLI. O MDM espera seu polling de conclusão, registrado separadamente pelo instante de nome/tamanho final; essa coluna não mede apenas transferência. “Falhou” nunca é comparado como tempo mais rápido.
+
+| Cenário | Nibiru 0.2.7 padrão | 0.2.8 padrão | 0.2.8 com máximo 8 | MDM CLI / nome final |
+| --- | ---: | ---: | ---: | ---: |
+| 256 KiB; 40 ms | 0.094 | 0.051 | 0.050 | 0.518 / 0.066 |
+| 256 MiB; 128 MiB/s globais | 2.199 | 2.162 | 2.111 | 2.509 / 2.274 |
+| 64 MiB; 150 ms e 64 MiB/s | 1.373 | 1.308 | 1.257 | 2.008 / 1.758 |
+| 64 MiB; 8 MiB/s por conexão | 2.244 | 2.234 | 1.182 | 1.509 / 1.217 |
+| 64 MiB; duas conexões permitidas | Falhou 5/5 | 4.458 | 4.988 | 5.523 / 5.128 |
+| 16 MiB; ETag muda indevidamente | 0.226 | 0.223 | 0.222 | Falhou 5/5 |
+
+No cenário por conexão, escolher oito permite usar mais conexões úteis; isso é uma diferença explícita de configuração. O padrão da CLI permanece por tamanho. Servidores limitados a duas conexões podem ficar mais lentos com uma tentativa inicial de oito, apesar da recuperação correta. Em um enlace já saturado, não há multiplicação de capacidade.
+
+Na amostragem RSS do cenário de 256 MiB, o pico mediano foi nibiru_baseline: 71.9 MiB / nibiru: 45.9 MiB / mdm: 22.2 MiB. A reutilização reduziu a RSS observada do Nibiru nesse caso; o MDM usou menos memória que ambos. A amostragem de 1 ms não garante o pico exato.
+
+A versão 0.2.7 falhou nos cinco testes de quota; os candidatos 0.2.8 concluíram todos com hashes corretos. O cenário adversarial de ETag reproduziu cinco saídas de sucesso com conteúdo incorreto no MDM; os Nibirus recusaram a mistura e concluíram com conteúdo correto. Isso testa uma defesa diante de servidor deliberadamente incompatível, não representa todo download normal.
