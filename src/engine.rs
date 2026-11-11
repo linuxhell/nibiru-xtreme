@@ -27,6 +27,7 @@ use url::Url;
 use crate::{bittorrent::limiter::RateLimiter, logging::LogSink, storage};
 
 mod adaptive;
+mod budget;
 mod ranges;
 mod retry;
 
@@ -353,16 +354,16 @@ async fn write_range_block(
     buffer: Vec<u8>,
     completed: Arc<AtomicU64>,
     done: Arc<Vec<AtomicBool>>,
-) -> Result<u64> {
+) -> Result<(u64, Vec<u8>)> {
     let len = buffer.len() as u64;
     let started = Instant::now();
-    storage::write_at(file, offset, buffer).await?;
+    let buffer = storage::write_at_reusing(file, offset, buffer).await?;
     completed.fetch_add(len, Ordering::AcqRel);
     // Writes start on block boundaries, so each one finishes exactly one block.
     if let Some(block) = done.get((offset / RANGE_CHUNK_SIZE) as usize) {
         block.store(true, Ordering::Release);
     }
-    Ok(started.elapsed().as_micros() as u64)
+    Ok((started.elapsed().as_micros() as u64, buffer))
 }
 
 #[cfg(test)]
@@ -491,14 +492,22 @@ pub struct Engine {
     adaptive: bool,
     http3_only: bool,
     transport_options: crate::protocols::TransportOptions,
+    read_idle_timeout: Duration,
+    origin_limits: Arc<budget::OriginLimits>,
 }
 
 impl Engine {
     fn connection_count(&self, total: u64) -> usize {
-        let mut workers = suggested_worker_count(total);
-        if let Some(limit) = self.request_options.max_connections {
-            workers = workers.min(limit.max(1));
-        }
+        let suggested = if total < MIN_SEGMENTED_SIZE {
+            1
+        } else {
+            suggested_worker_count(total)
+        };
+        let mut workers = self
+            .request_options
+            .max_connections
+            .map_or(suggested, |n| n.clamp(1, MAX_HTTP_WORKERS))
+            .min(total.div_ceil(RANGE_CHUNK_SIZE).max(1) as usize);
         if let Some(size) = self.request_options.min_split_size.filter(|s| *s > 0) {
             workers = workers.min((total / size).max(1).min(MAX_HTTP_WORKERS as u64) as usize);
         }
@@ -526,6 +535,8 @@ impl Engine {
             adaptive: false,
             http3_only: false,
             transport_options: Default::default(),
+            read_idle_timeout: Duration::from_secs(30),
+            origin_limits: Arc::default(),
         })
     }
 
@@ -546,9 +557,18 @@ impl Engine {
         self
     }
 
+    /// Maximum wait for the next read, excluding disk and rate limiter waits.
+    pub fn with_read_idle_timeout(mut self, timeout: Duration) -> Result<Self> {
+        anyhow::ensure!(!timeout.is_zero(), "HTTP read timeout must be positive");
+        self.read_idle_timeout = timeout;
+        let options = self.request_options.clone();
+        self.with_request_options(options)
+    }
+
     /// Applies headers and a proxy to every HTTP request of this engine.
     pub fn with_request_options(mut self, options: RequestOptions) -> Result<Self> {
-        let mut builder = Self::client_builder(self.http1_only);
+        let mut builder =
+            Self::client_builder(self.http1_only).read_timeout(self.read_idle_timeout);
         let mut headers = reqwest::header::HeaderMap::new();
         for (name, value) in &options.headers {
             let name = reqwest::header::HeaderName::from_bytes(name.trim().as_bytes())
@@ -612,6 +632,7 @@ impl Engine {
         let mut builder = Client::builder()
             .user_agent(concat!("Nibiru-Xtreme/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(10))
+            .read_timeout(Duration::from_secs(30))
             .http2_initial_connection_window_size(HTTP2_CONNECTION_WINDOW)
             .http2_initial_stream_window_size(RANGE_CHUNK_SIZE as u32)
             .redirect(Policy::limited(10))
@@ -698,15 +719,48 @@ impl Engine {
             .map(|m| m.len())
             .unwrap_or(0);
 
-        if existing == 0
-            // A requested single connection cannot use segmentation. Start its GET
-            // directly instead of waiting for HEAD and a one-byte range probe.
-            && self.request_options.max_connections.is_none_or(|n| n > 1)
-            && let Ok((Some(total), ranges)) = self.probe_http(&request.url, true).await
-            && ranges
-            && total >= MIN_SEGMENTED_SIZE
-            && self.connection_count(total) > 1
-        {
+        let (_, state_path) = partial_paths(&request.destination);
+        let resuming = fs::try_exists(&state_path).await.unwrap_or(false);
+        let mut first = None;
+        let segmented_total = if existing == 0 && resuming {
+            match self.probe_http(&request.url, true).await {
+                Ok((Some(total), true)) if total >= MIN_SEGMENTED_SIZE => Some(total),
+                _ => None,
+            }
+        } else if existing == 0 {
+            let started = Instant::now();
+            let mut get = self.client.get(parsed.clone());
+            if self.request_options.max_connections != Some(1) {
+                get = get.header(RANGE, format!("bytes=0-{}", RANGE_CHUNK_SIZE - 1));
+            }
+            self.log
+                .info("http.initial_get", &format!("url={}", redact_url(&parsed)));
+            let pending = retry::range_response(get, &self.log, 0);
+            tokio::pin!(pending);
+            let mut ticker = time::interval(Duration::from_millis(250));
+            let response = loop {
+                tokio::select! {
+                    result = &mut pending => break result?,
+                    _ = ticker.tick() => { if cancelled.load(Ordering::Acquire) { bail!("cancelled"); } }
+                }
+            };
+            let total = if response.status() == StatusCode::PARTIAL_CONTENT {
+                Some(prefix_total(&response)?)
+            } else {
+                None
+            };
+            if response.status() == StatusCode::RANGE_NOT_SATISFIABLE {
+                // Empty resources and range-refusing servers can still have a plain GET representation.
+                drop(response);
+                None
+            } else {
+                first = Some((response, started));
+                total.filter(|total| *total > RANGE_CHUNK_SIZE)
+            }
+        } else {
+            None
+        };
+        if let Some(total) = segmented_total {
             match self
                 .download_segmented(
                     parsed.clone(),
@@ -714,13 +768,15 @@ impl Engine {
                     total,
                     cancelled.clone(),
                     &mut on_progress,
+                    first.take(),
                 )
                 .await
             {
                 Ok(()) => return Ok(()),
                 Err(error)
                     if error.is::<storage::checkpoints::BackgroundSyncError>()
-                        || error.is::<retry::Throttled>() =>
+                        || error.is::<retry::Throttled>()
+                        || error.is::<retry::BodyExhausted>() =>
                 {
                     return Err(error);
                 }
@@ -734,8 +790,14 @@ impl Engine {
             }
         }
 
-        self.download_single(parsed, request.destination, cancelled, &mut on_progress)
-            .await
+        self.download_single(
+            parsed,
+            request.destination,
+            cancelled,
+            &mut on_progress,
+            first,
+        )
+        .await
     }
 
     async fn download_single<F>(
@@ -744,6 +806,7 @@ impl Engine {
         destination: PathBuf,
         cancelled: Arc<AtomicBool>,
         on_progress: &mut F,
+        first: Option<(reqwest::Response, Instant)>,
     ) -> Result<()>
     where
         F: FnMut(Progress) + Send,
@@ -803,12 +866,18 @@ impl Engine {
             ),
         );
 
-        let started = Instant::now();
-        let response = builder
-            .send()
-            .await
-            .map_err(reqwest::Error::without_url)
-            .context("HTTP request failed")?;
+        let prefetched = first.is_some();
+        let (response, started) = if let Some(first) = first {
+            first
+        } else {
+            let started = Instant::now();
+            let response = builder
+                .send()
+                .await
+                .map_err(reqwest::Error::without_url)
+                .context("HTTP request failed")?;
+            (response, started)
+        };
         self.log.info(
             "http.response",
             &format!(
@@ -885,16 +954,24 @@ impl Engine {
             );
         } else {
             anyhow::ensure!(
-                status != StatusCode::PARTIAL_CONTENT,
+                status != StatusCode::PARTIAL_CONTENT
+                    || prefetched && prefix_total(&response)? <= RANGE_CHUNK_SIZE,
                 "unexpected partial response without Range"
             );
-            let identity = HttpIdentity::response(&parsed, &response);
+            let mut identity = HttpIdentity::response(&parsed, &response);
+            if status == StatusCode::PARTIAL_CONTENT {
+                identity.total = Some(prefix_total(&response)?);
+            }
             let temp = identity_path.with_extension("tmp");
             fs::write(&temp, serde_json::to_vec(&identity)?).await?;
             fs::rename(&temp, &identity_path).await?;
         }
         let resumed = existing > 0 && status == StatusCode::PARTIAL_CONTENT;
-        let response_len = response.content_length();
+        let response_len = if existing == 0 && status == StatusCode::PARTIAL_CONTENT {
+            Some(prefix_total(&response)?)
+        } else {
+            response.content_length()
+        };
         let total = response_len.map(|len| if resumed { existing + len } else { len });
 
         let mut file = if resumed {
@@ -1082,11 +1159,12 @@ impl Engine {
         total: u64,
         cancelled: Arc<AtomicBool>,
         on_progress: &mut F,
+        mut first: Option<(reqwest::Response, Instant)>,
     ) -> Result<()>
     where
         F: FnMut(Progress) + Send,
     {
-        let started = Instant::now();
+        let started = first.as_ref().map(|f| f.1).unwrap_or_else(Instant::now);
         let workers = self.connection_count(total);
         let (part_path, state_path) = partial_paths(destination);
         let block_count = total.div_ceil(RANGE_CHUNK_SIZE) as usize;
@@ -1118,17 +1196,39 @@ impl Engine {
                     .sum()
             })
             .unwrap_or(0);
-        let identity_seed = resumed.map(|r| r.1);
+        if resumed.is_some() {
+            first = None;
+        }
+        let identity_seed = resumed
+            .map(|r| r.1)
+            .or_else(|| first.as_ref().map(|f| resource_identity(&f.0)));
+        let fresh_file = first.is_some() || identity_seed.is_none();
         if identity_seed.is_none() {
             let _ = fs::remove_file(&state_path).await;
         }
+        #[cfg(windows)]
+        let mut prepared = nibiru_platform::SparseFile::open(&part_path, fresh_file, total)?;
+        #[cfg(windows)]
+        let file = {
+            self.log.info(
+                "http.storage_sparse",
+                &format!(
+                    "enabled={} error={:?}",
+                    prepared.is_sparse(),
+                    prepared.preparation_error()
+                ),
+            );
+            prepared.file().try_clone()?
+        };
+        #[cfg(not(windows))]
         let file = StdOpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
-            .truncate(identity_seed.is_none())
+            .truncate(fresh_file)
             .open(&part_path)?;
-        if identity_seed.is_none() {
+        #[cfg(not(windows))]
+        if fresh_file {
             file.set_len(total)?;
         }
         let file = Arc::new(file);
@@ -1143,9 +1243,34 @@ impl Engine {
         };
 
         let identity = Arc::new(std::sync::Mutex::new(identity_seed));
-        let scheduler = Arc::new(ranges::Scheduler::new(workers));
+        let prefix_len = first.as_ref().map(|_| total.min(RANGE_CHUNK_SIZE));
+        let scheduler = Arc::new(if let Some(n) = prefix_len {
+            ranges::Scheduler::with_prefix(workers, n)
+        } else {
+            ranges::Scheduler::new(workers)
+        });
         let completed = Arc::new(AtomicU64::new(resumed_bytes));
         let metrics = Arc::new(RangeMetrics::default());
+        let origin_url = first
+            .as_ref()
+            .map_or(&parsed, |(response, _)| response.url());
+        let budget = budget::Budget::new(
+            workers,
+            self.origin_limits.clone(),
+            self.origin_budget_key(origin_url),
+        );
+        let mut initial_permit = if first.is_some() {
+            Some(budget.enter().await)
+        } else {
+            None
+        };
+        self.log.info(
+            "http.origin_limit",
+            &format!(
+                "maximum_workers={workers} effective_limit={}",
+                budget.limit()
+            ),
+        );
         let mut set = JoinSet::new();
         let (adaptive_limit, _) = tokio::sync::watch::channel(workers);
         let active_ranges = Arc::new(AtomicU32::new(0));
@@ -1171,6 +1296,17 @@ impl Engine {
         );
 
         for worker_id in 0..workers {
+            let mut first = if worker_id == 0 {
+                first.take().map(|f| f.0)
+            } else {
+                None
+            };
+            let mut initial_permit = if worker_id == 0 {
+                initial_permit.take()
+            } else {
+                None
+            };
+            let budget = budget.clone();
             let client = self.client.clone();
             let identity = identity.clone();
             let url = parsed.clone();
@@ -1190,6 +1326,8 @@ impl Engine {
                 worker: worker_id,
             });
             set.spawn(async move {
+                let mut body_retries = 0;
+                let mut buffer = Vec::with_capacity(RANGE_CHUNK_SIZE as usize);
                 loop {
                     if cancelled.load(Ordering::Acquire) {
                         return Err(anyhow!("cancelled"));
@@ -1202,9 +1340,8 @@ impl Engine {
                     } else {
                         workers
                     };
-                    let Some((start, end)) =
-                        scheduler.claim(worker_id, total, range_workers, &done_blocks)?
-                    else {
+                    let initial = first.take();
+                    let Some((start, end)) = (if initial.is_some() { Some((0, prefix_len.unwrap()-1)) } else { scheduler.claim(worker_id, total, range_workers, &done_blocks)? }) else {
                         break;
                     };
                     if end + 1 == total
@@ -1229,7 +1366,7 @@ impl Engine {
                     if let Some(validator) = validator {
                         request = request.header(IF_RANGE, validator);
                     }
-                    let response = retry::range_response(request, &log, worker_id).await?;
+                    let (response, mut permit) = if let Some(response) = initial { (response, initial_permit.take()) } else { retry::range_response_limited(request, &log, worker_id, Some(&budget)).await? };
                     // An error page has no authority to establish or change the
                     // file's identity. Throttling is handled before this check.
                     if response.status() != StatusCode::PARTIAL_CONTENT {
@@ -1298,7 +1435,8 @@ impl Engine {
                     let mut body_wait_us = 0_u64;
                     let mut storage_wait_us = 0_u64;
                     let mut handed_off = false;
-                    let mut buffer = Vec::with_capacity(RANGE_CHUNK_SIZE as usize);
+                    buffer.clear();
+                    let mut interrupted = None;
                     'body: loop {
                         let receiving = Instant::now();
                         let chunk = body.next().await;
@@ -1309,14 +1447,13 @@ impl Engine {
                         if cancelled.load(Ordering::Acquire) {
                             bail!("cancelled");
                         }
-                        let chunk = chunk
-                            .map_err(reqwest::Error::without_url)
-                            .with_context(|| format!("range worker {worker_id} body failed"))?;
+                        let chunk = match chunk { Ok(chunk) => chunk, Err(error) => { interrupted = Some(anyhow!(error.without_url())); break; } };
                         if chunk.len() as u64 > expected.saturating_sub(received) {
                             bail!(
                                 "range worker {worker_id} body exceeds expected length {expected}"
                             );
                         }
+                        if !chunk.is_empty() && let Some(permit) = permit.as_mut() { permit.accepted(); }
                         Self::throttle(&limiters, chunk.len()).await;
                         received += chunk.len() as u64;
                         let mut part = chunk.as_ref();
@@ -1326,7 +1463,7 @@ impl Engine {
                             part = &part[take..];
                             if buffer.len() == RANGE_CHUNK_SIZE as usize {
                                 let block = std::mem::take(&mut buffer);
-                                storage_wait_us += write_range_block(
+                                let (wait, reused) = write_range_block(
                                     file.clone(),
                                     start + written,
                                     block,
@@ -1334,8 +1471,10 @@ impl Engine {
                                     done_blocks.clone(),
                                 )
                                 .await?;
+                                storage_wait_us += wait;
                                 written += RANGE_CHUNK_SIZE;
-                                buffer = Vec::with_capacity(RANGE_CHUNK_SIZE as usize);
+                                buffer = reused;
+                                buffer.clear();
                                 if !scheduler.advance(worker_id, start + written)?
                                     && written < expected
                                 {
@@ -1349,20 +1488,23 @@ impl Engine {
                         }
                     }
                     if !handed_off && received != expected {
-                        bail!(
-                            "range worker {worker_id} length mismatch expected={expected} got={}",
-                            received
-                        );
+                        let error = interrupted.unwrap_or_else(|| anyhow!("range worker {worker_id} length mismatch expected={expected} got={received}"));
+                        if body_retries >= 2 { return Err(error).context(retry::BodyExhausted); }
+                        body_retries += 1;
+                        drop(body);
+                        scheduler.requeue(worker_id, start + written)?;
+                        log.warn("http.range_body_retry", &format!("worker={worker_id} retry={body_retries} committed_offset={} reason={}", start+written, download_error_message(&error)));
+                        continue;
                     }
                     if !buffer.is_empty() {
                         storage_wait_us += write_range_block(
                             file.clone(),
                             start + written,
-                            buffer,
+                            std::mem::take(&mut buffer),
                             completed.clone(),
                             done_blocks.clone(),
                         )
-                        .await?;
+                        .await?.0;
                     }
                     metrics
                         .body_wait_us
@@ -1552,11 +1694,18 @@ impl Engine {
             }
         };
         let checkpoint_wait_ms = finalizing.elapsed().as_millis();
+        #[cfg(windows)]
+        if let Err(error) = prepared.finish() {
+            self.log
+                .warn("http.storage_sparse_finish", &format!("error={error}"));
+        }
         let syncing = Instant::now();
         file.sync_all()?;
         let sync_ms = syncing.elapsed().as_millis();
         let closing = Instant::now();
         drop(file);
+        #[cfg(windows)]
+        drop(prepared);
         let close_ms = closing.elapsed().as_millis();
 
         let renaming = Instant::now();
@@ -1603,6 +1752,18 @@ impl Engine {
 
     pub async fn probe(&self, url: &str) -> Result<(Option<u64>, bool)> {
         self.probe_http(url, false).await
+    }
+
+    fn origin_budget_key(&self, url: &Url) -> String {
+        let context = format!(
+            "{}|{:?}|{:?}|{:?}|{:?}",
+            url.origin().ascii_serialization(),
+            self.request_options.proxy,
+            self.request_options.headers,
+            url.username(),
+            url.password()
+        );
+        format!("{:x}", Sha256::digest(context.as_bytes()))
     }
 
     /// Download startup only tests ranges when the length and settings allow splitting.
@@ -1675,6 +1836,41 @@ impl Engine {
         }
         Ok((total, false))
     }
+}
+
+fn prefix_total(response: &reqwest::Response) -> Result<u64> {
+    let raw = response
+        .headers()
+        .get(CONTENT_RANGE)
+        .and_then(|v| v.to_str().ok())
+        .context("missing initial Content-Range")?;
+    let total = raw
+        .rsplit_once('/')
+        .context("invalid initial Content-Range")?
+        .1
+        .parse::<u64>()?;
+    anyhow::ensure!(total > 0, "empty partial response");
+    let length = total.min(RANGE_CHUNK_SIZE);
+    validate_content_range(response.headers().get(CONTENT_RANGE), 0, length - 1, total)?;
+    anyhow::ensure!(
+        response.content_length().is_none_or(|n| n == length),
+        "initial range length mismatch"
+    );
+    Ok(total)
+}
+fn resource_identity(response: &reqwest::Response) -> ResourceIdentity {
+    let value = |key| {
+        response
+            .headers()
+            .get(key)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    };
+    (
+        response.url().to_string(),
+        value(ETAG).filter(|etag| !etag.starts_with("W/")),
+        value(LAST_MODIFIED),
+    )
 }
 
 fn validate_content_range(

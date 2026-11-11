@@ -82,7 +82,7 @@ async fn origin_with_destination(
                     end = if b.is_empty() {
                         size - 1
                     } else {
-                        b.parse().unwrap()
+                        b.parse::<usize>().unwrap().min(size - 1)
                     };
                     if start >= size {
                         let _=stream.write_all(format!("HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\nContent-Range: bytes */{size}\r\nConnection: close\r\n\r\n").as_bytes()).await;

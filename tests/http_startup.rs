@@ -76,7 +76,7 @@ async fn small_downloads_skip_range_tests_but_explicit_probe_checks_support() {
 
     let folder = tempfile::tempdir().unwrap();
     for (name, options, expected_requests) in [
-        ("auto.bin", RequestOptions::default(), vec!["HEAD", "GET"]),
+        ("auto.bin", RequestOptions::default(), vec!["GET"]),
         (
             "single.bin",
             RequestOptions {

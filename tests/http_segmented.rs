@@ -87,7 +87,7 @@ async fn download_case(
                     })
                     .and_then(|value| value.split_once('-'));
 
-                if let Some((start, end)) = range {
+                if let Some((start, end)) = range.filter(|_| segmented) {
                     let start = start.parse::<usize>().unwrap();
                     let end = end.parse::<usize>().unwrap().min(data.len() - 1);
                     let body = &data[start..=end];

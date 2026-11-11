@@ -172,6 +172,8 @@ async fn run_fixture(flow: Flow, size: usize, rtt: Duration) -> f64 {
         adaptive: false,
         http3_only: false,
         transport_options: Default::default(),
+        read_idle_timeout: Duration::from_secs(30),
+        origin_limits: Arc::default(),
         http1_only: false,
         request_options: Default::default(),
         limiters: Vec::new(),

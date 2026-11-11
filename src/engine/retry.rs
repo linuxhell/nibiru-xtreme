@@ -1,12 +1,22 @@
 //! Bounded retries for idempotent range GETs, before inspecting file identity.
+use super::budget::{Budget, Permit};
 use crate::logging::LogSink;
 use anyhow::{Context, Result, anyhow};
 use reqwest::{RequestBuilder, Response, StatusCode, header};
+use std::sync::Arc;
 use std::{
     fmt,
     time::{Duration, SystemTime},
 };
 
+#[derive(Debug)]
+pub(super) struct BodyExhausted;
+impl fmt::Display for BodyExhausted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("HTTP range body retry budget exhausted; verified blocks preserved")
+    }
+}
+impl std::error::Error for BodyExhausted {}
 const MAX_RETRIES: usize = 5;
 const MAX_INLINE_WAIT: Duration = Duration::from_secs(30);
 
@@ -56,7 +66,22 @@ pub(super) async fn range_response(
     log: &LogSink,
     worker: usize,
 ) -> Result<Response> {
+    range_response_limited(request, log, worker, None)
+        .await
+        .map(|(response, _)| response)
+}
+pub(super) async fn range_response_limited(
+    request: RequestBuilder,
+    log: &LogSink,
+    worker: usize,
+    budget: Option<&Arc<Budget>>,
+) -> Result<(Response, Option<Permit>)> {
     for attempt in 0..=MAX_RETRIES {
+        let permit = if let Some(budget) = budget {
+            Some(budget.enter().await)
+        } else {
+            None
+        };
         let response = request
             .try_clone()
             .ok_or_else(|| anyhow!("range GET cannot be retried"))?
@@ -69,7 +94,15 @@ pub(super) async fn range_response(
             status,
             StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
         ) {
-            return Ok(response);
+            return Ok((response, permit));
+        }
+        if let Some(budget) = budget {
+            let previous = budget.limit();
+            budget.refused();
+            let limit = budget.limit();
+            if limit < previous {
+                log.info("http.origin_limit_reduced", &format!("previous_limit={previous} effective_limit={limit} reason=repeated_refusals_with_receiving_ranges"));
+            }
         }
         let wait = delay(response.headers(), attempt, SystemTime::now());
         if attempt == MAX_RETRIES || wait > MAX_INLINE_WAIT {
@@ -85,6 +118,7 @@ pub(super) async fn range_response(
             ),
         );
         drop(response);
+        drop(permit);
         // The owning JoinSet aborts this sleep on cancellation, just as it does
         // a pending request. No thread or blocking sleep is retained.
         tokio::time::sleep(wait).await;

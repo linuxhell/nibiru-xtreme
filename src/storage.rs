@@ -7,10 +7,20 @@ pub async fn write_at<D>(file: Arc<File>, offset: u64, data: D) -> Result<()>
 where
     D: AsRef<[u8]> + Send + 'static,
 {
-    tokio::task::spawn_blocking(move || write_all_at(&file, offset, data.as_ref()))
-        .await
-        .map_err(|error| anyhow!("storage worker failed: {error}"))??;
-    Ok(())
+    write_at_reusing(file, offset, data).await.map(|_| ())
+}
+/// Return the allocation only after the positional write completes.
+pub(crate) async fn write_at_reusing<D>(file: Arc<File>, offset: u64, data: D) -> Result<D>
+where
+    D: AsRef<[u8]> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        write_all_at(&file, offset, data.as_ref())?;
+        Ok::<_, io::Error>(data)
+    })
+    .await
+    .map_err(|error| anyhow!("storage worker failed: {error}"))?
+    .map_err(Into::into)
 }
 
 #[cfg(unix)]
