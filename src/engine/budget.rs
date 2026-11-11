@@ -7,6 +7,7 @@ use std::{
 use tokio::sync::Notify;
 const TTL: Duration = Duration::from_secs(600);
 const OBSERVATION: Duration = Duration::from_millis(250);
+const RECENT_RECEIVING: Duration = Duration::from_secs(1);
 const MAX_ORIGINS: usize = 128;
 #[derive(Default)]
 pub(super) struct OriginLimits(Mutex<HashMap<String, (usize, Instant)>>);
@@ -41,6 +42,7 @@ struct State {
     refusals: usize,
     limit: usize,
     first_receiving: Option<Instant>,
+    last_receiving_end: Option<Instant>,
 }
 pub(super) struct Budget {
     state: Mutex<State>,
@@ -63,6 +65,7 @@ impl Budget {
                 refusals: 0,
                 limit,
                 first_receiving: None,
+                last_receiving_end: None,
             }),
             changed: Notify::new(),
             origins,
@@ -92,7 +95,11 @@ impl Budget {
     }
     fn refused_at(&self, now: Instant) {
         let mut state = self.state.lock().unwrap();
-        if state.healthy == 0 {
+        if state.healthy == 0
+            && !state
+                .last_receiving_end
+                .is_some_and(|at| now.saturating_duration_since(at) <= RECENT_RECEIVING)
+        {
             state.refusals = 0;
             return;
         }
@@ -130,6 +137,9 @@ impl Drop for Permit {
         state.active -= 1;
         if self.healthy {
             state.healthy -= 1;
+            // A server can refuse the next request between response leases.
+            // Retain recently observed receiving peers across that short gap.
+            state.last_receiving_end = Some(Instant::now());
         }
         drop(state);
         self.budget.changed.notify_waiters();
@@ -174,6 +184,28 @@ mod tests {
         drop(first);
         budget.refused_at(began + OBSERVATION);
         assert_eq!(budget.limit(), 2);
+    }
+    #[tokio::test]
+    async fn a_gap_between_responses_retains_recent_evidence_but_not_stale_evidence() {
+        for recent in [true, false] {
+            let budget = Budget::new(8, Arc::default(), "origin".into());
+            let mut first = budget.enter().await;
+            first.accepted();
+            let mut second = budget.enter().await;
+            second.accepted();
+            drop(first);
+            drop(second);
+            let now = Instant::now()
+                + if recent {
+                    OBSERVATION
+                } else {
+                    RECENT_RECEIVING + Duration::from_secs(1)
+                };
+            for _ in 0..3 {
+                budget.refused_at(now);
+            }
+            assert_eq!(budget.limit(), if recent { 2 } else { 8 });
+        }
     }
     #[test]
     fn caps_expire_and_never_raise_the_users_maximum() {

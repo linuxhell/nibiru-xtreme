@@ -12,7 +12,7 @@ A retomada mantém a confirmação da identidade e dos blocos salvos. Cabeçalho
 
 429/503 têm até cinco repetições, respeitando Retry-After em segundos ou data HTTP. Sem instrução válida, usa backoff exponencial. Esperas acima de 30 segundos terminam com erro explícito, sem contornar a instrução com GET integral. Cancelar também cancela esperas de rede e backoff.
 
-Três recusas, enquanto outras respostas recebem dados, podem reduzir a concorrência ao pico de respostas úteis observado. Uma janela inicial de 250 ms evita decidir antes que outras conexões comecem a receber; terminar uma conexão não apaga o pico comprovado. Uma recusa isolada ou indisponibilidade sem respostas úteis não ensina um teto.
+Três recusas, enquanto outras respostas recebem dados, podem reduzir a concorrência ao pico de respostas úteis observado. Uma janela inicial de 250 ms evita decidir antes que outras conexões comecem a receber; terminar uma conexão não apaga o pico comprovado. A recepção recente permanece válida por até um segundo entre respostas, evitando perder a observação no intervalo entre leases; evidência antiga ou ausência total de recepção não ensina limite. Uma recusa isolada ou indisponibilidade sem respostas úteis não ensina um teto.
 
 O cache tem até 128 entradas, expira em dez minutos e guarda apenas fingerprints do contexto: esquema, host, porta, credenciais da URL, headers e proxy. Clones do mesmo Engine/RPC compartilham o histórico; processos CLI novos não compartilham. O slider explícito substitui o padrão por tamanho, respeitando blocos disponíveis, tamanho mínimo de divisão e teto de 16. O máximo escolhido nunca é ultrapassado. A CLI oferece `download --connections 1..16`; o padrão por tamanho não foi elevado globalmente.
 
