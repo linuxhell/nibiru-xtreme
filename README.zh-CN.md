@@ -2,6 +2,8 @@
 
 # Nibiru Xtreme
 
+0.2.8 版复用首次 GET，遵守 429/503 的 Retry-After，临时学习各来源的连接上限，并在恢复中断范围时保留已完成的数据块。复用缓冲区，并在 Windows 上准备稀疏文件。线程滑块优先于按文件大小计算的默认值。详见[实现、测试与限制](docs/HTTP-0.2.8.md)和 [MDM 审计](docs/MDM-AUDIT-2026-11-10.md)。
+
 0.2.7 版移除分段 HTTP 下载开始时被丢弃的单字节探测，并允许空闲连接协助已分配的范围。保留经过验证的断点续传和直接写入临时文件。[IDM 分析与本地比较](docs/IDM-ANALYSIS-2026-11-10.md)记录了实测改进及其限制，不能证明全面优于 IDM 或提高 torrent/ed2k 速度。
 
 0.2.6 修复入站 ED2K 握手应答：公布实际监听的 TCP 端口，包括回退端口，而不是零。UPnP 发现使用本机接口的 IPv4 地址，在统一截止时间内重试丢失的 SSDP 请求。状态区分已接受的 TCP 连接与已完成的 ED2K 握手。这些修复不保证所有网络都能获得高 ID；仍以服务器返回的 ID 为准。
@@ -20,7 +22,7 @@ HTTPS 同时使用公共根证书和系统信任库，继续验证 TLS 证书。
 
 ## 状态
 
-**0.2.7 版本。** Apocalipse Download Manager 的原生下载引擎，提供 Windows、Linux 和 macOS 程序及 SHA-256 校验文件。
+**0.2.8 版本。** Apocalipse Download Manager 的原生下载引擎，提供 Windows、Linux 和 macOS 程序及 SHA-256 校验文件。
 
 ED2K 预览不依赖固定的 30–40 MB 总下载量：首个分块通过 MD4 验证后即可启用（最多 9,728,000 字节）。其他来源会优先协助完成文件开头和末尾，避免慢速来源拖延预览。MP4/AVI 可能还需要末尾索引；尚未下载的范围会等待数据，不会向播放器发送文件空洞。
 
@@ -81,7 +83,7 @@ cargo test --locked --all-targets --all-features
 
 ## 安全、CI 与许可
 
-项目自身 Rust 禁止 `unsafe`。TLS 校验证书，SFTP 要求已知主机密钥。JSON-RPC 提供可选令牌及连接、读取和大小限制；应为管理器设置密钥。JSON Lines 日志中的 HTTP 诊断 URL 移除凭据、查询及片段，包括请求错误。
+Rust 引擎禁止 `unsafe`。小型本地 MIT 依赖 `nibiru-platform` 将 Win32 稀疏文件调用封装为安全 API，只操作由其打开的同步文件；详见[平台边界](docs/HTTP-0.2.8.md)。TLS 校验证书，SFTP 要求已知主机密钥。JSON-RPC 提供可选令牌及连接、读取和大小限制；应为管理器设置密钥。JSON Lines 日志中的 HTTP 诊断 URL 移除凭据、查询及片段，包括请求错误。
 
 `ci.yml` 测试三个系统，在 Linux 上验证互操作性，每个平台的测试产物仅包含可执行文件；Windows 测试产物只有 EXE。`release.yml` 复用这些二进制文件，发布 Windows x64、Linux x64（静态 musl）和 macOS x64 版本，并提供 SHA-256 校验文件与许可证。此版本后将根据日常使用中发现的问题进行维护。TCP、uTP、DHT 和预览监听器现在会随其所有者关闭。
 

@@ -1,3 +1,14 @@
+# Nibiru Xtreme 0.2.8
+
+- Reuse the first useful GET response for fresh HTTP downloads, retaining body, validators and final URL. Preserve explicit probes and validated resume.
+- Handle bounded 429/503 Retry-After and backoff without discarding healthy workers or bypassing throttling with a whole-file GET.
+- Learn conservative origin caps from repeated refusals and the observed peak of receiving peers, after a short observation window. Isolate the ten-minute in-memory cache by origin, credentials, headers and proxy.
+- Make explicit ADM thread settings take precedence over size defaults; add CLI `download --connections 1..16`. Respect available blocks, split minima and the selected maximum.
+- Recover stalled/truncated bodies by reassigning only unwritten blocks, with bounded retries and verified partial preservation. Reuse buffers after positional writes complete.
+- Prepare sparse Windows partials before setting their logical length, through a small safe platform boundary. The Rust engine continues to forbid unsafe code. Unsupported filesystems retain normal writes.
+- Preserve HTTP/2, HTTP/3, TLS, proxy/headers, bandwidth limits, atomic publication and P2P behavior. No GPL code from MDM is incorporated.
+- Include independent source analysis and controlled, hash-checked comparisons. Local synthetic results do not prove higher Internet capacity or universal superiority over IDM/MDM.
+
 # Nibiru Xtreme 0.2.7
 
 - Remove the discarded one-byte GET from segmented HTTP startup; validate the real payload ranges instead. The explicit probe API retains its range test.

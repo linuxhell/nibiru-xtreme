@@ -2,6 +2,8 @@
 
 # Nibiru Xtreme
 
+Version 0.2.8 reuses the first GET, honors Retry-After on 429/503, temporarily learns origin limits and recovers interrupted ranges while keeping completed blocks. It reuses buffers and prepares sparse files on Windows. The thread slider takes precedence over size defaults. See the [implementation, tests and limits](docs/HTTP-0.2.8.md) and [MDM audit](docs/MDM-AUDIT-2026-11-10.md).
+
 Version 0.2.7 removes the discarded one-byte probe at segmented HTTP startup and lets idle connections help assigned ranges. Validated resume and direct writes to the partial file are preserved. The [IDM analysis and local comparison](docs/IDM-ANALYSIS-2026-11-10.md) document the measured gains and limits; they do not establish general superiority over IDM or torrent/ed2k acceleration.
 
 Version 0.2.6 fixes incoming ED2K handshake replies: advertise the actual listening TCP port, including fallback ports, instead of zero. UPnP discovery searches local IPv4 interface addresses and retries lost SSDP packets within one shared deadline. Status separates accepted TCP connections from completed ED2K handshakes. These fixes do not guarantee High ID on every network; the server-assigned ID remains authoritative.
@@ -20,7 +22,7 @@ HTTPS uses public roots together with the operating system trust store while kee
 
 ## Status
 
-**Version 0.2.7.** The native engine for Apocalipse Download Manager, packaged for Windows, Linux and macOS with SHA-256 files.
+**Version 0.2.8.** The native engine for Apocalipse Download Manager, packaged for Windows, Linux and macOS with SHA-256 files.
 
 ED2K preview does not require a fixed 30–40 MB total: ADM enables it once the first MD4-authenticated part is available (up to 9,728,000 bytes). Other peers help finish the header and tail before middle parts so a slow source cannot monopolize preview data. MP4/AVI may also need their tail index; missing ranges wait for data rather than exposing disk holes.
 
@@ -81,7 +83,7 @@ Independent tests use libtorrent 2.1.1 and aMule as other clients, not embedded 
 
 ## Security, CI and license
 
-Project-owned Rust forbids `unsafe`. TLS validates certificates; SFTP requires a known host key. JSON-RPC has an optional token and connection/read/size limits. Configure a manager secret. JSON Lines logs remove credentials, query and fragment from diagnostic HTTP URLs, including request errors.
+The Rust engine forbids `unsafe`. The small local MIT dependency `nibiru-platform` confines Win32 sparse-file calls to a safe API for synchronous files it opens; see the [platform boundary](docs/HTTP-0.2.8.md). TLS validates certificates; SFTP requires a known host key. JSON-RPC has an optional token and connection/read/size limits. Configure a manager secret. JSON Lines logs remove credentials, query and fragment from diagnostic HTTP URLs, including request errors.
 
 `ci.yml` tests all three systems, verifies interoperability on Linux and uploads only the executable for each platform. The Windows test artifact contains just the EXE. `release.yml` reuses these binaries and publishes Windows x64, Linux x64 (static musl) and macOS x64 with SHA-256 checksums and licenses. After this release, maintenance follows bugs found during everyday use. TCP, uTP, DHT and preview listeners now stop with their owners.
 

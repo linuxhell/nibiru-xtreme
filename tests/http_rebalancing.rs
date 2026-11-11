@@ -88,7 +88,10 @@ async fn idle_worker_splits_a_busy_tail_and_publishes_exact_bytes() {
                     for (i, block) in data[start..=end].chunks(BLOCK).enumerate() {
                         // The first worker gets one block, then cannot continue
                         // until an idle worker has actually asked for its tail.
-                        while start == BLOCK && end > 2 * BLOCK && i > 0 && !helped.load(Ordering::Acquire)
+                        while start == BLOCK
+                            && end > 2 * BLOCK
+                            && i > 0
+                            && !helped.load(Ordering::Acquire)
                         {
                             tokio::time::sleep(Duration::from_millis(5)).await;
                         }

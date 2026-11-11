@@ -1,6 +1,6 @@
 //! A refused range must not poison identity or discard other healthy workers.
 use nibiru_xtreme::{
-    engine::{DownloadRequest, Engine},
+    engine::{DownloadRequest, Engine, RequestOptions},
     logging::LogSink,
 };
 use std::{
@@ -111,11 +111,11 @@ impl Fixture {
                         let mut remaining = end - start + 1;
                         while remaining > 0 {
                             let n = remaining.min(bytes.len());
+                            tokio::time::sleep(Duration::from_millis(2)).await;
                             if stream.write_all(&bytes[..n]).await.is_err() {
                                 return;
                             }
                             remaining -= n;
-                            tokio::time::sleep(Duration::from_millis(2)).await;
                         }
                     });
                 }
@@ -133,11 +133,24 @@ impl Fixture {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn refused_ranges_keep_healthy_workers_and_publish_exact_bytes() {
+    refused_range_case(None).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn eight_workers_learn_two_useful_connections() {
+    refused_range_case(Some(8)).await;
+}
+async fn refused_range_case(maximum: Option<usize>) {
     let fixture = Fixture::start(Mode::TwoConnections).await;
     let root = tempfile::tempdir().unwrap();
     let destination = root.path().join("quota.bin");
     let log_path = root.path().join("events.jsonl");
-    let engine = Engine::new(Arc::new(LogSink::new(Some(&log_path)).unwrap())).unwrap();
+    let engine = Engine::new(Arc::new(LogSink::new(Some(&log_path)).unwrap()))
+        .unwrap()
+        .with_request_options(RequestOptions {
+            max_connections: maximum,
+            ..Default::default()
+        })
+        .unwrap();
     tokio::time::timeout(
         Duration::from_secs(30),
         engine.download(
@@ -157,7 +170,39 @@ async fn refused_ranges_keep_healthy_workers_and_publish_exact_bytes() {
     let data = std::fs::read(destination).unwrap();
     assert_eq!(data.len(), 64 * 1024 * 1024);
     assert!(data.iter().all(|b| *b == 0x5A));
+    let second = root.path().join("learned.bin");
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        engine.download(
+            DownloadRequest {
+                url: fixture.url.clone(),
+                destination: second.clone(),
+            },
+            Arc::new(AtomicBool::new(false)),
+            |_| {},
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(std::fs::read(second).unwrap(), data);
     let log = std::fs::read_to_string(log_path).unwrap();
+    let limits = log
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|r| r["event"] == "http.origin_limit")
+        .collect::<Vec<_>>();
+    assert_eq!(limits.len(), 2);
+    if maximum == Some(8) {
+        assert!(
+            limits[1]["detail"]
+                .as_str()
+                .unwrap()
+                .ends_with("effective_limit=2"),
+            "{log}"
+        );
+    }
+    assert!(!log.contains("effective_limit=1 "), "{log}");
     assert!(log.contains("http.range_retry"));
     assert!(!log.contains("http.segmented_fallback"));
 }

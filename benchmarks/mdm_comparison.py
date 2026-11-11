@@ -155,20 +155,24 @@ def main():
     parser.add_argument("--scenarios", nargs="+", choices=SCENARIOS, default=list(SCENARIOS))
     parser.add_argument("--timeout", type=float, default=45)
     parser.add_argument("--report", required=True, type=pathlib.Path)
+    parser.add_argument("--baseline", type=pathlib.Path, help="Previous Nibiru executable measured in the same rounds")
+    parser.add_argument("--compare-eight", action="store_true", help="Also test candidate with an explicit eight-connection maximum")
     args = parser.parse_args()
     if args.rounds < 1 or args.timeout <= 0:
         parser.error("rounds and timeout must be positive")
     engines = {"nibiru": args.nibiru.resolve(), "mdm": args.mdm.resolve()}
+    if args.baseline: engines["nibiru_baseline"] = args.baseline.resolve()
+    if args.compare_eight: engines["nibiru_eight"] = args.nibiru.resolve()
     profiles = {}
     for name, path in engines.items():
         with path.open("rb") as stream:
             digest = hashlib.file_digest(stream, "sha256").hexdigest()
         cmd = [str(path)] + (["--cli"] if name == "mdm" else []) + ["--version"]
-        profiles[name] = dict(binary_sha256=digest, version=subprocess.check_output(cmd, text=True).strip())
+        profiles[name] = dict(binary_sha256=digest, version=subprocess.check_output(cmd, text=True).strip(), connection_maximum=8 if name=="nibiru_eight" else "default")
     rows = []
     report = dict(platform=platform.platform(), python=platform.python_version(),
                   protocol="HTTP/1.1 loopback", completion="successful CLI exit; offline size and SHA-256 check",
-                  settings="client defaults; Nibiru chooses workers by file size, MDM ceiling 8; cold processes",
+                  settings="cold processes; size-based Nibiru defaults and MDM default ceiling 8; nibiru_eight explicitly requests 8",
                   profiles=profiles, scenarios={s: SCENARIOS[s] for s in args.scenarios}, rows=rows)
     args.report.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="nibiru-mdm-audit-") as folder:
@@ -180,34 +184,44 @@ def main():
             cfg = SCENARIOS[scenario]
             expected = expected_hash(cfg["size"])
             for run in range(args.rounds):
-                for name in (["nibiru", "mdm"] if run % 2 == 0 else ["mdm", "nibiru"]):
+                for name in (list(engines) if run % 2 == 0 else list(reversed(engines))):
                     destination = root / f"{scenario}-{run}-{name}.bin"
                     with Fixture(cfg) as fixture:
                         url = f"http://127.0.0.1:{fixture.server.server_port}/payload.bin"
                         cmd = ([str(engines[name]), "--cli", "get", url, "-o", str(destination), "--direct", "--json"]
                                if name == "mdm" else [str(engines[name]), "download", url, "--out", str(destination)])
+                        if name == "nibiru_eight": cmd += ["--connections", "8"]
                         began = time.perf_counter()
                         stop_watch = threading.Event()
                         file_ready = []
+                        child = []
+                        peak_rss_kib = []
 
                         def watch_destination():
                             while not stop_watch.is_set():
                                 try:
-                                    if destination.stat().st_size == cfg["size"]:
+                                    if not file_ready and destination.stat().st_size == cfg["size"]:
                                         file_ready.append(time.perf_counter() - began)
-                                        return
                                 except FileNotFoundError:
                                     pass
+                                if child:
+                                    try:
+                                        status=pathlib.Path(f"/proc/{child[0].pid}/status").read_text()
+                                        rss=next(int(line.split()[1]) for line in status.splitlines() if line.startswith("VmRSS:"))
+                                        if not peak_rss_kib or rss>peak_rss_kib[0]: peak_rss_kib[:]=[rss]
+                                    except (OSError,StopIteration): pass
                                 stop_watch.wait(0.001)
 
                         watcher = threading.Thread(target=watch_destination, daemon=True)
                         watcher.start()
                         try:
-                            process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                                     env=env, timeout=args.timeout)
+                            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,env=env)
+                            child.append(process)
+                            stdout,stderr=process.communicate(timeout=args.timeout)
                             elapsed = time.perf_counter() - began
-                            code, error = process.returncode, process.stderr.decode(errors="replace")[-600:] if process.returncode else None
+                            code, error = process.returncode, stderr.decode(errors="replace")[-600:] if process.returncode else None
                         except subprocess.TimeoutExpired:
+                            process.kill(); process.communicate()
                             elapsed, code, error = time.perf_counter() - began, None, "process_timeout"
                         finally:
                             stop_watch.set()
@@ -225,6 +239,7 @@ def main():
                                server_first_write_seconds=first_data, exit_code=code, correct=ok,
                                output_bytes=size, sha256=digest, expected_sha256=expected,
                                requests=requests, peak_active_gets=peak, server_bytes=sent, error=error)
+                    row["sampled_peak_rss_kib"]=peak_rss_kib[0] if peak_rss_kib else None
                     rows.append(row)
                     ready = f"{file_ready[0]:.4f}s" if file_ready else "unknown"
                     print(f"{scenario} {run + 1} {name}: cli={elapsed:.4f}s file={ready} correct={ok} GETs={sum(r['method'] == 'GET' for r in requests)} peak={peak}", flush=True)

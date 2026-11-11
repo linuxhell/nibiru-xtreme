@@ -1037,6 +1037,10 @@ impl Engine {
         }
 
         telemetry.record(&self.log, downloaded, total, 0, true);
+        anyhow::ensure!(
+            total.is_none_or(|n| downloaded == n),
+            "HTTP body length mismatch"
+        );
         let transfer_ms = started.elapsed().as_millis();
         self.log.info(
             "http.finalization_started",
@@ -1928,6 +1932,46 @@ pub fn safe_output_name(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn explicit_thread_setting_precedes_size_defaults() {
+        use super::*;
+        let mut engine = Engine::new(Arc::new(LogSink::new(None).unwrap())).unwrap();
+        assert_eq!(engine.connection_count(64 << 20), 4);
+        engine.request_options.max_connections = Some(8);
+        assert_eq!(engine.connection_count(64 << 20), 8);
+        engine.request_options.max_connections = Some(1);
+        assert_eq!(engine.connection_count(64 << 20), 1);
+        engine.request_options.max_connections = Some(128);
+        assert_eq!(engine.connection_count(64 << 20), 16);
+        engine.request_options.min_split_size = Some(32 << 20);
+        assert_eq!(engine.connection_count(64 << 20), 2);
+    }
+    #[test]
+    fn origin_keys_isolate_ports_credentials_and_headers() {
+        use super::*;
+        let mut engine = Engine::new(Arc::new(LogSink::new(None).unwrap())).unwrap();
+        let a = Url::parse("https://one.test:443/a?secret=one").unwrap();
+        let first = engine.origin_budget_key(&a);
+        assert_eq!(
+            first,
+            engine.origin_budget_key(&Url::parse("https://one.test/b?secret=two").unwrap())
+        );
+        for url in [
+            "http://one.test/a",
+            "https://one.test:444/a",
+            "https://two.test/a",
+            "https://user:pass@one.test/a",
+        ] {
+            assert_ne!(first, engine.origin_budget_key(&Url::parse(url).unwrap()));
+        }
+        engine
+            .request_options
+            .headers
+            .push(("Cookie".into(), "private".into()));
+        assert_ne!(first, engine.origin_budget_key(&a));
+        assert!(!engine.origin_budget_key(&a).contains("private"));
+    }
+
     use super::{
         MAX_HTTP_RANGE_SIZE, claim_range, safe_output_name, suggested_worker_count, url_identity,
         validate_content_range,

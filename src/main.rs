@@ -279,8 +279,13 @@ async fn main() -> Result<()> {
                 ssh_identity,
             });
             let engine = if let Some(connections) = connections {
-                engine.with_request_options(nibiru_xtreme::engine::RequestOptions { max_connections:Some(usize::from(connections)),..Default::default() })?
-            } else { engine };
+                engine.with_request_options(nibiru_xtreme::engine::RequestOptions {
+                    max_connections: Some(usize::from(connections)),
+                    ..Default::default()
+                })?
+            } else {
+                engine
+            };
             let cancelled = Arc::new(AtomicBool::new(false));
             // Ctrl+C pauses: the download stops at a block boundary and keeps what it has, so the
             // same command continues from there. A second Ctrl+C exits at once.
