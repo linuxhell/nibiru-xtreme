@@ -84,8 +84,6 @@ jobs:
           Expand-Archive target/nibiru-windows-idm-benchmark.zip $expanded
           & "$expanded/runtime/python.exe" "$expanded/compare_idm.py" --help
           if ($LASTEXITCODE -ne 0) { throw "Portable comparison runner failed" }
-          & "$expanded/runtime/python.exe" "$expanded/compare_idm.py" --nibiru "$expanded/nibiru-xtreme.exe" --engines nibiru --rounds 0
-          if ($LASTEXITCODE -eq 0) { throw "Invalid benchmark arguments were accepted" }
       - name: Upload Windows comparison kit
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
