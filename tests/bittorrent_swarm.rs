@@ -157,6 +157,8 @@ async fn only_selected_files_are_downloaded() {
     handle.wait_complete(Duration::from_secs(30)).await.unwrap();
     let notes = out.path().join("pack/extra/notes.txt");
     assert_eq!(std::fs::read(notes).unwrap(), fx.files[1].1);
+    assert!(!out.path().join("pack/video.mp4").exists());
+    assert!(!out.path().join("pack/tail.bin").exists());
     let status = handle.status();
     assert_eq!(status.selected_length, 90_001);
     assert!(status.files.iter().filter(|f| f.selected).count() == 1);
@@ -166,6 +168,67 @@ async fn only_selected_files_are_downloaded() {
         "downloaded {}",
         status.downloaded
     );
+}
+
+#[tokio::test]
+async fn small_unselected_files_sharing_a_piece_are_not_created() {
+    let files: Vec<(&[&str], &[u8])> = vec![
+        (&["readme.txt"], b"do not download this"),
+        (&["movie.mkv"], b"selected movie contents"),
+        (&["metadata.nfo"], b"do not download this either"),
+    ];
+    let torrent =
+        Torrent::from_info(&build_info("small", 16_384, &files), Extras::default()).unwrap();
+    let seed_dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(seed_dir.path().join("small")).unwrap();
+    for (path, bytes) in &files {
+        std::fs::write(seed_dir.path().join("small").join(path[0]), bytes).unwrap();
+    }
+    let seed = session().await;
+    let seeded = seed.add_torrent(torrent.clone(), local_settings(seed_dir.path()));
+    seeded.wait_complete(Duration::from_secs(20)).await.unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let leech = session().await;
+    let mut settings = local_settings(out.path());
+    settings.peers.push(addr(&seed));
+    settings.selected = Some(vec![1]);
+    let handle = leech.add_torrent(torrent.clone(), settings);
+    handle.wait_complete(Duration::from_secs(20)).await.unwrap();
+    assert_eq!(
+        std::fs::read(out.path().join("small/movie.mkv")).unwrap(),
+        files[1].1
+    );
+    assert!(!out.path().join("small/readme.txt").exists());
+    assert!(!out.path().join("small/metadata.nfo").exists());
+    assert!(
+        handle
+            .read_file(1, 0, 0, Duration::from_secs(1))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // Restart without a source. Boundary pieces must still verify and be uploadable.
+    handle.shutdown(false);
+    let restarted = session().await;
+    let mut settings = local_settings(out.path());
+    settings.selected = Some(vec![1]);
+    let resumed = restarted.add_torrent(torrent.clone(), settings);
+    resumed.wait_complete(Duration::from_secs(5)).await.unwrap();
+    assert_eq!(resumed.status().downloaded, 0);
+    assert!(!out.path().join("small/readme.txt").exists());
+    assert!(!out.path().join("small/metadata.nfo").exists());
+
+    // Selecting cached neighbours must materialize them without another transfer.
+    resumed.select_files(None).unwrap();
+    resumed.wait_complete(Duration::from_secs(5)).await.unwrap();
+    for (path, bytes) in &files {
+        assert_eq!(
+            std::fs::read(out.path().join("small").join(path[0])).unwrap(),
+            *bytes
+        );
+    }
+    assert_eq!(resumed.status().downloaded, 0);
 }
 
 #[tokio::test]

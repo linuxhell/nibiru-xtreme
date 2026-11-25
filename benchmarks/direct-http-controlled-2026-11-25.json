@@ -1,0 +1,276 @@
+{
+  "size_bytes": 1073741824,
+  "rate_mib": 150.0,
+  "latency_ms": 160.0,
+  "rounds": 5,
+  "checkpoint_bytes": {},
+  "native_sync_mib": {},
+  "adaptive_labels": [],
+  "connection_rate_mib": 0,
+  "overload_above": 0,
+  "overload_delay_ms": 0,
+  "pacing": "future slots without catch-up credit",
+  "profiles": {
+    "baseline": {
+      "binary_sha256": "2d3a0071cc2da9c0c4171f1ca68157b4663cbcdd35c4ce7b78e0af2f079a54fe",
+      "version": "nibiru-xtreme 0.2.8"
+    },
+    "range128": {
+      "binary_sha256": "693808175caabffb7ea22329a69ca9c16513bd9e6d424918af4ea0b1ecd21502",
+      "version": "nibiru-xtreme 0.2.8"
+    }
+  },
+  "samples": [
+    {
+      "label": "baseline",
+      "run": 1,
+      "seconds": 7.332590433000178,
+      "mib_per_second": 139.6505108742346,
+      "cpu_seconds": 2.6657940000000004,
+      "requests": 53,
+      "sha256": "2c06ade942ee3f17a048dd1064b2fab046a4bb95386d8bb41b68dc6711ac2af3",
+      "log_bytes": 3361,
+      "peak_active_requests": 12,
+      "engine_timings_ms": {
+        "elapsed_ms": 7284,
+        "transfer_ms": 7284,
+        "finalize_ms": 0,
+        "sync_ms": 0,
+        "close_ms": 0,
+        "destination_cleanup_ms": 0,
+        "rename_ms": 0,
+        "checkpoint_wait_ms": 0
+      },
+      "checkpoint_count": 0,
+      "checkpoint_sync_ms_sum": 0,
+      "adaptive_decisions": []
+    },
+    {
+      "label": "range128",
+      "run": 1,
+      "seconds": 7.177365505000125,
+      "mib_per_second": 142.6707333333698,
+      "cpu_seconds": 1.1403529999999997,
+      "requests": 44,
+      "sha256": "2c06ade942ee3f17a048dd1064b2fab046a4bb95386d8bb41b68dc6711ac2af3",
+      "log_bytes": 3363,
+      "peak_active_requests": 12,
+      "engine_timings_ms": {
+        "elapsed_ms": 7169,
+        "transfer_ms": 7169,
+        "finalize_ms": 0,
+        "sync_ms": 0,
+        "close_ms": 0,
+        "destination_cleanup_ms": 0,
+        "rename_ms": 0,
+        "checkpoint_wait_ms": 0
+      },
+      "checkpoint_count": 0,
+      "checkpoint_sync_ms_sum": 0,
+      "adaptive_decisions": []
+    },
+    {
+      "label": "range128",
+      "run": 2,
+      "seconds": 7.176856887999975,
+      "mib_per_second": 142.68084427211775,
+      "cpu_seconds": 1.2090420000000006,
+      "requests": 44,
+      "sha256": "2c06ade942ee3f17a048dd1064b2fab046a4bb95386d8bb41b68dc6711ac2af3",
+      "log_bytes": 3362,
+      "peak_active_requests": 12,
+      "engine_timings_ms": {
+        "elapsed_ms": 7150,
+        "transfer_ms": 7150,
+        "finalize_ms": 0,
+        "sync_ms": 0,
+        "close_ms": 0,
+        "destination_cleanup_ms": 0,
+        "rename_ms": 0,
+        "checkpoint_wait_ms": 0
+      },
+      "checkpoint_count": 0,
+      "checkpoint_sync_ms_sum": 0,
+      "adaptive_decisions": []
+    },
+    {
+      "label": "baseline",
+      "run": 2,
+      "seconds": 7.22901991599997,
+      "mib_per_second": 141.65129047902934,
+      "cpu_seconds": 1.0808049999999998,
+      "requests": 53,
+      "sha256": "2c06ade942ee3f17a048dd1064b2fab046a4bb95386d8bb41b68dc6711ac2af3",
+      "log_bytes": 3359,
+      "peak_active_requests": 12,
+      "engine_timings_ms": {
+        "elapsed_ms": 7219,
+        "transfer_ms": 7219,
+        "finalize_ms": 0,
+        "sync_ms": 0,
+        "close_ms": 0,
+        "destination_cleanup_ms": 0,
+        "rename_ms": 0,
+        "checkpoint_wait_ms": 0
+      },
+      "checkpoint_count": 0,
+      "checkpoint_sync_ms_sum": 0,
+      "adaptive_decisions": []
+    },
+    {
+      "label": "baseline",
+      "run": 3,
+      "seconds": 7.23121026900003,
+      "mib_per_second": 141.60838392293135,
+      "cpu_seconds": 1.0522219999999995,
+      "requests": 53,
+      "sha256": "2c06ade942ee3f17a048dd1064b2fab046a4bb95386d8bb41b68dc6711ac2af3",
+      "log_bytes": 3358,
+      "peak_active_requests": 12,
+      "engine_timings_ms": {
+        "elapsed_ms": 7184,
+        "transfer_ms": 7183,
+        "finalize_ms": 0,
+        "sync_ms": 0,
+        "close_ms": 0,
+        "destination_cleanup_ms": 0,
+        "rename_ms": 0,
+        "checkpoint_wait_ms": 0
+      },
+      "checkpoint_count": 0,
+      "checkpoint_sync_ms_sum": 0,
+      "adaptive_decisions": []
+    },
+    {
+      "label": "range128",
+      "run": 3,
+      "seconds": 7.186726008000051,
+      "mib_per_second": 142.48490882498004,
+      "cpu_seconds": 1.2134910000000003,
+      "requests": 44,
+      "sha256": "2c06ade942ee3f17a048dd1064b2fab046a4bb95386d8bb41b68dc6711ac2af3",
+      "log_bytes": 3096,
+      "peak_active_requests": 12,
+      "engine_timings_ms": {
+        "elapsed_ms": 7135,
+        "transfer_ms": 7135,
+        "finalize_ms": 0,
+        "sync_ms": 0,
+        "close_ms": 0,
+        "destination_cleanup_ms": 0,
+        "rename_ms": 0,
+        "checkpoint_wait_ms": 0
+      },
+      "checkpoint_count": 0,
+      "checkpoint_sync_ms_sum": 0,
+      "adaptive_decisions": []
+    },
+    {
+      "label": "range128",
+      "run": 4,
+      "seconds": 7.177086551999992,
+      "mib_per_second": 142.67627854016177,
+      "cpu_seconds": 1.2401030000000004,
+      "requests": 44,
+      "sha256": "2c06ade942ee3f17a048dd1064b2fab046a4bb95386d8bb41b68dc6711ac2af3",
+      "log_bytes": 3356,
+      "peak_active_requests": 12,
+      "engine_timings_ms": {
+        "elapsed_ms": 7127,
+        "transfer_ms": 7127,
+        "finalize_ms": 0,
+        "sync_ms": 0,
+        "close_ms": 0,
+        "destination_cleanup_ms": 0,
+        "rename_ms": 0,
+        "checkpoint_wait_ms": 0
+      },
+      "checkpoint_count": 0,
+      "checkpoint_sync_ms_sum": 0,
+      "adaptive_decisions": []
+    },
+    {
+      "label": "baseline",
+      "run": 4,
+      "seconds": 7.228617295000049,
+      "mib_per_second": 141.65918020148735,
+      "cpu_seconds": 1.2013890000000007,
+      "requests": 53,
+      "sha256": "2c06ade942ee3f17a048dd1064b2fab046a4bb95386d8bb41b68dc6711ac2af3",
+      "log_bytes": 3362,
+      "peak_active_requests": 12,
+      "engine_timings_ms": {
+        "elapsed_ms": 7195,
+        "transfer_ms": 7195,
+        "finalize_ms": 0,
+        "sync_ms": 0,
+        "close_ms": 0,
+        "destination_cleanup_ms": 0,
+        "rename_ms": 0,
+        "checkpoint_wait_ms": 0
+      },
+      "checkpoint_count": 0,
+      "checkpoint_sync_ms_sum": 0,
+      "adaptive_decisions": []
+    },
+    {
+      "label": "baseline",
+      "run": 5,
+      "seconds": 7.196480233000102,
+      "mib_per_second": 142.29178248893905,
+      "cpu_seconds": 1.2336550000000006,
+      "requests": 53,
+      "sha256": "2c06ade942ee3f17a048dd1064b2fab046a4bb95386d8bb41b68dc6711ac2af3",
+      "log_bytes": 3103,
+      "peak_active_requests": 12,
+      "engine_timings_ms": {
+        "elapsed_ms": 7146,
+        "transfer_ms": 7146,
+        "finalize_ms": 0,
+        "sync_ms": 0,
+        "close_ms": 0,
+        "destination_cleanup_ms": 0,
+        "rename_ms": 0,
+        "checkpoint_wait_ms": 0
+      },
+      "checkpoint_count": 0,
+      "checkpoint_sync_ms_sum": 0,
+      "adaptive_decisions": []
+    },
+    {
+      "label": "range128",
+      "run": 5,
+      "seconds": 7.184535282999832,
+      "mib_per_second": 142.52835565064396,
+      "cpu_seconds": 1.614132999999999,
+      "requests": 44,
+      "sha256": "2c06ade942ee3f17a048dd1064b2fab046a4bb95386d8bb41b68dc6711ac2af3",
+      "log_bytes": 3337,
+      "peak_active_requests": 12,
+      "engine_timings_ms": {
+        "elapsed_ms": 7168,
+        "transfer_ms": 7167,
+        "finalize_ms": 0,
+        "sync_ms": 0,
+        "close_ms": 0,
+        "destination_cleanup_ms": 0,
+        "rename_ms": 0,
+        "checkpoint_wait_ms": 0
+      },
+      "checkpoint_count": 0,
+      "checkpoint_sync_ms_sum": 0,
+      "adaptive_decisions": []
+    }
+  ],
+  "medians": {
+    "baseline": {
+      "seconds": 7.22901991599997,
+      "cpu_seconds": 1.2013890000000007
+    },
+    "range128": {
+      "seconds": 7.177365505000125,
+      "cpu_seconds": 1.2134910000000003
+    }
+  },
+  "scope": "Synthetic loopback HTTP/1.1; five alternating runs per binary. Not IDM and not the Microsoft CDN."
+}

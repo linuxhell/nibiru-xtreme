@@ -2,6 +2,8 @@
 
 # Nibiru Xtreme
 
+Em revisão para 0.2.9: corrige arquivos desmarcados de torrents, reduz pedidos HTTP com faixas de até 128 MiB e adiciona um comparativo Windows com IDM. Buffers continuam em 4 MiB por worker. Veja a [auditoria e medições](docs/AUDIT-2026-11-25.md).
+
 A versão 0.2.8 aproveita o primeiro GET, respeita Retry-After em 429/503, aprende temporariamente limites por origem e recupera ranges interrompidos mantendo blocos concluídos. Reutiliza buffers e prepara arquivos esparsos no Windows. O slider de threads prevalece sobre o padrão por tamanho. Veja a [implementação, testes e limites](docs/HTTP-0.2.8.md) e a [auditoria do MDM](docs/MDM-AUDIT-2026-11-10.md).
 
 A versão 0.2.7 elimina o teste descartável de um byte no início dos downloads HTTP segmentados e permite que conexões livres ajudem trechos já atribuídos. Mantém retomada validada e gravação direta no arquivo parcial. A [análise do IDM e comparação local](docs/IDM-ANALYSIS-2026-11-10.md) documenta os ganhos medidos e seus limites; não comprova superioridade geral sobre o IDM ou aceleração de torrent/ed2k.

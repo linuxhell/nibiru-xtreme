@@ -24,6 +24,8 @@ def pe_metadata(data):
     magic = struct.unpack_from("<H", data, optional)[0]
     if magic not in (0x10B, 0x20B):
         raise ValueError("unsupported PE optional header")
+    image_base = struct.unpack_from("<I" if magic == 0x10B else "<Q", data,
+                                    optional + (28 if magic == 0x10B else 24))[0]
     table = optional + optional_size
     entries = []
     for i in range(sections):
@@ -33,7 +35,8 @@ def pe_metadata(data):
         if position + size > len(data):
             raise ValueError("section outside image")
         entries.append(dict(name=name, rva=rva, virtual_size=virtual_size,
-                            size=size, offset=position))
+                            size=size, offset=position,
+                            executable=bool(struct.unpack_from("<I", data, offset + 36)[0] & 0x20000000)))
 
     def address(rva):
         for entry in entries:
@@ -69,7 +72,7 @@ def pe_metadata(data):
                 names.append(cstring(address(value) + 2))
             imports[cstring(address(name_rva))] = names
             descriptor += 20
-    return dict(machine=hex(machine), bits=32 if magic == 0x10B else 64,
+    return dict(machine=hex(machine), bits=32 if magic == 0x10B else 64, image_base=image_base,
                 overlay_offset=max(e["offset"] + e["size"] for e in entries),
                 sections=entries, imports=imports)
 
@@ -105,6 +108,24 @@ def inspect(path):
                 ("Content-Range:", "Range: bytes=%I64d-%I64d", "If-Range:",
                  "Connection: Keep-Alive", "SSL_read", "SSL_write",
                  "Assembling all downloaded portions into one file...")})
+            references = {}
+            for term in engine["indicators"]:
+                offset = payload.find(term.encode("ascii"))
+                if offset < 0:
+                    continue
+                section = next(s for s in engine["pe"]["sections"]
+                               if s["offset"] <= offset < s["offset"] + s["size"])
+                address = engine["pe"]["image_base"] + section["rva"] + offset - section["offset"]
+                pattern = b"\x68" + struct.pack("<I", address)
+                locations = []
+                for section in engine["pe"]["sections"]:
+                    if section["executable"]:
+                        scan_start, scan_end = section["offset"], section["offset"] + section["size"]
+                        while (found := payload.find(pattern, scan_start, scan_end)) >= 0:
+                            locations.append(hex(found - section["offset"] + section["rva"]))
+                            scan_start = found + len(pattern)
+                references[term] = dict(string_va=hex(address), push_immediate_rva_candidates=locations)
+            engine["code_reference_candidates"] = references
         position = end
     if engine is None:
         raise ValueError("no IDMan.exe payload found")

@@ -386,6 +386,7 @@ impl RpcServer {
                         "BitTorrent",
                         "BitTorrent-v2",
                         "BitTorrent-Out",
+                        "BitTorrent-Selective-Storage",
                         "Magnet",
                         "uTP",
                         "MSE",

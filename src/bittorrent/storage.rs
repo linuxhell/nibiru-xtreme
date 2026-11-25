@@ -10,7 +10,7 @@ use std::{
     io,
     path::{Path, PathBuf},
     sync::{
-        Mutex,
+        Mutex, RwLock,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -81,10 +81,18 @@ struct Slot {
     pad: bool,
 }
 
+struct Selection {
+    files: Vec<bool>,
+    configured: bool,
+    partial: bool,
+}
+
 pub struct Storage {
     download_root: PathBuf,
     root: PathBuf,
     slots: Vec<Slot>,
+    cache_root: PathBuf,
+    selection: RwLock<Selection>,
     piece_length: u64,
     total: u64,
     pieces: Vec<[u8; 20]>,
@@ -105,7 +113,7 @@ impl Storage {
         } else {
             directory.to_owned()
         };
-        let slots = torrent
+        let slots: Vec<_> = torrent
             .files
             .iter()
             .map(|f| Slot {
@@ -115,10 +123,22 @@ impl Storage {
                 pad: f.pad,
             })
             .collect();
+        let cache_directory = if torrent.is_multi_file() {
+            &root
+        } else {
+            directory
+        };
+        let cache_root = Self::cache_root(torrent, cache_directory, &torrent.name, &slots);
         Self {
             download_root: directory.to_owned(),
             root,
             slots,
+            cache_root,
+            selection: RwLock::new(Selection {
+                files: torrent.files.iter().map(|file| !file.pad).collect(),
+                configured: false,
+                partial: false,
+            }),
             piece_length: torrent.piece_length,
             total: torrent.total_length,
             pieces: torrent.pieces.clone(),
@@ -159,11 +179,159 @@ impl Storage {
                 slot.path = directory.join(name);
             }
         }
+        let cache_directory = if torrent.is_multi_file() {
+            &storage.root
+        } else {
+            directory
+        };
+        storage.cache_root = Self::cache_root(torrent, cache_directory, name, &storage.slots);
         Ok(storage)
+    }
+
+    fn cache_root(torrent: &Torrent, directory: &Path, name: &str, slots: &[Slot]) -> PathBuf {
+        use sha2::Sha256;
+        let mut identity = Sha256::new();
+        identity.update(torrent.info_hash);
+        identity.update(name.as_bytes());
+        let key = format!("{:x}", identity.finalize());
+        // Internal pieces move/delete with a multi-file destination. Their
+        // names stay disjoint from torrent payloads, including on Windows.
+        for suffix in 0..=slots.len() {
+            let path = directory.join(format!(".nibiru-parts-{key}-{suffix}"));
+            let folded = path.to_string_lossy().to_lowercase();
+            if slots.iter().all(|slot| {
+                let payload = slot.path.to_string_lossy().to_lowercase();
+                !Path::new(&payload).starts_with(&folded)
+                    && !Path::new(&folded).starts_with(&payload)
+            }) {
+                return path;
+            }
+        }
+        unreachable!("each payload path excludes at most one cache basename")
+    }
+
+    fn cached_pieces(&self) -> Result<Vec<usize>> {
+        match std::fs::symlink_metadata(&self.cache_root) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {}
+            Ok(_) => bail!("torrent piece cache is not a regular directory"),
+            Err(error) => return Err(error.into()),
+        }
+        let mut pieces = Vec::new();
+        for entry in std::fs::read_dir(&self.cache_root)? {
+            let entry = entry?;
+            if let Some(index) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.strip_suffix(".piece"))
+                .and_then(|name| name.parse::<usize>().ok())
+                .filter(|index| *index < self.count)
+            {
+                pieces.push(index);
+            }
+        }
+        Ok(pieces)
+    }
+
+    fn cache_handle(&self, piece: usize, create: bool) -> Result<File> {
+        let path = self.cache_root.join(format!("{piece}.piece"));
+        self.validate_file_path(&path, create)?;
+        Ok(OpenOptions::new()
+            .read(true)
+            .write(create)
+            .create(create)
+            .truncate(false)
+            .open(path)?)
+    }
+
+    /// Route excluded bytes into internal piece storage. Re-selecting a file
+    /// materializes its cached boundary bytes without downloading them again.
+    /// Returns newly selected files so the caller can recheck previously held pieces.
+    pub fn set_selected(&self, selected: Option<&[usize]>) -> Result<Vec<usize>> {
+        if selected.is_some_and(|files| files.iter().any(|i| *i >= self.slots.len())) {
+            bail!("selected torrent file index out of range");
+        }
+        let _mutation = self
+            .mutation
+            .lock()
+            .map_err(|_| anyhow::anyhow!("storage mutation lock poisoned"))?;
+        if self.deleted.load(Ordering::Acquire) {
+            bail!("torrent storage has been deleted");
+        }
+        let mut selection = self
+            .selection
+            .write()
+            .map_err(|_| anyhow::anyhow!("selection lock poisoned"))?;
+        let mut files: Vec<_> = self
+            .slots
+            .iter()
+            .map(|slot| !slot.pad && selected.is_none())
+            .collect();
+        if let Some(selected) = selected {
+            for &file in selected {
+                files[file] = !self.slots[file].pad;
+            }
+        }
+        let newly_selected: Vec<_> = files
+            .iter()
+            .enumerate()
+            .map(|(i, on)| *on && (!selection.configured || !selection.files[i]))
+            .collect();
+        let added: Vec<_> = newly_selected
+            .iter()
+            .enumerate()
+            .filter_map(|(i, on)| on.then_some(i))
+            .collect();
+        if !added.is_empty() {
+            for piece in self.cached_pieces()? {
+                let start = piece as u64 * self.piece_length;
+                let spans = self.spans(start, self.piece_len(piece));
+                if !spans.iter().any(|(file, _, _)| newly_selected[*file]) {
+                    continue;
+                }
+                let mut bytes = vec![0; self.piece_len(piece) as usize];
+                let cached = self.cache_handle(piece, false)?;
+                // A crash or damaged cache must trigger re-download, never publish bad bytes.
+                if read_exact_at(&cached, &mut bytes, 0).is_err()
+                    || !self.piece_matches(piece, &bytes)
+                {
+                    continue;
+                }
+                for (file, inner, len) in spans {
+                    if newly_selected[file] {
+                        let at = (self.slots[file].offset + inner - start) as usize;
+                        write_all_at(
+                            &*self.handle(file, true)?,
+                            &bytes[at..at + len as usize],
+                            inner,
+                        )?;
+                    }
+                }
+            }
+            for &file in &added {
+                if self.slots[file].length == 0 {
+                    self.handle(file, true)?;
+                }
+            }
+        }
+        selection.partial = files
+            .iter()
+            .zip(&self.slots)
+            .any(|(on, slot)| !*on && !slot.pad);
+        selection.files = files;
+        selection.configured = true;
+        Ok(added)
     }
 
     /// Empty files carry no blocks and would otherwise never be created.
     pub fn create_empty_files(&self, selected: Option<&[usize]>) -> Result<()> {
+        let _mutation = self
+            .mutation
+            .lock()
+            .map_err(|_| anyhow::anyhow!("storage mutation lock poisoned"))?;
+        if self.deleted.load(Ordering::Acquire) {
+            bail!("torrent storage has been deleted");
+        }
         for (i, slot) in self.slots.iter().enumerate() {
             if !slot.pad && slot.length == 0 && selected.is_none_or(|s| s.contains(&i)) {
                 self.handle(i, true)?;
@@ -212,15 +380,17 @@ impl Storage {
     }
 
     fn validate_path(&self, index: usize, create: bool) -> Result<()> {
-        let slot = &self.slots[index];
+        self.validate_file_path(&self.slots[index].path, create)
+    }
+
+    fn validate_file_path(&self, file_path: &Path, create: bool) -> Result<()> {
         if create {
             std::fs::create_dir_all(&self.download_root)?;
         }
         let real_root = std::fs::canonicalize(&self.download_root)?;
         // The configured download folder may itself be a user-chosen alias, but
         // torrent-controlled descendants and file names must never be links.
-        for path in slot
-            .path
+        for path in file_path
             .ancestors()
             .take_while(|path| *path != self.download_root)
         {
@@ -228,7 +398,7 @@ impl Storage {
                 Ok(meta) if meta.file_type().is_symlink() => {
                     bail!("torrent path contains a symbolic link")
                 }
-                Ok(meta) if path == slot.path && !meta.is_file() => {
+                Ok(meta) if path == file_path && !meta.is_file() => {
                     bail!("torrent output is not a regular file")
                 }
                 Ok(_) => {}
@@ -236,7 +406,7 @@ impl Storage {
                 Err(error) => return Err(error.into()),
             }
         }
-        if let Some(parent) = slot.path.parent() {
+        if let Some(parent) = file_path.parent() {
             if create {
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("cannot create {}", parent.display()))?;
@@ -297,6 +467,32 @@ impl Storage {
         if self.deleted.load(Ordering::Acquire) {
             bail!("torrent storage has been deleted");
         }
+        let selection = self
+            .selection
+            .read()
+            .map_err(|_| anyhow::anyhow!("selection lock poisoned"))?;
+        if !data.is_empty() && selection.partial {
+            let first = (offset / self.piece_length) as usize;
+            let end = offset + data.len() as u64;
+            let last = ((end - 1) / self.piece_length) as usize;
+            for piece in first..=last {
+                let start = piece as u64 * self.piece_length;
+                if self
+                    .spans(start, self.piece_len(piece))
+                    .iter()
+                    .any(|(file, _, _)| !self.slots[*file].pad && !selection.files[*file])
+                {
+                    let from = offset.max(start);
+                    let to = end.min(start + self.piece_len(piece));
+                    let at = (from - offset) as usize;
+                    write_all_at(
+                        &self.cache_handle(piece, true)?,
+                        &data[at..at + (to - from) as usize],
+                        from - start,
+                    )?;
+                }
+            }
+        }
         let mut consumed = 0usize;
         let mut cursor = offset;
         for (file, inner, len) in self.spans(offset, data.len() as u64) {
@@ -304,7 +500,7 @@ impl Storage {
             let slot_start = self.slots[file].offset + inner;
             consumed += (slot_start - cursor) as usize;
             let chunk = &data[consumed..consumed + len as usize];
-            if !self.slots[file].pad {
+            if selection.files[file] {
                 write_all_at(&*self.handle(file, true)?, chunk, inner)?;
             }
             consumed += len as usize;
@@ -319,11 +515,44 @@ impl Storage {
             bail!("read beyond the end of the torrent");
         }
         let mut out = vec![0u8; len as usize];
+        let selection = self
+            .selection
+            .read()
+            .map_err(|_| anyhow::anyhow!("selection lock poisoned"))?;
         for (file, inner, n) in self.spans(offset, len) {
             if self.slots[file].pad {
                 continue;
             }
             let at = (self.slots[file].offset + inner - offset) as usize;
+            if !selection.files[file] {
+                let mut cursor = self.slots[file].offset + inner;
+                let end = cursor + n;
+                while cursor < end {
+                    let piece = (cursor / self.piece_length) as usize;
+                    let begin = cursor % self.piece_length;
+                    let count = (end - cursor).min(self.piece_length - begin) as usize;
+                    let target = (cursor - offset) as usize;
+                    match self.cache_handle(piece, false) {
+                        Ok(cached) => {
+                            read_exact_at(&cached, &mut out[target..target + count], begin)?
+                        }
+                        Err(error)
+                            if error
+                                .downcast_ref::<io::Error>()
+                                .is_some_and(|e| e.kind() == io::ErrorKind::NotFound) =>
+                        {
+                            read_exact_at(
+                                &*self.handle(file, false)?,
+                                &mut out[target..target + count],
+                                cursor - self.slots[file].offset,
+                            )?;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                    cursor += count as u64;
+                }
+                continue;
+            }
             read_exact_at(
                 &*self.handle(file, false)?,
                 &mut out[at..at + n as usize],
@@ -525,11 +754,14 @@ impl Storage {
 
     /// Re-hashes whatever is on disk for `index`. A missing or short file simply means "not have".
     pub fn check_piece(&self, index: usize) -> bool {
+        let Ok(selection) = self.selection.read() else {
+            return false;
+        };
         let start = index as u64 * self.piece_length;
         // Quick rejection without reading: every non-pad file region must exist at full size.
         for (file, inner, len) in self.spans(start, self.piece_len(index)) {
             let slot = &self.slots[file];
-            if slot.pad {
+            if slot.pad || !selection.files[file] {
                 continue;
             }
             match std::fs::metadata(&slot.path) {
@@ -537,6 +769,7 @@ impl Storage {
                 _ => return false,
             }
         }
+        drop(selection);
         self.read_piece(index)
             .map(|d| self.piece_matches(index, &d))
             .unwrap_or(false)
@@ -574,6 +807,15 @@ impl Storage {
         if let Ok(mut open) = self.open.lock() {
             open.clear();
         }
+        if let Ok(pieces) = self.cached_pieces() {
+            for piece in pieces {
+                let path = self.cache_root.join(format!("{piece}.piece"));
+                if self.validate_file_path(&path, false).is_ok() {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+            let _ = std::fs::remove_dir(&self.cache_root);
+        }
         let mut dirs = Vec::new();
         for (index, slot) in self.slots.iter().enumerate() {
             if slot.pad || self.validate_path(index, false).is_err() {
@@ -597,6 +839,12 @@ impl Storage {
             if dir.starts_with(&self.root) {
                 let _ = std::fs::remove_dir(&dir);
             }
+        }
+        if self.root != self.download_root
+            && std::fs::symlink_metadata(&self.root)
+                .is_ok_and(|meta| meta.is_dir() && !meta.file_type().is_symlink())
+        {
+            let _ = std::fs::remove_dir(&self.root);
         }
     }
 
@@ -659,6 +907,78 @@ mod tests {
 
     fn whole(parts: &[Vec<u8>]) -> Vec<u8> {
         parts.concat()
+    }
+
+    #[test]
+    fn excluded_files_are_not_created_and_shared_pieces_survive_restart_and_reselection() {
+        let (torrent, parts) = fixture();
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::with_output_name(&torrent, dir.path(), "chosen").unwrap();
+        storage.set_selected(Some(&[1])).unwrap();
+        let all = whole(&parts);
+        let piece = 1;
+        storage.write(16_384, &all[16_384..32_768]).unwrap();
+        assert!(!dir.path().join("chosen/a.bin").exists());
+        assert!(!dir.path().join("chosen/c.bin").exists());
+        assert_eq!(
+            std::fs::read(dir.path().join("chosen/sub/b.bin")).unwrap(),
+            parts[1]
+        );
+        assert!(storage.check_piece(piece));
+        drop(storage);
+        let resumed = Storage::with_output_name(&torrent, dir.path(), "chosen").unwrap();
+        resumed.set_selected(Some(&[1])).unwrap();
+        assert!(resumed.check_piece(piece));
+        assert_eq!(resumed.read_piece(piece).unwrap(), all[16_384..32_768]);
+        // Existing excluded files belong to the user and must be left untouched.
+        let neighbour = dir.path().join("chosen/a.bin");
+        std::fs::write(&neighbour, b"existing content").unwrap();
+        resumed.write(16_384, &all[16_384..32_768]).unwrap();
+        assert_eq!(std::fs::read(&neighbour).unwrap(), b"existing content");
+        resumed.set_selected(None).unwrap();
+        assert!(resumed.check_piece(piece));
+        assert_eq!(resumed.read_piece(piece).unwrap(), all[16_384..32_768]);
+        let cache = resumed.cache_root.clone();
+        resumed.delete_files();
+        assert!(!cache.exists());
+        assert!(!dir.path().join("chosen").exists());
+        assert!(resumed.set_selected(None).is_err());
+        assert!(resumed.create_empty_files(None).is_err());
+        assert!(resumed.write(0, &[1]).is_err());
+    }
+
+    #[test]
+    fn corrupt_boundary_cache_is_not_published_when_selecting_another_file() {
+        let (torrent, parts) = fixture();
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(&torrent, dir.path());
+        storage.set_selected(Some(&[1])).unwrap();
+        let all = whole(&parts);
+        storage.write(16_384, &all[16_384..32_768]).unwrap();
+        std::fs::write(storage.cache_root.join("1.piece"), vec![0; 16_384]).unwrap();
+        assert!(!storage.check_piece(1));
+        storage.set_selected(None).unwrap();
+        assert!(!dir.path().join("pack/a.bin").exists());
+        assert!(!dir.path().join("pack/c.bin").exists());
+        assert!(!storage.check_piece(1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn piece_cache_never_follows_a_symlink_or_deletes_outside_the_destination() {
+        let (torrent, parts) = fixture();
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let storage = Storage::new(&torrent, dir.path());
+        storage.set_selected(Some(&[1])).unwrap();
+        let private = outside.path().join("1.piece");
+        std::fs::write(&private, b"private").unwrap();
+        std::fs::create_dir_all(storage.cache_root.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(outside.path(), &storage.cache_root).unwrap();
+        let all = whole(&parts);
+        assert!(storage.write(16_384, &all[16_384..32_768]).is_err());
+        storage.delete_files();
+        assert_eq!(std::fs::read(private).unwrap(), b"private");
     }
 
     #[test]

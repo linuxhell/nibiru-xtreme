@@ -79,6 +79,8 @@ impl Picker {
     }
 
     pub fn set_wanted(&mut self, wanted: Bitfield) {
+        self.progress.retain(|piece, _| wanted.get(*piece));
+        self.asked.retain(|(piece, _), _| wanted.get(*piece));
         self.wanted = wanted;
     }
 
@@ -345,6 +347,7 @@ impl Picker {
 
     /// Hash check failed: throw the piece's blocks away so it is fetched again.
     pub fn piece_failed(&mut self, piece: usize) {
+        self.have.clear(piece);
         self.progress.remove(&piece);
         self.asked.retain(|(p, _), _| *p != piece);
     }

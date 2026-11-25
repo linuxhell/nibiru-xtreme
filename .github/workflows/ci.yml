@@ -47,7 +47,7 @@ jobs:
       - name: Test
         run: cargo test --locked --all-targets --all-features
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' || runner.os == 'Windows'
         with:
           python-version: "3.12"
       - name: Independent BitTorrent interoperability
@@ -56,6 +56,9 @@ jobs:
           python -m pip install libtorrent==2.1.1
           cargo build --locked --bin nibiru-xtreme
           python tests/interop_libtorrent.py --binary target/debug/nibiru-xtreme
+      - name: Validate full-file comparison harness
+        if: runner.os == 'Linux'
+        run: python -m unittest discover -s benchmarks -p 'test_compare_idm.py'
       - name: Independent ED2K interoperability (aMule)
         if: runner.os == 'Linux'
         run: |
@@ -71,6 +74,25 @@ jobs:
       - name: Smoke test
         shell: bash
         run: target/${{ matrix.target }}/release/${{ matrix.binary }} --version
+      - name: Package Windows IDM comparison kit
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python tools/package_idm_benchmark.py --binary "target/${{ matrix.target }}/release/${{ matrix.binary }}" --output target/nibiru-windows-idm-benchmark.zip
+          if ($LASTEXITCODE -ne 0) { throw "Comparison kit packaging failed" }
+          $expanded = Join-Path $env:RUNNER_TEMP "nibiru-idm-kit"
+          Expand-Archive target/nibiru-windows-idm-benchmark.zip $expanded
+          & "$expanded/runtime/python.exe" "$expanded/compare_idm.py" --help
+          if ($LASTEXITCODE -ne 0) { throw "Portable comparison runner failed" }
+          & "$expanded/runtime/python.exe" "$expanded/compare_idm.py" --nibiru "$expanded/nibiru-xtreme.exe" --engines nibiru --rounds 0
+          if ($LASTEXITCODE -eq 0) { throw "Invalid benchmark arguments were accepted" }
+      - name: Upload Windows comparison kit
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nibiru-windows-idm-benchmark
+          path: target/nibiru-windows-idm-benchmark.zip
+          if-no-files-found: error
       - name: Upload executable
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
