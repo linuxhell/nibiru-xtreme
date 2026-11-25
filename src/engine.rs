@@ -77,7 +77,9 @@ mod transport_diagnostic_tests {
 
 const MIN_SEGMENTED_SIZE: u64 = 8 * 1024 * 1024;
 const RANGE_CHUNK_SIZE: u64 = 4 * 1024 * 1024;
-const MAX_HTTP_RANGE_SIZE: u64 = 32 * 1024 * 1024;
+// Requests can amortize a high RTT without increasing the 4 MiB write buffer.
+// Idle workers can still split a busy tail at a committed block boundary.
+const MAX_HTTP_RANGE_SIZE: u64 = 128 * 1024 * 1024;
 const MAX_HTTP_WORKERS: usize = 16;
 const HTTP2_CONNECTION_WINDOW: u32 = 16 * 1024 * 1024;
 

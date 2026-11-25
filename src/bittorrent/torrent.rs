@@ -371,16 +371,21 @@ impl Core {
     }
 
     /// Re-derives the wanted piece set after `settings.selected` changed.
-    pub fn apply_selection(&mut self) {
+    pub fn apply_selection(&mut self) -> Result<()> {
         let selected = self.settings.selected.clone();
         if let Some(r) = self.ready_mut() {
-            r.file_selected = (0..r.torrent.files.len())
-                .map(|i| {
-                    selected.as_ref().is_none_or(|s| s.contains(&i)) && !r.torrent.files[i].pad
-                })
-                .collect();
+            let added = r.storage.set_selected(selected.as_deref())?;
+            for file in added {
+                for piece in r.storage.piece_range_of_file(file) {
+                    if r.picker.have().get(piece) && !r.storage.check_piece(piece) {
+                        r.picker.piece_failed(piece);
+                    }
+                }
+            }
+            r.file_selected = selection_mask(&r.torrent, selected.as_deref());
             let wanted = Self::wanted_from_files(&r.torrent, &r.storage, &r.file_selected);
             r.picker.set_wanted(wanted);
+            r.buffers.retain(|piece, _| r.picker.wanted().get(*piece));
         }
         // More (or fewer) pieces are wanted now: a finished torrent may have work again.
         let complete = self.ready().map(|r| r.picker.is_complete());
@@ -392,6 +397,7 @@ impl Core {
             Some(true) if self.state == State::Downloading => mark_complete(self),
             _ => {}
         }
+        Ok(())
     }
 
     pub fn default_mode(&self) -> Mode {
@@ -408,6 +414,22 @@ impl Core {
         }
         Mode::RarestFirst
     }
+}
+
+fn selection_mask(torrent: &Torrent, selected: Option<&[usize]>) -> Vec<bool> {
+    let mut files: Vec<_> = torrent
+        .files
+        .iter()
+        .map(|file| !file.pad && selected.is_none())
+        .collect();
+    if let Some(selected) = selected {
+        for &file in selected {
+            if let Some(on) = files.get_mut(file) {
+                *on = !torrent.files[file].pad;
+            }
+        }
+    }
+    files
 }
 
 pub fn window_pieces(torrent: &Torrent, bytes: u64) -> usize {
@@ -798,17 +820,22 @@ impl TorrentHandle {
     }
 
     /// Changes which files are downloaded. Unselected data already on disk is kept.
-    pub fn select_files(&self, files: Option<Vec<usize>>) {
+    pub fn select_files(&self, files: Option<Vec<usize>>) -> Result<()> {
         {
             let mut core = self.shared.lock();
-            core.settings.selected = files;
-            core.apply_selection();
+            let previous = std::mem::replace(&mut core.settings.selected, files);
+            if let Err(error) = core.apply_selection() {
+                core.settings.selected = previous;
+                return Err(error);
+            }
             if core.state == State::Seeding || core.state == State::Complete {
                 core.state = state_for(&core);
             }
             core.broadcast(|| PeerCmd::Ready);
         }
         self.shared.wake.notify_one();
+        self.shared.progress.notify_waiters();
+        Ok(())
     }
 
     pub fn set_sequential(&self, on: bool) {
@@ -913,6 +940,9 @@ impl TorrentHandle {
             bail!("range outside the file");
         }
         let len = len.min((entry.length - offset) as usize);
+        if len == 0 {
+            return Ok(Vec::new());
+        }
         let start = entry.offset + offset;
         let first = (start / torrent.piece_length) as usize;
         let last = ((start + len as u64 - 1) / torrent.piece_length) as usize;
@@ -925,7 +955,7 @@ impl TorrentHandle {
                 }
                 selected.push(file);
                 core.settings.selected = Some(selected);
-                core.apply_selection();
+                core.apply_selection()?;
                 core.broadcast(|| PeerCmd::Ready);
             }
         }
@@ -1022,7 +1052,7 @@ pub(crate) async fn install_metadata(shared: &Arc<Shared>, mut torrent: Torrent)
         let shared = shared.clone();
         let selected = selected.clone();
         tokio::task::spawn_blocking(move || -> Result<_> {
-            storage.create_empty_files(selected.as_deref())?;
+            storage.set_selected(selected.as_deref())?;
             let cancel = AtomicBool::new(false);
             Ok(storage.check_all(
                 |done, total| {
@@ -1044,9 +1074,7 @@ pub(crate) async fn install_metadata(shared: &Arc<Shared>, mut torrent: Torrent)
     if shared.is_stopped() {
         return;
     }
-    let file_selected: Vec<bool> = (0..torrent.files.len())
-        .map(|i| selected.as_ref().is_none_or(|s| s.contains(&i)) && !torrent.files[i].pad)
-        .collect();
+    let file_selected = selection_mask(&torrent, selected.as_deref());
     let wanted = Core::wanted_from_files(&torrent, &storage, &file_selected);
     let mut picker = Picker::new(torrent.piece_length, torrent.total_length, have, wanted);
     if torrent.wire_v2 {
@@ -1082,6 +1110,11 @@ pub(crate) async fn install_metadata(shared: &Arc<Shared>, mut torrent: Torrent)
         } else {
             State::Downloading
         };
+        // Selection may change while the blocking disk check is running.
+        if let Err(error) = core.apply_selection() {
+            drop(core);
+            return fail(shared, format!("storage selection failed: {error}"));
+        }
         if core
             .ready()
             .is_some_and(|r| r.picker.is_complete() && r.storage.metadata_complete())
@@ -1120,7 +1153,7 @@ pub(crate) async fn finish_piece(shared: &Arc<Shared>, piece: usize, data: Vec<u
     let Some(storage) = shared.lock().ready().map(|r| r.storage.clone()) else {
         return;
     };
-    let offset = piece as u64 * storage_piece_length(&storage);
+    let offset = piece as u64 * storage.piece_length();
     let outcome = {
         let storage = storage.clone();
         tokio::task::spawn_blocking(move || -> Result<bool> {
@@ -1172,10 +1205,6 @@ pub(crate) async fn finish_piece(shared: &Arc<Shared>, piece: usize, data: Vec<u
         Ok(Err(error)) => fail(shared, format!("cannot write to disk: {error}")),
         Err(error) => fail(shared, format!("disk task failed: {error}")),
     }
-}
-
-fn storage_piece_length(storage: &Storage) -> u64 {
-    storage.piece_length()
 }
 
 pub(crate) fn complete_metadata(shared: &Arc<Shared>) -> Option<Vec<u8>> {

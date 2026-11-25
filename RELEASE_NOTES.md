@@ -1,26 +1,10 @@
-# Nibiru Xtreme 0.2.8
+# Nibiru Xtreme 0.2.9
 
-- Reuse the first useful GET response for fresh HTTP downloads, retaining body, validators and final URL. Preserve explicit probes and validated resume.
-- Handle bounded 429/503 Retry-After and backoff without discarding healthy workers or bypassing throttling with a whole-file GET.
-- Learn conservative origin caps from repeated refusals and the observed peak of receiving peers, after a short observation window. Isolate the ten-minute in-memory cache by origin, credentials, headers and proxy.
-- Make explicit ADM thread settings take precedence over size defaults; add CLI `download --connections 1..16`. Respect available blocks, split minima and the selected maximum.
-- Recover stalled/truncated bodies by reassigning only unwritten blocks, with bounded retries and verified partial preservation. Reuse buffers after positional writes complete.
-- Prepare sparse Windows partials before setting their logical length, through a small safe platform boundary. The Rust engine continues to forbid unsafe code. Unsupported filesystems retain normal writes.
-- Preserve HTTP/2, HTTP/3, TLS, proxy/headers, bandwidth limits, atomic publication and P2P behavior. No GPL code from MDM is incorporated.
-- Include independent source analysis and controlled, hash-checked comparisons. Local synthetic results do not prove higher Internet capacity or universal superiority over IDM/MDM.
+- Fix excluded torrent files being created or overwritten when they share a verified piece with a selected file. Keep required boundary bytes in internal piece storage while preserving verified resume, upload and later file selection.
+- Apply file-selection changes after the initial disk check; release deselected buffers and cancel outstanding peer requests. Reject invalid selections and handle zero-length reads safely.
+- Merge repeated selection ranges before expanding file indexes, bounding temporary allocations and keeping file-mask construction linear.
+- Increase the maximum HTTP range from 32 to 128 MiB while retaining 4 MiB write buffers and the selected limit of up to 16 workers. Preserve identity validation, Retry-After, resumable blocks, tail redistribution and atomic publication.
+- Add Windows IDM comparison tooling with alternating full downloads, executable/file hashes, completeness checks and a checksum-verified portable Python runtime in CI artifacts. The engine continues to use its own implementation; no proprietary IDM code is included.
+- In the documented Microsoft ISO test, HTTP/2 range requests fell from 288 to 114. The small timing difference from a single run per profile does not establish a sustained speed increase or universal superiority over IDM.
 
-# Nibiru Xtreme 0.2.7
-
-- Remove the discarded one-byte GET from segmented HTTP startup; validate the real payload ranges instead. The explicit probe API retains its range test.
-- Use bounded larger ranges and let idle workers take block-aligned unreserved tails from busy workers. Preserve per-block ownership, validated resume, connection caps and atomic publication.
-- Report all bytes written before disk synchronization/publication, allowing ADM to distinguish finalization from completion.
-- Include reproducible static inspection of the supplied IDM installer, without executing or distributing its payloads, and controlled before/after Nibiru measurements. Five-run synthetic medians improved by 13.6% and 6.0% in two scenarios; these are not benchmarks against IDM or proof of Internet/P2P acceleration.
-- Preserve the following 0.2.6 corrections:
-
-- Announce the actual incoming TCP listener port in ED2K HELLOANSWER packets, including ephemeral fallback ports; previously this field was always zero.
-- Discover UPnP gateways across distinct local IPv4 addresses, retaining the default route and existing gateway URL trust checks. Retry lost SSDP requests within the same bounded discovery deadline and cancel remaining searches when one succeeds.
-- Expose accepted TCP connections separately from completed ED2K handshakes for diagnostics.
-- Add wire-level regression assertions for the announced port, a dropped first SSDP search batch, interface filtering and discovery bounds. Preserve callback, upload, obfuscation and torrent behavior.
-- Retain the shared UDP/TCP peer-port and HTTP startup fixes from 0.2.5.
-
-UPnP mapping and a TCP port check alone do not guarantee High ID. The real ED2K server response remains authoritative; the user must retest their network.
+See [the audit, measurements and limits](https://github.com/linuxhell/nibiru-xtreme/blob/v0.2.9/docs/AUDIT-2026-11-25.md). Windows x64, Linux x64 and macOS Intel x64 binaries include SHA-256 sidecars and license notices.

@@ -231,6 +231,7 @@ async fn add_torrent_with_one_based_select_file_downloads_only_those_files() {
     assert_eq!(done["numPieces"], w.torrent.piece_count().to_string());
     assert_eq!(done["pieceLength"], "65536");
     assert_eq!(done["errorCode"], "0");
+    assert!(!dir.path().join("Show/ep1.mkv").exists());
     assert_eq!(done["bittorrent"]["info"]["name"], "Show");
     assert_eq!(done["bittorrent"]["mode"], "multi");
     let files = done["files"].as_array().unwrap();

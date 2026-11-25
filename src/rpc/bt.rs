@@ -124,7 +124,7 @@ pub fn parse_seed_time(value: &str) -> Result<Duration> {
 
 /// aria2's 1-based `select-file=1,3-5` into zero-based indexes.
 pub fn parse_select_file(value: &str, file_count: usize) -> Result<Vec<usize>> {
-    let mut out = Vec::new();
+    let mut ranges = Vec::new();
     for part in value.split(',').map(str::trim).filter(|p| !p.is_empty()) {
         let (from, to) = match part.split_once('-') {
             Some((a, b)) => (a.trim().parse::<usize>()?, b.trim().parse::<usize>()?),
@@ -136,10 +136,19 @@ pub fn parse_select_file(value: &str, file_count: usize) -> Result<Vec<usize>> {
         if from == 0 || to < from || to > file_count {
             bail!("select-file index out of range");
         }
-        out.extend(from - 1..to);
+        ranges.push((from - 1, to));
     }
-    out.sort_unstable();
-    out.dedup();
+    // Merge before expanding: repeated large ranges must not allocate the
+    // same file indexes over and over from a bounded RPC request.
+    ranges.sort_unstable();
+    let mut out = Vec::new();
+    let mut end = 0;
+    for (from, to) in ranges {
+        if to > end {
+            out.extend(from.max(end)..to);
+            end = to;
+        }
+    }
     Ok(out)
 }
 
@@ -564,6 +573,9 @@ impl BtService {
                 None
             };
 
+            if let Some(selected) = selected {
+                task.handle.select_files(Some(selected))?;
+            }
             if let Ok(mut saved) = task.persist.lock()
                 && let Some(saved) = saved.as_mut()
             {
@@ -580,9 +592,6 @@ impl BtService {
             }
             let options = Some(options);
             self.apply_limits(&task.handle, options);
-            if let Some(selected) = selected {
-                task.handle.select_files(Some(selected));
-            }
             if let Some(on) = flag(options, "x-nibiru-sequential") {
                 task.handle.set_sequential(on);
             }
@@ -831,6 +840,19 @@ fn status_json(gid: &str, task: &BtTask, saved: Option<&Path>) -> Value {
 #[cfg(test)]
 mod audit_tests {
     use super::*;
+
+    #[test]
+    fn overlapping_and_repeated_selection_ranges_expand_only_unique_files() {
+        assert_eq!(
+            parse_select_file("5-8, 1-3, 3-6, 2, 10", 10).unwrap(),
+            vec![0, 1, 2, 3, 4, 5, 6, 7, 9]
+        );
+        let repeated = vec!["1-10000"; 1000].join(",");
+        assert_eq!(
+            parse_select_file(&repeated, 10_000).unwrap(),
+            (0..10_000).collect::<Vec<_>>()
+        );
+    }
 
     #[tokio::test]
     async fn torrent_output_rejects_traversal_before_registering_a_task() {

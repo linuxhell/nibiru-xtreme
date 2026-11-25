@@ -2,6 +2,8 @@
 
 # Nibiru Xtreme
 
+Version 0.2.9: keep unselected torrent files off disk, reduce HTTP request overhead with ranges up to 128 MiB, and add a Windows IDM comparison kit. Write buffers remain 4 MiB per worker. See the [audit and measurements](docs/AUDIT-2026-11-25.md).
+
 Version 0.2.8 reuses the first GET, honors Retry-After on 429/503, temporarily learns origin limits and recovers interrupted ranges while keeping completed blocks. It reuses buffers and prepares sparse files on Windows. The thread slider takes precedence over size defaults. See the [implementation, tests and limits](docs/HTTP-0.2.8.md) and [MDM audit](docs/MDM-AUDIT-2026-11-10.md).
 
 Version 0.2.7 removes the discarded one-byte probe at segmented HTTP startup and lets idle connections help assigned ranges. Validated resume and direct writes to the partial file are preserved. The [IDM analysis and local comparison](docs/IDM-ANALYSIS-2026-11-10.md) document the measured gains and limits; they do not establish general superiority over IDM or torrent/ed2k acceleration.
@@ -22,7 +24,7 @@ HTTPS uses public roots together with the operating system trust store while kee
 
 ## Status
 
-**Version 0.2.8.** The native engine for Apocalipse Download Manager, packaged for Windows, Linux and macOS with SHA-256 files.
+**Version 0.2.9.** The native engine for Apocalipse Download Manager, packaged for Windows, Linux and macOS with SHA-256 files.
 
 ED2K preview does not require a fixed 30–40 MB total: ADM enables it once the first MD4-authenticated part is available (up to 9,728,000 bytes). Other peers help finish the header and tail before middle parts so a slow source cannot monopolize preview data. MP4/AVI may also need their tail index; missing ranges wait for data rather than exposing disk holes.
 

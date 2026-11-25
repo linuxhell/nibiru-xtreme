@@ -740,6 +740,26 @@ impl Peer {
                     self.send_bitfield().await?;
                 }
                 self.settle_early()?;
+                let cancelled: Vec<_> = {
+                    let core = self.shared.lock();
+                    self.inflight
+                        .iter()
+                        .filter_map(|(block, _)| {
+                            core.ready()
+                                .filter(|r| !r.picker.wanted().get(block.piece))
+                                .map(|_| *block)
+                        })
+                        .collect()
+                };
+                for block in cancelled {
+                    self.inflight.retain(|(pending, _)| *pending != block);
+                    self.send(&Message::Cancel {
+                        index: block.piece as u32,
+                        begin: block.offset,
+                        length: block.length,
+                    })
+                    .await?;
+                }
                 self.update_interest().await?;
                 self.request_hashes().await?;
                 self.fill_requests().await?;
