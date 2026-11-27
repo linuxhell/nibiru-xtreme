@@ -2,7 +2,7 @@
 
 # Nibiru Xtreme
 
-Version 0.2.9: keep unselected torrent files off disk, reduce HTTP request overhead with ranges up to 128 MiB, and add a Windows IDM comparison kit. Write buffers remain 4 MiB per worker. See the [audit and measurements](docs/AUDIT-2026-11-25.md).
+Version 0.3.0: automatic HTTP/3 with HTTP/2/1.1 fallback, per-origin concurrency learning, IOCP/io_uring disk writes where available and BLAKE3-verified block resume. See [implementation, validation and limits](docs/UPGRADE-2026-11-27.md).
 
 Version 0.2.8 reuses the first GET, honors Retry-After on 429/503, temporarily learns origin limits and recovers interrupted ranges while keeping completed blocks. It reuses buffers and prepares sparse files on Windows. The thread slider takes precedence over size defaults. See the [implementation, tests and limits](docs/HTTP-0.2.8.md) and [MDM audit](docs/MDM-AUDIT-2026-11-10.md).
 

@@ -32,6 +32,7 @@ struct Origin {
     /// Bytes of body served since the last reset (HEAD and 1-byte probes are negligible).
     served: Arc<AtomicU64>,
     hold_tail: Arc<AtomicBool>,
+    ranges: Arc<Mutex<Vec<(usize, usize)>>>,
     data: Arc<Mutex<(Arc<Vec<u8>>, String)>>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -42,6 +43,8 @@ impl Origin {
         let address = listener.local_addr().unwrap();
         let served = Arc::new(AtomicU64::new(0));
         let hold_tail = Arc::new(AtomicBool::new(false));
+        let ranges = Arc::new(Mutex::new(Vec::new()));
+        let requests_in = ranges.clone();
         let gate_in = hold_tail.clone();
         let current = Arc::new(Mutex::new((data, etag.to_owned())));
         let (served_in, current_in) = (served.clone(), current.clone());
@@ -50,6 +53,7 @@ impl Origin {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let (served, current) = (served_in.clone(), current_in.clone());
                 let hold_tail = gate_in.clone();
+                let ranges = requests_in.clone();
                 tokio::spawn(async move {
                     let mut request = vec![0u8; 16 * 1024];
                     let used = stream.read(&mut request).await.unwrap_or(0);
@@ -80,6 +84,7 @@ impl Origin {
                     };
                     let start = start.parse::<usize>().unwrap();
                     let end = end.parse::<usize>().unwrap().min(data.len() - 1);
+                    ranges.lock().unwrap().push((start, end));
                     let body = &data[start..=end];
                     let head = format!(
                         "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {start}-{end}/{}\r\nAccept-Ranges: bytes\r\nETag: \"{etag}\"\r\nConnection: close\r\n\r\n",
@@ -114,6 +119,7 @@ impl Origin {
             address,
             served,
             hold_tail,
+            ranges,
             data: current,
             task,
         }
@@ -370,6 +376,61 @@ async fn a_killed_download_resumes_from_its_last_saved_record() {
         origin.served.load(Ordering::Relaxed) < SIZE as u64 - (3 << 20),
         "the second run fetched the whole file again"
     );
+    origin.task.abort();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tampered_completed_block_is_fetched_again_while_valid_blocks_survive() {
+    use std::io::{Seek, SeekFrom, Write};
+    let data = payload(9);
+    let origin = Origin::start(data.clone(), "v1", 15).await;
+    let root = root();
+    let destination = root.join("payload.bin");
+    let (part, state) = partial(&destination);
+    assert!(
+        pause_at(
+            &engine(),
+            &origin,
+            origin.url(""),
+            destination.clone(),
+            10 << 20
+        )
+        .await
+        .is_err()
+    );
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+    let hashes = record["hashes"].as_object().unwrap();
+    assert!(hashes.len() >= 2);
+    let index: u64 = hashes.keys().next().unwrap().parse().unwrap();
+    let valid: Vec<u64> = hashes
+        .keys()
+        .map(|i| i.parse::<u64>().unwrap())
+        .filter(|i| *i != index)
+        .collect();
+    let mut file = std::fs::OpenOptions::new().write(true).open(&part).unwrap();
+    file.seek(SeekFrom::Start(index * (4 << 20) + 27)).unwrap();
+    file.write_all(b"damaged").unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    origin.ranges.lock().unwrap().clear();
+    run(&engine(), origin.url(""), destination.clone(), None)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(&destination).unwrap(), *data);
+    let ranges = origin.ranges.lock().unwrap().clone();
+    for index in valid {
+        let start = index as usize * (4 << 20);
+        let end = (start + (4 << 20)).min(SIZE) - 1;
+        assert!(
+            !ranges
+                .iter()
+                .any(|(a, b)| b > a && *a <= end && *b >= start),
+            "a validated local block was requested again"
+        );
+    }
+    assert!(ranges.iter().any(|(a,b)| *a <= index as usize * (4 << 20) && *b >= index as usize * (4 << 20) + 27));
     origin.task.abort();
     let _ = std::fs::remove_dir_all(root);
 }

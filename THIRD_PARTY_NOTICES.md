@@ -61,3 +61,33 @@ Optional transports retain their feature gates. Transitive dependencies retain t
 | `url` | 2.5.8 | MIT OR Apache-2.0 |
 | `uuid` | 1.28.0 | Apache-2.0 OR MIT |
 | `webpki-roots` | 1.0.10 | CDLA-Permissive-2.0 |
+
+Native completion I/O uses Compio 0.19.1 (MIT OR Apache-2.0); completed-block
+checksums use BLAKE3 1.8.8 (CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception).
+This distribution uses their Apache-2.0 license option. Consult the crates'
+upstream LICENSE files for contributor notices. File identity uses same-file
+1.0.6 (Unlicense OR MIT), under its MIT option.
+
+### same-file MIT notice
+
+The MIT License (MIT)
+
+Copyright (c) 2017 Andrew Gallant
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.

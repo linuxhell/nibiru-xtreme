@@ -52,7 +52,16 @@ enum Command {
         /// Experiment with bounded request concurrency during segmented downloads.
         #[arg(long)]
         adaptive: bool,
-        /// Additional DER root certificate for FTPS.
+        /// Keep the configured connection count instead of adaptive learning.
+        #[arg(long, conflicts_with = "adaptive")]
+        fixed_connections: bool,
+        /// Disable automatic HTTP/3 competition; use HTTP/2 or HTTP/1.1.
+        #[arg(long)]
+        no_http3: bool,
+        /// Use portable disk writes for diagnostics or controlled benchmarks.
+        #[arg(long)]
+        portable_io: bool,
+        /// Additional DER root certificate for HTTPS/HTTP3 and FTPS.
         #[arg(long)]
         ca_certificate: Option<PathBuf>,
         /// Trusted SSH server fingerprint, e.g. SHA256:...
@@ -240,7 +249,10 @@ async fn main() -> Result<()> {
                     "schema_version": 1, "engine": "nibiru-xtreme", "version": VERSION,
                     "features": {"native_rpc": true, "rpc_namespace": "nibiru",
                         "parent_lifetime": true, "http_resume_identity": true,
-                        "session_persistence": true,
+                        "session_persistence": true, "partial_integrity_blake3": true,
+                        "origin_capacity_profiles": true,
+                        "native_disk_io": cfg!(any(target_os = "linux", windows)),
+                        "http3_auto": cfg!(feature = "http3"),
                         "bittorrent": true, "ed2k_library": true,
                         "ed2k_rpc": true, "ed2k_multi_source": true, "bt_lsd": true,
                         "bt_holepunch": true,
@@ -259,7 +271,10 @@ async fn main() -> Result<()> {
             connections,
             http3_only,
             sync_interval_mib,
-            adaptive,
+            adaptive: _,
+            fixed_connections,
+            no_http3,
+            portable_io,
             ca_certificate,
             ssh_host_key,
             ssh_identity,
@@ -271,7 +286,15 @@ async fn main() -> Result<()> {
                 Engine::new(log)?
             }
             .with_sync_interval_mib(sync_interval_mib)
-            .with_adaptive(adaptive)
+            .with_adaptive(!fixed_connections)
+            .with_auto_http3(!no_http3)
+            .with_portable_io(portable_io)
+            .with_profile_store(
+                out.parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or(std::path::Path::new("."))
+                    .join(".nibiru-profiles.json"),
+            )
             .with_http3_only(http3_only)
             .with_transport_options(TransportOptions {
                 ca_certificate,
@@ -354,7 +377,8 @@ async fn main() -> Result<()> {
             let config = args.config()?;
             std::fs::create_dir_all(&args.dir)?;
             let log = Arc::new(LogSink::new(args.log.as_deref())?);
-            let engine = Engine::new(log.clone())?;
+            let engine = Engine::new(log.clone())?
+                .with_profile_store(args.dir.join(".nibiru-profiles.json"));
             let global_download_limit = config.session.download_limit;
             let service = BtService::start(config).await?;
             #[cfg(not(feature = "upnp"))]
@@ -547,7 +571,8 @@ async fn run_aria2_compatible_rpc(args: &[String]) -> Result<()> {
         });
     }
     let log = Arc::new(LogSink::new(log_path.as_deref())?);
-    let engine = Engine::new(log.clone())?;
+    let engine =
+        Engine::new(log.clone())?.with_profile_store(bt.default_dir.join(".nibiru-profiles.json"));
     let default_dir = bt.default_dir.clone();
     let global_download_limit = bt.session.download_limit;
     let service = BtService::start(bt).await?;

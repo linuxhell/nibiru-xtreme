@@ -249,6 +249,7 @@ def main():
                                       final["detail"].split() if "=" in item)
                         row["engine_timings_ms"] = {key: int(value) for key, value in fields.items()
                                                    if key.endswith("_ms")}
+                        row["storage_backend"] = next((r["detail"].removeprefix("backend=") for r in records if r["event"] == "http.storage_backend"), "portable-legacy")
                         row["checkpoint_count"] = int(fields.get("checkpoint_count", 0))
                         row["checkpoint_sync_ms_sum"] = int(fields.get("checkpoint_sync_ms_sum", 0))
                         row["adaptive_decisions"] = [record["detail"] for record in records

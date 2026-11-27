@@ -1,10 +1,9 @@
-# Nibiru Xtreme 0.2.9
+# Nibiru Xtreme 0.3.0
 
-- Fix excluded torrent files being created or overwritten when they share a verified piece with a selected file. Keep required boundary bytes in internal piece storage while preserving verified resume, upload and later file selection.
-- Apply file-selection changes after the initial disk check; release deselected buffers and cancel outstanding peer requests. Reject invalid selections and handle zero-length reads safely.
-- Merge repeated selection ranges before expanding file indexes, bounding temporary allocations and keeping file-mask construction linear.
-- Increase the maximum HTTP range from 32 to 128 MiB while retaining 4 MiB write buffers and the selected limit of up to 16 workers. Preserve identity validation, Retry-After, resumable blocks, tail redistribution and atomic publication.
-- Add Windows IDM comparison tooling with alternating full downloads, executable/file hashes, completeness checks and a checksum-verified portable Python runtime in CI artifacts. The engine continues to use its own implementation; no proprietary IDM code is included.
-- In the documented Microsoft ISO test, HTTP/2 range requests fell from 288 to 114. The small timing difference from a single run per profile does not establish a sustained speed increase or universal superiority over IDM.
+- Compete an initial HTTPS GET over HTTP/3 and TCP with a 75 ms fallback delay. Reuse the winning response for the payload, preserve TLS verification and headers, and keep configured proxies on their supported transport. Cache the successful protocol for ten minutes. Explicit HTTP/1.1 and HTTP/3 modes remain available.
+- Enable bounded adaptive concurrency by default, with private, versioned origin/context/network hints. Meaningful completed, unthrottled transfers can inform later downloads; the requested connection limit remains an upper bound. `--fixed-connections` disables adaptation.
+- Use owned-buffer asynchronous positional disk writes through IOCP on Windows and io_uring on supported Linux kernels. Unsupported or restricted systems retain portable writes. Wait for outstanding OS writes before checkpointing or publishing, including cancellation. `--portable-io` enables controlled comparisons.
+- Record BLAKE3 hashes of completed 4 MiB HTTP blocks and verify local blocks before resuming. Refetch damaged or unproven blocks while preserving valid ones. Legacy partial metadata is readable but unauthenticated completed blocks are downloaded again. Publisher SHA-256 verification remains separate.
+- Preserve selective torrent storage, atomic destination publication, bounded buffers, Range/ETag validation, retries, and browser/RPC compatibility. Advertise the new capabilities through the native contract.
 
-See [the audit, measurements and limits](https://github.com/linuxhell/nibiru-xtreme/blob/v0.2.9/docs/AUDIT-2026-11-25.md). Windows x64, Linux x64 and macOS Intel x64 binaries include SHA-256 sidecars and license notices.
+See [implementation, validation and practical limits](https://github.com/linuxhell/nibiru-xtreme/blob/v0.3.0/docs/UPGRADE-2026-11-27.md). These changes do not establish universal superiority over another manager; performance depends on the server, network, OS and storage. The Windows comparison kit continues to measure complete files and verify hashes.

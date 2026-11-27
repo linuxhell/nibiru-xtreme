@@ -28,8 +28,10 @@ use crate::{bittorrent::limiter::RateLimiter, logging::LogSink, storage};
 
 mod adaptive;
 mod budget;
+mod profiles;
 mod ranges;
 mod retry;
+mod transport;
 
 /// Useful transport diagnostics without copying nested URLs, proxy credentials or headers.
 pub(crate) fn download_error_message(error: &anyhow::Error) -> String {
@@ -244,9 +246,11 @@ struct PartialState {
     etag: Option<String>,
     modified: Option<String>,
     done: String,
+    #[serde(default)]
+    hashes: std::collections::BTreeMap<usize, String>,
 }
 
-const PARTIAL_STATE_VERSION: u32 = 1;
+const PARTIAL_STATE_VERSION: u32 = 2;
 
 fn resume_key(url: &Url) -> String {
     let mut stripped = url.clone();
@@ -290,21 +294,31 @@ async fn save_partial_state(
     state_path: PathBuf,
     mut state: PartialState,
     done: Arc<Vec<AtomicBool>>,
+    digests: Arc<storage::integrity::BlockDigests>,
 ) -> Result<()> {
     let blocks: Vec<bool> = done
         .iter()
         .map(|block| block.load(Ordering::Acquire))
         .collect();
-    tokio::task::spawn_blocking(move || file.sync_data())
-        .await
-        .map_err(|error| anyhow!("storage worker failed: {error}"))??;
     state.done = encode_blocks(&blocks);
-    let mut temporary = state_path.as_os_str().to_owned();
-    temporary.push(".tmp");
-    let temporary = PathBuf::from(temporary);
-    fs::write(&temporary, serde_json::to_vec(&state)?).await?;
-    fs::rename(&temporary, &state_path).await?;
-    Ok(())
+    state.hashes = digests.snapshot(&blocks);
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        use std::io::Write;
+        file.sync_data()?;
+        let parent = state_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+        temporary.write_all(&serde_json::to_vec(&state)?)?;
+        temporary.as_file().sync_all()?;
+        temporary
+            .persist(&state_path)
+            .map_err(|error| error.error)?;
+        Ok(())
+    })
+    .await
+    .map_err(|error| anyhow!("storage worker failed: {error}"))?
 }
 
 type ResourceIdentity = (String, Option<String>, Option<String>);
@@ -328,6 +342,7 @@ fn partial_template(
         etag,
         modified,
         done: String::new(),
+        hashes: Default::default(),
     })
 }
 
@@ -338,9 +353,10 @@ async fn suspend_partial(
     state_path: &Path,
     state: Option<PartialState>,
     done: Arc<Vec<AtomicBool>>,
+    digests: Arc<storage::integrity::BlockDigests>,
 ) {
     if let Some(state) = state
-        && save_partial_state(file, state_path.to_path_buf(), state, done)
+        && save_partial_state(file, state_path.to_path_buf(), state, done, digests)
             .await
             .is_ok()
     {
@@ -351,15 +367,18 @@ async fn suspend_partial(
 }
 
 async fn write_range_block(
-    file: Arc<std::fs::File>,
+    writer: storage::writer::Writer,
     offset: u64,
     buffer: Vec<u8>,
     completed: Arc<AtomicU64>,
     done: Arc<Vec<AtomicBool>>,
+    digests: Arc<storage::integrity::BlockDigests>,
 ) -> Result<(u64, Vec<u8>)> {
     let len = buffer.len() as u64;
     let started = Instant::now();
-    let buffer = storage::write_at_reusing(file, offset, buffer).await?;
+    let hash = blake3::hash(&buffer).to_hex().to_string();
+    let buffer = writer.write(offset, buffer).await?;
+    digests.record_hash((offset / RANGE_CHUNK_SIZE) as usize, hash);
     completed.fetch_add(len, Ordering::AcqRel);
     // Writes start on block boundaries, so each one finishes exactly one block.
     if let Some(block) = done.get((offset / RANGE_CHUNK_SIZE) as usize) {
@@ -377,6 +396,7 @@ struct RangeMetrics {
     ranges: AtomicU64,
     http1_ranges: AtomicU64,
     http2_ranges: AtomicU64,
+    http3_ranges: AtomicU64,
     header_wait_us: AtomicU64,
     body_wait_us: AtomicU64,
     storage_wait_us: AtomicU64,
@@ -387,10 +407,11 @@ impl RangeMetrics {
         log.info(
             "http.segmented_metrics",
             &format!(
-                "ranges={} http1_ranges={} http2_ranges={} header_wait_us_sum={} body_wait_us_sum={} storage_wait_us_sum={} timing_scope=worker_sum",
+                "ranges={} http1_ranges={} http2_ranges={} http3_ranges={} header_wait_us_sum={} body_wait_us_sum={} storage_wait_us_sum={} timing_scope=worker_sum",
                 self.ranges.load(Ordering::Relaxed),
                 self.http1_ranges.load(Ordering::Relaxed),
                 self.http2_ranges.load(Ordering::Relaxed),
+                self.http3_ranges.load(Ordering::Relaxed),
                 self.header_wait_us.load(Ordering::Relaxed),
                 self.body_wait_us.load(Ordering::Relaxed),
                 self.storage_wait_us.load(Ordering::Relaxed),
@@ -493,6 +514,10 @@ pub struct Engine {
     sync_interval_bytes: u64,
     adaptive: bool,
     http3_only: bool,
+    portable_io: bool,
+    auto_http3: bool,
+    http3_selected: bool,
+    profiles: Arc<profiles::Profiles>,
     transport_options: crate::protocols::TransportOptions,
     read_idle_timeout: Duration,
     origin_limits: Arc<budget::OriginLimits>,
@@ -534,8 +559,12 @@ impl Engine {
             limiters: Vec::new(),
             log,
             sync_interval_bytes: 0,
-            adaptive: false,
+            adaptive: true,
             http3_only: false,
+            portable_io: false,
+            auto_http3: true,
+            http3_selected: false,
+            profiles: Arc::default(),
             transport_options: Default::default(),
             read_idle_timeout: Duration::from_secs(30),
             origin_limits: Arc::default(),
@@ -559,6 +588,16 @@ impl Engine {
         self
     }
 
+    pub fn with_profile_store(mut self, path: PathBuf) -> Self {
+        self.profiles = Arc::new(profiles::Profiles::open(path));
+        self
+    }
+    /// Use portable disk I/O for reproducible comparison or OS troubleshooting.
+    pub fn with_portable_io(mut self, enabled: bool) -> Self {
+        self.portable_io = enabled;
+        self
+    }
+
     /// Maximum wait for the next read, excluding disk and rate limiter waits.
     pub fn with_read_idle_timeout(mut self, timeout: Duration) -> Result<Self> {
         anyhow::ensure!(!timeout.is_zero(), "HTTP read timeout must be positive");
@@ -569,6 +608,13 @@ impl Engine {
 
     /// Applies headers and a proxy to every HTTP request of this engine.
     pub fn with_request_options(mut self, options: RequestOptions) -> Result<Self> {
+        self.client = self.configured_client(&options, false)?;
+        self.http3_selected = false;
+        self.request_options = options;
+        Ok(self)
+    }
+
+    fn configured_client(&self, options: &RequestOptions, http3: bool) -> Result<Client> {
         let mut builder =
             Self::client_builder(self.http1_only).read_timeout(self.read_idle_timeout);
         let mut headers = reqwest::header::HeaderMap::new();
@@ -593,6 +639,17 @@ impl Engine {
             builder = builder.user_agent(agent);
         }
         builder = builder.default_headers(headers);
+        if let Some(path) = &self.transport_options.ca_certificate {
+            builder = builder.add_root_certificate(reqwest::Certificate::from_der(
+                &std::fs::read(path).context("cannot read additional TLS root")?,
+            )?);
+        }
+        #[cfg(feature = "http3")]
+        if http3 {
+            builder = builder.http3_prior_knowledge();
+        }
+        #[cfg(not(feature = "http3"))]
+        let _ = http3;
         if let Some(proxy) = &options.proxy {
             let mut p = reqwest::Proxy::all(&proxy.url).context("invalid proxy URL")?;
             if let (Some(user), Some(password)) = (&proxy.username, &proxy.password) {
@@ -600,9 +657,7 @@ impl Engine {
             }
             builder = builder.proxy(p);
         }
-        self.client = builder.build().context("failed to build HTTP client")?;
-        self.request_options = options;
-        Ok(self)
+        builder.build().context("failed to build HTTP client")
     }
 
     /// Token buckets every received byte must pass (one per task, one global).
@@ -645,8 +700,129 @@ impl Engine {
         builder
     }
 
+    pub fn with_auto_http3(mut self, enabled: bool) -> Self {
+        self.auto_http3 = enabled;
+        self
+    }
+
+    fn version(&self) -> reqwest::Version {
+        if self.http3_selected {
+            reqwest::Version::HTTP_3
+        } else {
+            reqwest::Version::HTTP_11
+        }
+    }
+    fn get(&self, url: Url) -> reqwest::RequestBuilder {
+        self.client.get(url).version(self.version())
+    }
+    fn head(&self, url: Url) -> reqwest::RequestBuilder {
+        self.client.head(url).version(self.version())
+    }
+
+    async fn initial_response(
+        &mut self,
+        url: &Url,
+        resume: bool,
+        cancelled: &AtomicBool,
+    ) -> Result<reqwest::Response> {
+        if self.transport_options.ca_certificate.is_some() {
+            self.client = self.configured_client(&self.request_options, false)?;
+        }
+        let key = self.profile_key(url);
+        let build = |client: &Client, version| {
+            let mut get = client.get(url.clone()).version(version);
+            if self.request_options.max_connections != Some(1) || resume {
+                get = get.header(
+                    RANGE,
+                    format!("bytes=0-{}", if resume { 0 } else { RANGE_CHUNK_SIZE - 1 }),
+                );
+            }
+            get
+        };
+        let tcp = build(&self.client, reqwest::Version::HTTP_11);
+        #[cfg(feature = "http3")]
+        let mut h3_client = None;
+        #[cfg(not(feature = "http3"))]
+        let h3_client: Option<Client> = None;
+        #[cfg(feature = "http3")]
+        if self.auto_http3
+            && !self.http1_only
+            && url.scheme() == "https"
+            && self.request_options.proxy.is_none()
+            && !environment_proxy()
+            && self
+                .profiles
+                .protocol(&key)
+                .as_deref()
+                .is_none_or(|p| p == "h3")
+        {
+            h3_client = self.configured_client(&self.request_options, true).ok();
+        }
+        let (response, h3) = {
+            let selected = async {
+                if let Some(client) = h3_client.as_ref() {
+                    let h3 = async {
+                        time::timeout(
+                            Duration::from_secs(2),
+                            build(client, reqwest::Version::HTTP_3).send(),
+                        )
+                        .await
+                        .context("HTTP/3 initial response timed out")?
+                        .map_err(reqwest::Error::without_url)
+                        .map_err(Into::into)
+                    };
+                    transport::compete(h3, retry::range_response(tcp, &self.log, 0)).await
+                } else {
+                    retry::range_response(tcp, &self.log, 0)
+                        .await
+                        .map(|r| (r, false))
+                }
+            };
+            tokio::pin!(selected);
+            let mut ticker = time::interval(Duration::from_millis(50));
+            let (response, h3) = loop {
+                tokio::select! {
+                    result = &mut selected => break result?,
+                    _ = ticker.tick() => if cancelled.load(Ordering::Acquire) { bail!("cancelled"); },
+                }
+            };
+            // Drop the racing futures before changing the selected transport.
+            (response, h3)
+        };
+        let protocol = match response.version() {
+            reqwest::Version::HTTP_3 => "h3",
+            reqwest::Version::HTTP_2 => "h2",
+            _ => "h1",
+        };
+        if response.status().is_success() {
+            self.profiles.remember_protocol(key, protocol);
+        }
+        if h3 {
+            self.client = h3_client.expect("selected HTTP/3 client");
+            self.http3_selected = true;
+        }
+        self.log.info(
+            "http.transport_selected",
+            &format!("protocol={protocol} automatic={}", self.auto_http3),
+        );
+        Ok(response)
+    }
+
     pub async fn download<F>(
         &self,
+        request: DownloadRequest,
+        cancelled: Arc<AtomicBool>,
+        on_progress: F,
+    ) -> Result<()>
+    where
+        F: FnMut(Progress) + Send,
+    {
+        self.clone()
+            .download_inner(request, cancelled, on_progress)
+            .await
+    }
+    async fn download_inner<F>(
+        &mut self,
         mut request: DownloadRequest,
         cancelled: Arc<AtomicBool>,
         mut on_progress: F,
@@ -724,30 +900,16 @@ impl Engine {
         let (_, state_path) = partial_paths(&request.destination);
         let resuming = fs::try_exists(&state_path).await.unwrap_or(false);
         let mut first = None;
-        let segmented_total = if existing == 0 && resuming {
-            match self.probe_http(&request.url, true).await {
-                Ok((Some(total), true)) if total >= MIN_SEGMENTED_SIZE => Some(total),
-                _ => None,
-            }
-        } else if existing == 0 {
+        let segmented_total = if existing == 0 {
             let started = Instant::now();
-            let mut get = self.client.get(parsed.clone());
-            if self.request_options.max_connections != Some(1) {
-                get = get.header(RANGE, format!("bytes=0-{}", RANGE_CHUNK_SIZE - 1));
-            }
             self.log
                 .info("http.initial_get", &format!("url={}", redact_url(&parsed)));
-            let pending = retry::range_response(get, &self.log, 0);
-            tokio::pin!(pending);
-            let mut ticker = time::interval(Duration::from_millis(250));
-            let response = loop {
-                tokio::select! {
-                    result = &mut pending => break result?,
-                    _ = ticker.tick() => { if cancelled.load(Ordering::Acquire) { bail!("cancelled"); } }
-                }
-            };
+            let response = self.initial_response(&parsed, resuming, &cancelled).await?;
             let total = if response.status() == StatusCode::PARTIAL_CONTENT {
-                Some(prefix_total(&response)?)
+                Some(prefix_total(
+                    &response,
+                    if resuming { 1 } else { RANGE_CHUNK_SIZE },
+                )?)
             } else {
                 None
             };
@@ -756,7 +918,9 @@ impl Engine {
                 drop(response);
                 None
             } else {
-                first = Some((response, started));
+                if !resuming {
+                    first = Some((response, started));
+                }
                 total.filter(|total| *total > RANGE_CHUNK_SIZE)
             }
         } else {
@@ -851,7 +1015,7 @@ impl Engine {
         } else {
             None
         };
-        let mut builder = self.client.get(parsed.clone());
+        let mut builder = self.get(parsed.clone());
         if let Some(saved) = &saved {
             builder = builder.header(RANGE, format!("bytes={existing}-")).header(
                 IF_RANGE,
@@ -895,7 +1059,6 @@ impl Engine {
             && let Some(saved) = &saved
         {
             let head = self
-                .client
                 .head(parsed.clone())
                 .send()
                 .await
@@ -957,12 +1120,12 @@ impl Engine {
         } else {
             anyhow::ensure!(
                 status != StatusCode::PARTIAL_CONTENT
-                    || prefetched && prefix_total(&response)? <= RANGE_CHUNK_SIZE,
+                    || prefetched && prefix_total(&response, RANGE_CHUNK_SIZE)? <= RANGE_CHUNK_SIZE,
                 "unexpected partial response without Range"
             );
             let mut identity = HttpIdentity::response(&parsed, &response);
             if status == StatusCode::PARTIAL_CONTENT {
-                identity.total = Some(prefix_total(&response)?);
+                identity.total = Some(prefix_total(&response, RANGE_CHUNK_SIZE)?);
             }
             let temp = identity_path.with_extension("tmp");
             fs::write(&temp, serde_json::to_vec(&identity)?).await?;
@@ -970,7 +1133,7 @@ impl Engine {
         }
         let resumed = existing > 0 && status == StatusCode::PARTIAL_CONTENT;
         let response_len = if existing == 0 && status == StatusCode::PARTIAL_CONTENT {
-            Some(prefix_total(&response)?)
+            Some(prefix_total(&response, RANGE_CHUNK_SIZE)?)
         } else {
             response.content_length()
         };
@@ -1082,21 +1245,26 @@ impl Engine {
     async fn load_partial(
         &self,
         url: &Url,
-        part_path: &Path,
-        state_path: &Path,
+        paths: (&Path, &Path),
         total: u64,
         block_count: usize,
         origin: &str,
-    ) -> Option<(Vec<bool>, ResourceIdentity)> {
+        cancelled: Arc<AtomicBool>,
+    ) -> Option<(
+        Vec<bool>,
+        ResourceIdentity,
+        std::collections::BTreeMap<usize, String>,
+    )> {
+        let (part_path, state_path) = paths;
         let record = fs::read(state_path).await.ok();
         let part_len = fs::metadata(part_path).await.ok().map(|m| m.len());
         if record.is_none() && part_len.is_none() {
             return None;
         }
         let trusted = async {
-            let record = record.filter(|bytes| bytes.len() <= 1 << 20)?;
+            let record = record.filter(|bytes| bytes.len() <= 64 << 20)?;
             let state: PartialState = serde_json::from_slice(&record).ok()?;
-            if state.version != PARTIAL_STATE_VERSION
+            if !matches!(state.version, 1 | PARTIAL_STATE_VERSION)
                 || state.total != total
                 || state.block != RANGE_CHUNK_SIZE
                 || state.origin != origin
@@ -1104,10 +1272,9 @@ impl Engine {
             {
                 return None;
             }
-            let blocks = decode_blocks(&state.done, block_count)?;
+            let mut blocks = decode_blocks(&state.done, block_count)?;
             let validator = state.etag.clone().or_else(|| state.modified.clone())?;
             let response = self
-                .client
                 .get(url.clone())
                 .header(RANGE, "bytes=0-0")
                 .header(IF_RANGE, validator)
@@ -1135,17 +1302,41 @@ impl Engine {
             {
                 return None;
             }
-            Some((blocks, (response.url().to_string(), etag, modified)))
+            let identity = (response.url().to_string(), etag, modified);
+            drop(response);
+            let path = part_path.to_path_buf();
+            let hashes = state.hashes;
+            let cancel = cancelled.clone();
+            let (blocks, hashes, rejected) = tokio::task::spawn_blocking(move || {
+                let rejected = storage::integrity::verify(
+                    &path,
+                    total,
+                    RANGE_CHUNK_SIZE,
+                    &mut blocks,
+                    &hashes,
+                    &cancel,
+                )?;
+                Ok::<_, std::io::Error>((blocks, hashes, rejected))
+            })
+            .await
+            .ok()?
+            .ok()?;
+            self.log.info(
+                "http.resume_integrity",
+                &format!("algorithm=blake3 rejected_blocks={rejected}"),
+            );
+            Some((blocks, identity, hashes))
         }
         .await;
         match &trusted {
-            Some((blocks, _)) => self.log.info(
+            Some((blocks, _, _)) => self.log.info(
                 "http.resume_partial",
                 &format!(
                     "blocks_done={} blocks_total={block_count}",
                     blocks.iter().filter(|done| **done).count()
                 ),
             ),
+            None if cancelled.load(Ordering::Acquire) => {}
             None => {
                 self.log.warn(
                     "http.resume_discarded",
@@ -1180,13 +1371,23 @@ impl Engine {
         let resumed = self
             .load_partial(
                 &parsed,
-                &part_path,
-                &state_path,
+                (&part_path, &state_path),
                 total,
                 block_count,
                 &origin,
+                cancelled.clone(),
             )
             .await;
+        if cancelled.load(Ordering::Acquire) {
+            bail!("cancelled");
+        }
+        let digests = Arc::new(
+            resumed
+                .as_ref()
+                .map_or_else(storage::integrity::BlockDigests::default, |r| {
+                    storage::integrity::BlockDigests::restored(r.2.clone(), &r.0)
+                }),
+        );
         let done_blocks: Arc<Vec<AtomicBool>> = Arc::new(
             (0..block_count)
                 .map(|index| AtomicBool::new(resumed.as_ref().is_some_and(|r| r.0[index])))
@@ -1238,6 +1439,12 @@ impl Engine {
             file.set_len(total)?;
         }
         let file = Arc::new(file);
+        let writer =
+            storage::writer::Writer::open(file.clone(), &part_path, self.portable_io).await;
+        self.log.info(
+            "http.storage_backend",
+            &format!("backend={}", writer.backend()),
+        );
         let mut checkpoints = if self.sync_interval_bytes > 0 {
             Some(storage::checkpoints::BackgroundSync::start(
                 file.clone(),
@@ -1278,12 +1485,20 @@ impl Engine {
             ),
         );
         let mut set = JoinSet::new();
-        let (adaptive_limit, _) = tokio::sync::watch::channel(workers);
+        let profile_key = self.profile_key(&parsed);
+        let initial_workers = if self.adaptive {
+            self.profiles.workers(&profile_key, workers)
+        } else {
+            workers
+        };
+        let (adaptive_limit, _) = tokio::sync::watch::channel(initial_workers);
         let active_ranges = Arc::new(AtomicU32::new(0));
-        let mut controller = self.adaptive.then(|| adaptive::Controller::new(workers));
+        let mut controller = self
+            .adaptive
+            .then(|| adaptive::Controller::with_initial(workers, initial_workers));
         if self.adaptive {
             self.log.info("http.adaptive_started", &format!(
-                "maximum_workers={workers} initial_workers={workers} window_ms=4000 sync_interval_bytes={}",
+                "maximum_workers={workers} initial_workers={initial_workers} window_ms=4000 sync_interval_bytes={}",
                 self.sync_interval_bytes,
             ));
         }
@@ -1314,12 +1529,14 @@ impl Engine {
             };
             let budget = budget.clone();
             let client = self.client.clone();
+            let version = self.version();
             let identity = identity.clone();
             let url = parsed.clone();
-            let file = file.clone();
+            let writer = writer.clone();
             let scheduler = scheduler.clone();
             let completed = completed.clone();
             let done_blocks = done_blocks.clone();
+            let digests = digests.clone();
             let cancelled = cancelled.clone();
             let metrics = metrics.clone();
             let log = self.log.clone();
@@ -1360,6 +1577,7 @@ impl Engine {
                     let requesting = Instant::now();
                     let mut request = client
                         .get(url.clone())
+                        .version(version)
                         .header(RANGE, format!("bytes={start}-{end}"));
                     let validator = {
                         let guard = identity
@@ -1420,6 +1638,7 @@ impl Engine {
                         reqwest::Version::HTTP_2 => {
                             metrics.http2_ranges.fetch_add(1, Ordering::Relaxed);
                         }
+                        reqwest::Version::HTTP_3 => { metrics.http3_ranges.fetch_add(1, Ordering::Relaxed); }
                         _ => {}
                     }
                     if start == 0 {
@@ -1470,11 +1689,12 @@ impl Engine {
                             if buffer.len() == RANGE_CHUNK_SIZE as usize {
                                 let block = std::mem::take(&mut buffer);
                                 let (wait, reused) = write_range_block(
-                                    file.clone(),
+                                    writer.clone(),
                                     start + written,
                                     block,
                                     completed.clone(),
                                     done_blocks.clone(),
+                            digests.clone(),
                                 )
                                 .await?;
                                 storage_wait_us += wait;
@@ -1504,11 +1724,12 @@ impl Engine {
                     }
                     if !buffer.is_empty() {
                         storage_wait_us += write_range_block(
-                            file.clone(),
+                            writer.clone(),
                             start + written,
                             std::mem::take(&mut buffer),
                             completed.clone(),
                             done_blocks.clone(),
+                            digests.clone(),
                         )
                         .await?.0;
                     }
@@ -1539,15 +1760,16 @@ impl Engine {
                         while set.join_next().await.is_some() {}
                         let _ = storage::checkpoints::finish(checkpoints.take()).await;
                         if let Some(saver) = saver.take() {
-                            saver.abort();
                             let _ = saver.await;
                         }
+                        writer.finish().await?;
                         suspend_partial(
                             file.clone(),
                             &part_path,
                             &state_path,
                             partial_template(&identity, total, &origin),
                             done_blocks.clone(),
+                            digests.clone(),
                         )
                         .await;
                         drop(file);
@@ -1593,6 +1815,7 @@ impl Engine {
                             state_path.clone(),
                             state,
                             done_blocks.clone(),
+                            digests.clone(),
                         )));
                     }
                     last_at = now;
@@ -1606,15 +1829,15 @@ impl Engine {
                             while set.join_next().await.is_some() {}
                             let checkpoint_result = storage::checkpoints::finish(checkpoints.take()).await;
                             if let Some(saver) = saver.take() {
-                                saver.abort();
-                                let _ = saver.await;
+                                    let _ = saver.await;
                             }
                             // A resource that changed under us cannot be resumed; anything else
                             // (a dropped connection) keeps the finished blocks for the next run.
                             let template = (!error.to_string().contains("resource identity changed"))
                                 .then(|| partial_template(&identity, total, &origin))
                                 .flatten();
-                            suspend_partial(file.clone(), &part_path, &state_path, template, done_blocks.clone()).await;
+                            writer.finish().await?;
+                            suspend_partial(file.clone(), &part_path, &state_path, template, done_blocks.clone(), digests.clone()).await;
                             drop(file);
                             checkpoint_result?;
                             return Err(error);
@@ -1624,15 +1847,16 @@ impl Engine {
                             while set.join_next().await.is_some() {}
                             let checkpoint_result = storage::checkpoints::finish(checkpoints.take()).await;
                             if let Some(saver) = saver.take() {
-                                saver.abort();
-                                let _ = saver.await;
+                                    let _ = saver.await;
                             }
+                            writer.finish().await?;
                             suspend_partial(
                                 file.clone(),
                                 &part_path,
                                 &state_path,
                                 partial_template(&identity, total, &origin),
                                 done_blocks.clone(),
+                            digests.clone(),
                             )
                             .await;
                             drop(file);
@@ -1646,18 +1870,19 @@ impl Engine {
         }
 
         if let Some(saver) = saver.take() {
-            saver.abort();
             let _ = saver.await;
         }
         let done = completed.load(Ordering::Acquire);
         if done != total {
             let checkpoint_result = storage::checkpoints::finish(checkpoints.take()).await;
+            writer.finish().await?;
             suspend_partial(
                 file.clone(),
                 &part_path,
                 &state_path,
                 partial_template(&identity, total, &origin),
                 done_blocks.clone(),
+                digests.clone(),
             )
             .await;
             drop(file);
@@ -1687,12 +1912,14 @@ impl Engine {
         let checkpoint_stats = match storage::checkpoints::finish(checkpoints.take()).await {
             Ok(stats) => stats,
             Err(error) => {
+                writer.finish().await?;
                 suspend_partial(
                     file.clone(),
                     &part_path,
                     &state_path,
                     partial_template(&identity, total, &origin),
                     done_blocks.clone(),
+                    digests.clone(),
                 )
                 .await;
                 drop(file);
@@ -1706,6 +1933,7 @@ impl Engine {
                 .warn("http.storage_sparse_finish", &format!("error={error}"));
         }
         let syncing = Instant::now();
+        writer.finish().await?;
         file.sync_all()?;
         let sync_ms = syncing.elapsed().as_millis();
         let closing = Instant::now();
@@ -1753,7 +1981,32 @@ impl Engine {
                 controller.as_ref().map_or(workers, adaptive::Controller::target),
             ),
         );
+        self.profiles.learn(
+            profile_key,
+            controller
+                .as_ref()
+                .map_or(workers, adaptive::Controller::target),
+            total.saturating_sub(resumed_bytes),
+            transfer_ms,
+            !self.limiters.is_empty() || budget.limit() < workers,
+        );
         Ok(())
+    }
+
+    fn profile_key(&self, url: &Url) -> String {
+        // Hints are scoped to both the request context and local route. No
+        // hostname, signed URL, credential or address is written to disk.
+        let route = std::net::UdpSocket::bind("0.0.0.0:0")
+            .ok()
+            .and_then(|s| {
+                s.connect("192.0.2.1:9").ok()?;
+                s.local_addr().ok().map(|a| a.ip().to_string())
+            })
+            .unwrap_or_default();
+        format!(
+            "{:x}",
+            Sha256::digest(format!("{}|{route}", self.origin_budget_key(url)))
+        )
     }
 
     pub async fn probe(&self, url: &str) -> Result<(Option<u64>, bool)> {
@@ -1781,7 +2034,6 @@ impl Engine {
         }
 
         let head = self
-            .client
             .head(parsed.clone())
             .send()
             .await
@@ -1812,7 +2064,6 @@ impl Engine {
                 return Ok((total, true));
             }
             let mut probe = self
-                .client
                 .get(parsed)
                 .header(RANGE, "bytes=0-0")
                 .send()
@@ -1844,7 +2095,7 @@ impl Engine {
     }
 }
 
-fn prefix_total(response: &reqwest::Response) -> Result<u64> {
+fn prefix_total(response: &reqwest::Response, requested: u64) -> Result<u64> {
     let raw = response
         .headers()
         .get(CONTENT_RANGE)
@@ -1856,7 +2107,7 @@ fn prefix_total(response: &reqwest::Response) -> Result<u64> {
         .1
         .parse::<u64>()?;
     anyhow::ensure!(total > 0, "empty partial response");
-    let length = total.min(RANGE_CHUNK_SIZE);
+    let length = total.min(requested);
     validate_content_range(response.headers().get(CONTENT_RANGE), 0, length - 1, total)?;
     anyhow::ensure!(
         response.content_length().is_none_or(|n| n == length),
@@ -2066,4 +2317,11 @@ mod tests {
         assert!(validate_content_range(Some(&value), 0, 1023, 4096).is_ok());
         assert!(validate_content_range(Some(&value), 0, 1022, 4096).is_err());
     }
+}
+
+#[cfg(feature = "http3")]
+fn environment_proxy() -> bool {
+    ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"]
+        .iter()
+        .any(|key| std::env::var_os(key).is_some_and(|v| !v.is_empty()))
 }

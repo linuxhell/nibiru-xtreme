@@ -1,4 +1,4 @@
-//! Bounded, opt-in concurrency experiments; no learned capacity guarantee.
+//! Bounded concurrency experiments within the caller's connection limit.
 use std::sync::{
     Arc,
     atomic::{AtomicU32, Ordering},
@@ -39,10 +39,15 @@ pub(super) struct Controller {
 }
 
 impl Controller {
+    #[cfg(test)]
     pub fn new(maximum: usize) -> Self {
+        Self::with_initial(maximum, maximum)
+    }
+
+    pub fn with_initial(maximum: usize, initial: usize) -> Self {
         Self {
             maximum,
-            target: maximum,
+            target: initial.clamp(1, maximum),
             phase: Phase::Baseline,
             window_ms: 0,
             window_bytes: 0,
@@ -109,6 +114,15 @@ impl Controller {
         self.reset_window(now_ms, written);
         match self.phase {
             Phase::Baseline => {
+                if self.target <= 2 && self.target < self.maximum {
+                    let next = (self.target * 2).min(self.maximum);
+                    self.phase = Phase::Trial {
+                        previous: self.target,
+                        reference: rate,
+                        increasing: true,
+                    };
+                    return Some(self.decision(next, rate, rate, "probe_more"));
+                }
                 let next = (self.target / 2).max(2);
                 if next >= self.target {
                     self.phase = Phase::Hold { until_ms: u64::MAX };
@@ -305,5 +319,16 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(active.load(Ordering::Acquire), 0);
+    }
+}
+
+#[cfg(test)]
+mod profile_regression {
+    #[test]
+    fn small_learned_limit_can_grow_when_network_capacity_changes() {
+        let mut controller = super::Controller::with_initial(16, 1);
+        let decision = controller.observe(4000, 32 << 20, 1, u64::MAX).unwrap();
+        assert_eq!(decision.target, 2);
+        assert_eq!(decision.reason, "probe_more");
     }
 }
