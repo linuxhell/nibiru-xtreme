@@ -54,6 +54,11 @@ $version = (& $Nibiru --version | Out-String).Trim()
 if ($LASTEXITCODE -ne 0) { throw "Could not read engine version" }
 Write-Host ("Version: {0}" -f $version)
 Write-Host ("Sync interval: {0} MiB (0 = final only)" -f $SyncIntervalMiB)
+# Detect the explicit fixed-mode flag before timing. This keeps comparisons
+# reproducible with both older opt-in and newer default-adaptive engines.
+$downloadHelp = (& $Nibiru download --help | Out-String)
+if ($LASTEXITCODE -ne 0) { throw "Could not read download capabilities" }
+$fixedModeSupported = $downloadHelp -match '--fixed-connections'
 
 $logOffset = 0L
 if (Test-Path -LiteralPath $LogFile) { $logOffset = (Get-Item -LiteralPath $LogFile).Length }
@@ -61,6 +66,7 @@ $started = [System.Diagnostics.Stopwatch]::StartNew()
 $downloadArgs = @("download", $Url, "--out", $Output, "--log", $LogFile, "--sync-interval-mib", "$SyncIntervalMiB")
 if ($Http1Only) { $downloadArgs += "--http1-only" }
 if ($Adaptive) { $downloadArgs += "--adaptive" }
+elseif ($fixedModeSupported) { $downloadArgs += "--fixed-connections" }
 & $Nibiru @downloadArgs
 $started.Stop()
 if ($LASTEXITCODE -ne 0) {
@@ -104,8 +110,9 @@ $summaryPath = $SummaryFile
 $summary = [ordered]@{
     completed_utc = [DateTime]::UtcNow.ToString("o")
     engine_version = $version
-    http_mode = $(if ($Http1Only) { "http1-only" } else { "auto-h2-window16m" })
+    http_mode = $(if ($Http1Only) { "http1-only" } else { "auto-http" })
     sync_interval_mib = $SyncIntervalMiB
+    storage_backend = ($records | Where-Object { $_.event -eq "http.storage_backend" } | Select-Object -Last 1 | ForEach-Object { $_.detail -replace '^backend=', '' })
     adaptive = [bool]$Adaptive
     adaptive_started = @($records | Where-Object { $_.event -eq "http.adaptive_started" }).Count -gt 0
     adaptive_decision_count = $adaptiveChanges
