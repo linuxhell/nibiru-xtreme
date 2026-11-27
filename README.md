@@ -2,7 +2,7 @@
 
 # Nibiru Xtreme
 
-Versão 0.2.9: corrige arquivos desmarcados de torrents, reduz pedidos HTTP com faixas de até 128 MiB e adiciona um comparativo Windows com IDM. Buffers continuam em 4 MiB por worker. Veja a [auditoria e medições](docs/AUDIT-2026-11-25.md).
+Versão 0.3.0: HTTP/3 automático com fallback para HTTP/2/1.1, aprendizado de conexões por origem, escrita assíncrona IOCP/io_uring quando disponível e retomada de blocos verificada com BLAKE3. Veja [implementação, testes e limites](docs/UPGRADE-2026-11-27.md).
 
 A versão 0.2.8 aproveita o primeiro GET, respeita Retry-After em 429/503, aprende temporariamente limites por origem e recupera ranges interrompidos mantendo blocos concluídos. Reutiliza buffers e prepara arquivos esparsos no Windows. O slider de threads prevalece sobre o padrão por tamanho. Veja a [implementação, testes e limites](docs/HTTP-0.2.8.md) e a [auditoria do MDM](docs/MDM-AUDIT-2026-11-10.md).
 
@@ -24,7 +24,7 @@ O HTTPS usa as raízes públicas e os certificados confiáveis do sistema, mante
 
 ## Estado
 
-**Versão 0.2.9.** Motor nativo do Apocalipse Download Manager, distribuído para Windows, Linux e macOS com arquivos SHA-256.
+**Versão 0.3.0.** Motor nativo do Apocalipse Download Manager, distribuído para Windows, Linux e macOS com arquivos SHA-256.
 
 A prévia ED2K não depende de chegar a 30 ou 40 MB no total: o ADM libera o botão quando a primeira parte está autenticada por MD4 (até 9.728.000 bytes). Outros peers ajudam a terminar o início e o fim do arquivo antes das partes do meio, evitando que um peer lento retenha a prévia. MP4/AVI podem precisar também do índice no fim; trechos ainda ausentes aguardam dados, sem fornecer buracos do arquivo ao player.
 

@@ -380,7 +380,16 @@ impl RpcServer {
         let options_at = |index: usize| params.get(index).and_then(Value::as_object);
         match method {
             "aria2.getVersion" | "nibiru.getVersion" => {
-                let mut features = vec!["HTTP", "HTTPS", "HTTP/2", "WebDAV-GET", "RPC", "Resume"];
+                let mut features = vec![
+                    "HTTP",
+                    "HTTPS",
+                    "HTTP/2",
+                    "WebDAV-GET",
+                    "RPC",
+                    "Resume",
+                    "BLAKE3-Partial-Integrity",
+                    "Origin-Capacity-Profiles",
+                ];
                 if self.bt.is_some() {
                     features.extend([
                         "BitTorrent",
@@ -419,7 +428,7 @@ impl RpcServer {
                     features.push("SFTP");
                 }
                 if cfg!(feature = "http3") {
-                    features.push("HTTP/3-explicit");
+                    features.extend(["HTTP/3-explicit", "HTTP/3-auto"]);
                 }
                 Ok(json!({"version":VERSION,"enabledFeatures":features}))
             }

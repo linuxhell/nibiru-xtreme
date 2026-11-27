@@ -2,6 +2,8 @@ use anyhow::{Result, anyhow};
 use std::{fs::File, io, sync::Arc};
 
 pub(crate) mod checkpoints;
+pub(crate) mod integrity;
+pub(crate) mod writer;
 
 pub async fn write_at<D>(file: Arc<File>, offset: u64, data: D) -> Result<()>
 where
