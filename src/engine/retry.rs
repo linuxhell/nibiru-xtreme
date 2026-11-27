@@ -76,19 +76,46 @@ pub(super) async fn range_response_limited(
     worker: usize,
     budget: Option<&Arc<Budget>>,
 ) -> Result<(Response, Option<Permit>)> {
+    range_response_seeded(request, log, worker, budget, None).await
+}
+
+/// Apply the same refusal/backoff policy to the winning raced response, without
+/// repeating a successful GET or keeping the losing transport alive.
+pub(super) async fn range_response_with_initial(
+    request: RequestBuilder,
+    initial: Response,
+    log: &LogSink,
+    worker: usize,
+) -> Result<Response> {
+    range_response_seeded(request, log, worker, None, Some(initial))
+        .await
+        .map(|(response, _)| response)
+}
+
+async fn range_response_seeded(
+    request: RequestBuilder,
+    log: &LogSink,
+    worker: usize,
+    budget: Option<&Arc<Budget>>,
+    mut initial: Option<Response>,
+) -> Result<(Response, Option<Permit>)> {
     for attempt in 0..=MAX_RETRIES {
         let permit = if let Some(budget) = budget {
             Some(budget.enter().await)
         } else {
             None
         };
-        let response = request
-            .try_clone()
-            .ok_or_else(|| anyhow!("range GET cannot be retried"))?
-            .send()
-            .await
-            .map_err(reqwest::Error::without_url)
-            .with_context(|| format!("range worker {worker} request failed"))?;
+        let response = if let Some(response) = initial.take() {
+            response
+        } else {
+            request
+                .try_clone()
+                .ok_or_else(|| anyhow!("range GET cannot be retried"))?
+                .send()
+                .await
+                .map_err(reqwest::Error::without_url)
+                .with_context(|| format!("range worker {worker} request failed"))?
+        };
         let status = response.status();
         if !matches!(
             status,

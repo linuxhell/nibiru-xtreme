@@ -666,6 +666,27 @@ impl Engine {
         self
     }
 
+    fn bandwidth_limited(&self) -> bool {
+        self.limiters.iter().any(|limiter| limiter.rate() > 0)
+    }
+
+    fn record_capacity(
+        &self,
+        key: String,
+        workers: usize,
+        bytes: u64,
+        millis: u128,
+        limited: bool,
+    ) {
+        self.profiles.learn(
+            key,
+            workers,
+            bytes,
+            millis,
+            limited || self.bandwidth_limited(),
+        );
+    }
+
     async fn throttle(limiters: &[Arc<RateLimiter>], bytes: usize) {
         for limiter in limiters {
             limiter.acquire(bytes as u64).await;
@@ -771,7 +792,28 @@ impl Engine {
                         .map_err(reqwest::Error::without_url)
                         .map_err(Into::into)
                     };
-                    transport::compete(h3, retry::range_response(tcp, &self.log, 0)).await
+                    let tcp = async {
+                        tcp.send()
+                            .await
+                            .map_err(reqwest::Error::without_url)
+                            .map_err(Into::into)
+                    };
+                    let (initial, used_h3) = transport::compete(h3, tcp).await?;
+                    let (client, version) = if used_h3 {
+                        (client, reqwest::Version::HTTP_3)
+                    } else {
+                        (&self.client, reqwest::Version::HTTP_11)
+                    };
+                    // Both transports expose the first headers to the race. Once
+                    // selected, respect 429/503 before issuing another request.
+                    let response = retry::range_response_with_initial(
+                        build(client, version),
+                        initial,
+                        &self.log,
+                        0,
+                    )
+                    .await?;
+                    Ok((response, used_h3))
                 } else {
                     retry::range_response(tcp, &self.log, 0)
                         .await
@@ -1361,6 +1403,7 @@ impl Engine {
     where
         F: FnMut(Progress) + Send,
     {
+        let mut rate_limited = self.bandwidth_limited();
         let started = first.as_ref().map(|f| f.1).unwrap_or_else(Instant::now);
         let workers = self.connection_count(total);
         let (part_path, state_path) = partial_paths(destination);
@@ -1755,6 +1798,7 @@ impl Engine {
         while !set.is_empty() {
             tokio::select! {
                 _ = ticker.tick() => {
+                    rate_limited |= self.bandwidth_limited();
                     if cancelled.load(Ordering::Acquire) {
                         set.abort_all();
                         while set.join_next().await.is_some() {}
@@ -1981,14 +2025,14 @@ impl Engine {
                 controller.as_ref().map_or(workers, adaptive::Controller::target),
             ),
         );
-        self.profiles.learn(
+        self.record_capacity(
             profile_key,
             controller
                 .as_ref()
                 .map_or(workers, adaptive::Controller::target),
             total.saturating_sub(resumed_bytes),
             transfer_ms,
-            !self.limiters.is_empty() || budget.limit() < workers,
+            rate_limited || budget.limit() < workers,
         );
         Ok(())
     }
@@ -2324,4 +2368,23 @@ fn environment_proxy() -> bool {
     ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"]
         .iter()
         .any(|key| std::env::var_os(key).is_some_and(|v| !v.is_empty()))
+}
+
+#[cfg(test)]
+mod capacity_limiter_regression {
+    use super::*;
+    #[test]
+    fn unlimited_rpc_buckets_allow_learning_and_active_limits_do_not() {
+        let task = Arc::new(RateLimiter::new(0));
+        let global = Arc::new(RateLimiter::new(0));
+        let engine = Engine::new(Arc::new(LogSink::new(None).unwrap()))
+            .unwrap()
+            .with_limiters(vec![task.clone(), global]);
+        let key = "a".repeat(64);
+        engine.record_capacity(key.clone(), 8, 128 << 20, 5000, false);
+        assert_eq!(engine.profiles.workers(&key, 16), 8);
+        task.set_rate(10 << 20);
+        engine.record_capacity(key.clone(), 4, 128 << 20, 4000, false);
+        assert_eq!(engine.profiles.workers(&key, 16), 8);
+    }
 }

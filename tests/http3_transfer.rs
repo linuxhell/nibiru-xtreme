@@ -128,6 +128,15 @@ async fn http3_does_not_silently_use_plain_http() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn automatic_http3_reuses_initial_range_for_the_segmented_payload() {
+    automatic_case(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn automatic_http3_respects_retry_after_before_repeating_the_initial_get() {
+    automatic_case(true).await;
+}
+
+async fn automatic_case(throttled: bool) {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let root = tempfile::tempdir().unwrap();
     let certified = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
@@ -174,8 +183,23 @@ async fn automatic_http3_reuses_initial_range_for_the_segmented_payload() {
                 while let Ok(Some(resolver)) = server.accept().await {
                     let (request, mut stream) = resolver.resolve_request().await.unwrap();
                     let source = source.clone();
-                    counted.fetch_add(1, Ordering::Relaxed);
+                    let request_index = counted.fetch_add(1, Ordering::Relaxed);
                     tokio::spawn(async move {
+                        if throttled && request_index == 0 {
+                            stream
+                                .send_response(
+                                    http::Response::builder()
+                                        .status(503)
+                                        .header("content-length", 0)
+                                        .header("retry-after", "1")
+                                        .body(())
+                                        .unwrap(),
+                                )
+                                .await
+                                .unwrap();
+                            stream.finish().await.unwrap();
+                            return;
+                        }
                         assert_eq!(request.method(), "GET");
                         let range = request.headers()["range"]
                             .to_str()
@@ -208,6 +232,7 @@ async fn automatic_http3_reuses_initial_range_for_the_segmented_payload() {
     });
     let destination = root.path().join("result.bin");
     let log = root.path().join("events.jsonl");
+    let started = std::time::Instant::now();
     let result = tokio::time::timeout(
         Duration::from_secs(15),
         tokio::process::Command::new(env!("CARGO_BIN_EXE_nibiru-xtreme"))
@@ -241,9 +266,14 @@ async fn automatic_http3_reuses_initial_range_for_the_segmented_payload() {
     assert!(log.contains("http3_ranges=3"));
     assert_eq!(
         requests.load(Ordering::Relaxed),
-        3,
+        if throttled { 4 } else { 3 },
         "the initial winning range must be reused without HEAD or duplicate GET"
     );
+    if throttled {
+        assert!(started.elapsed() >= Duration::from_millis(950));
+        assert!(log.contains("http.range_retry"));
+        assert!(log.contains("status=503"));
+    }
     fixture.abort();
     endpoint.close(0u32.into(), b"done");
 }
